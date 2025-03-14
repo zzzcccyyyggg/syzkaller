@@ -27,3 +27,5 @@ dashboard/app/.gcloudignore
 
 # vscode
 .vscode
+
+/test

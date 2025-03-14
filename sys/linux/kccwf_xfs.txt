@@ -1,0 +1,37 @@
+# syzkaller/kccwf/linux/xfs.txt
+
+# 基础文件操作
+open$xfs(file ptr[in, string["/mnt/xfs/test_file_%3d"]], flags flags[open_flags], mode flags[open_mode]) fd
+read$xfs(fd fd, buf ptr[out, array[int8]], count len[buf])
+write$xfs(fd fd, buf ptr[in, array[int8]], count len[buf])
+close$xfs(fd fd)
+
+# 目录操作
+mkdir$xfs(path ptr[in, string["/mnt/xfs/dir_%d"]], mode flags[open_mode])
+rmdir$xfs(path ptr[in, string["/mnt/xfs/dir_%d"]])
+getdents$xfs(fd fd, buf ptr[out, array[int8]], count len[buf])
+
+# 文件元数据
+chmod$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], mode flags[open_mode])
+chown$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], uid int32, gid int32)
+utimes$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], times ptr[in, timeval])
+
+# 高级文件操作
+rename$xfs(old ptr[in, string["/mnt/xfs/old_%d"]], new ptr[in, string["/mnt/xfs/new_%03d"]])
+truncate$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], length intptr)
+fallocate$xfs(fd fd, mode flags[fallocate_mode], offset intptr, len intptr)
+
+# 链接操作
+link$xfs(oldpath ptr[in, string["/mnt/xfs/file%03d"]], newpath ptr[in, string["/mnt/xfs/hardlink_%d"]])
+unlink$xfs(path ptr[in, string["/mnt/xfs/file%03d"]])
+symlink$xfs(target ptr[in, string["/mnt/xfs/target_%d"]], linkpath ptr[in, string["/mnt/xfs/symlink_%03d"]])
+
+# 扩展属性 (修正指针参数)
+setxattr$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+fsetxattr$xfs(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+
+# 文件状态获取 (修正指针嵌套)
+stat$xfs(path ptr[in, string["/mnt/xfs/file%03d"]], buf ptr[out, stat_buffer])
+fstat$xfs(fd fd, buf ptr[out, stat_buffer])

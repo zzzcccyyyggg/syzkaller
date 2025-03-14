@@ -1,0 +1,89 @@
+# syzkaller/sys/linux/btrfs_ioctl.txt
+
+# 核心资源定义
+resource transid[int64]
+resource devid[int64]
+resource treeid[int64]
+resource dirid[int64]
+resource subvolid[int64]
+
+# 路径模板定义
+define BTRFS_BASE_PATH		"/mnt/btrfs"
+define BTRFS_SUBVOL_NAME	BTRFS_BASE_PATH + "/subvol_%d"
+define BTRFS_SNAP_NAME		BTRFS_BASE_PATH + "/snap_%03d"
+define BTRFS_DEVICE_PATH	BTRFS_BASE_PATH + "/dev_%02d"
+
+# 子卷操作
+ioctl$BTRFS_IOC_SUBVOL_CREATE(fd fd, cmd const[BTRFS_IOC_SUBVOL_CREATE], arg ptr[in, btrfs_vol_args]) {
+    name: string[BTRFS_SUBVOL_NAME]
+}
+
+ioctl$BTRFS_IOC_SUBVOL_CREATE_V2(fd fd, cmd const[BTRFS_IOC_SUBVOL_CREATE_V2], arg ptr[in, btrfs_vol_args_v2]) {
+    name: string[BTRFS_SUBVOL_NAME]
+}
+
+# 快照操作
+ioctl$BTRFS_IOC_SNAP_CREATE(fd fd, cmd const[BTRFS_IOC_SNAP_CREATE], arg ptr[in, btrfs_vol_args]) {
+    name: string[BTRFS_SNAP_NAME]
+}
+
+ioctl$BTRFS_IOC_SNAP_CREATE_V2(fd fd, cmd const[BTRFS_IOC_SNAP_CREATE_V2], arg ptr[in, btrfs_vol_args_v2]) {
+    name: string[BTRFS_SNAP_NAME]
+}
+
+# 设备管理
+ioctl$BTRFS_IOC_ADD_DEV(fd fd, cmd const[BTRFS_IOC_ADD_DEV], arg ptr[in, btrfs_vol_args]) {
+    name: string[BTRFS_DEVICE_PATH]
+}
+
+ioctl$BTRFS_IOC_RM_DEV_V2(fd fd, cmd const[BTRFS_IOC_RM_DEV_V2], arg ptr[in, btrfs_vol_args_v2]) {
+    name: string[BTRFS_DEVICE_PATH]
+}
+
+# 配额控制
+ioctl$BTRFS_IOC_QGROUP_CREATE(fd fd, cmd const[BTRFS_IOC_QGROUP_CREATE], arg ptr[in, qgroup_create_args]) {
+    qgroupid: subvolid
+}
+
+ioctl$BTRFS_IOC_QGROUP_LIMIT(fd fd, cmd const[BTRFS_IOC_QGROUP_LIMIT], arg ptr[in, qgroup_limit_args]) {
+    qgroupid: subvolid
+}
+
+# 数据结构定义
+btrfs_vol_args {
+    name: string[BTRFS_PATH_MAX]  # 路径长度限制
+    fd: align64[fd]
+} [packed]
+
+btrfs_vol_args_v2 {
+    name: string[BTRFS_SUBVOL_NAME]
+    transid: transid
+    flags: flags[btrfs_subvol_flags, int64]
+    qgroup_inherit: ptr[in, btrfs_qgroup_inherit] (if[flags & BTRFS_SUBVOL_QGROUP_INHERIT])
+} [packed]
+
+btrfs_qgroup_inherit {
+    flags: flags[btrfs_qgroup_flags, int64]
+    qgroups: array[subvolid]
+}
+
+# 标志位定义
+btrfs_subvol_flags = BTRFS_SUBVOL_RDONLY, BTRFS_SUBVOL_QGROUP_INHERIT
+btrfs_qgroup_flags = BTRFS_QGROUP_LIMIT_MAX_RFER, BTRFS_QGROUP_LIMIT_MAX_EXCL
+
+# 路径验证规则
+validate path {
+    # 强制路径前缀检查
+    prefix: "/mnt/btrfs/"
+    max_length: BTRFS_PATH_MAX
+    patterns: [
+        "subvol_*",
+        "snap_*",
+        "dev_*"
+    ]
+}
+
+# 元数据定义
+meta noextract
+meta arches["amd64", "arm64"]
+meta btrfs_specific
