@@ -1,0 +1,65 @@
+# syzkaller/kccwf/linux/nilfs2.txt
+
+# ------------------ 基础文件操作 ------------------
+open$nilfs2(file ptr[in, string["/mnt/nilfs2/test_file_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$nilfs2(fd fd, file ptr[in, string["/mnt/nilfs2/test_file_at_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$create_nilfs2(fd fd, file ptr[in, string["/mnt/nilfs2/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+open$create_nilfs2(file ptr[in, string["/mnt/nilfs2/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+creat$nilfs2(file ptr[in, string["/mnt/nilfs2/create_file_%d"]], mode flags[open_mode]) fd
+read$nilfs2(fd fd, buf ptr[out, array[int8]], count len[buf])
+write$nilfs2(fd fd, buf ptr[in, array[int8]], count len[buf])
+writev$nilfs2(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec])
+fsync$nilfs2(fd fd)
+sync$nilfs2()
+
+# ------------------ 目录操作 ------------------
+mkdir$nilfs2(path ptr[in, string["/mnt/nilfs2/dir_%d"]], mode flags[open_mode])
+mkdirat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/dir_at_%d"]], mode flags[open_mode])
+rmdir$nilfs2(path ptr[in, string["/mnt/nilfs2/dir_%d"]])
+getdents$nilfs2(fd fd, buf ptr[out, array[int8]], count len[buf])
+
+# ------------------ 文件元数据 ------------------
+chmod$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], mode flags[open_mode])
+fchmod$nilfs2(fd fd, mode flags[open_mode])
+fchmodat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/file%03d"]], mode flags[open_mode], flag int32)
+
+chown$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], uid int32, gid int32)
+fchown$nilfs2(fd fd, uid int32, gid int32)
+lchown$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], uid int32, gid int32)
+fchownat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/file%03d"]], uid int32, gid int32, flags flags[at_flags])
+
+utime$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], times ptr[in, utimbuf])
+utimes$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], times ptr[in, timeval])
+futimesat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/file%03d"]], times ptr[in, timeval])
+utimensat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/file%03d"]], times ptr[in, timespec], flags flags[at_flags])
+
+# ------------------ 文件扩展 ------------------
+truncate$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], length intptr)
+ftruncate$nilfs2(fd fd, length intptr)
+fallocate$nilfs2(fd fd, mode flags[fallocate_mode], offset intptr, len intptr)
+
+# ------------------ 链接操作 ------------------
+link$nilfs2(oldpath ptr[in, string["/mnt/nilfs2/file%03d"]], newpath ptr[in, string["/mnt/nilfs2/hardlink_%d"]])
+unlink$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]])
+symlink$nilfs2(target ptr[in, string["/mnt/nilfs2/target_%d"]], linkpath ptr[in, string["/mnt/nilfs2/symlink_%03d"]])
+symlinkat$nilfs2(target ptr[in, string["/mnt/nilfs2/target_%d"]], newdirfd fd, linkpath ptr[in, string["/mnt/nilfs2/symlinkat_%03d"]])
+readlink$nilfs2(path ptr[in, string["/mnt/nilfs2/symlink_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+readlinkat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/symlinkat_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+rename$nilfs2(oldpath ptr[in, string["/mnt/nilfs2/old_%03d"]], newpath ptr[in, string["/mnt/nilfs2/new_%03d"]])
+
+# ------------------ 特殊文件创建 ------------------
+mknod$nilfs2(path ptr[in, string["/mnt/nilfs2/nod_%03d"]], mode flags[mknod_mode], dev int32)
+mknodat$nilfs2(fd fd, path ptr[in, string["/mnt/nilfs2/nodat_%03d"]], mode flags[mknod_mode], dev int32)
+
+# ------------------ 扩展属性操作 ------------------
+setxattr$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+lsetxattr$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsetxattr$nilfs2(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+# ------------------ 状态查询 ------------------
+stat$nilfs2(path ptr[in, string["/mnt/nilfs2/file%03d"]], buf ptr[out, stat_buffer])
+fstat$nilfs2(fd fd, buf ptr[out, stat_buffer])
+
+# ------------------ 文件锁 & ioctl ------------------
+fcntl$getlk_nilfs2(fd fd, cmd const[F_GETLK], lock ptr[inout, flock])
+ioctl$nilfs2(fd fd, cmd int32, arg intptr)

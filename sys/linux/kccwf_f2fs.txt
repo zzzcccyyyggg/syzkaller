@@ -1,0 +1,65 @@
+# syzkaller/kccwf/linux/f2fs.txt
+
+# ------------------ 基础文件操作 ------------------
+open$f2fs(file ptr[in, string["/mnt/f2fs/test_file_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$f2fs(fd fd, file ptr[in, string["/mnt/f2fs/test_file_at_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$create_f2fs(fd fd, file ptr[in, string["/mnt/f2fs/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+open$create_f2fs(file ptr[in, string["/mnt/f2fs/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+creat$f2fs(file ptr[in, string["/mnt/f2fs/create_file_%d"]], mode flags[open_mode]) fd
+read$f2fs(fd fd, buf ptr[out, array[int8]], count len[buf])
+write$f2fs(fd fd, buf ptr[in, array[int8]], count len[buf])
+writev$f2fs(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec])
+fsync$f2fs(fd fd)
+sync$f2fs()
+
+# ------------------ 目录操作 ------------------
+mkdir$f2fs(path ptr[in, string["/mnt/f2fs/dir_%d"]], mode flags[open_mode])
+mkdirat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/dir_at_%d"]], mode flags[open_mode])
+rmdir$f2fs(path ptr[in, string["/mnt/f2fs/dir_%d"]])
+getdents$f2fs(fd fd, buf ptr[out, array[int8]], count len[buf])
+
+# ------------------ 文件元数据 ------------------
+chmod$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], mode flags[open_mode])
+fchmod$f2fs(fd fd, mode flags[open_mode])
+fchmodat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/file%03d"]], mode flags[open_mode], flag int32)
+
+chown$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], uid int32, gid int32)
+fchown$f2fs(fd fd, uid int32, gid int32)
+lchown$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], uid int32, gid int32)
+fchownat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/file%03d"]], uid int32, gid int32, flags flags[at_flags])
+
+utime$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], times ptr[in, utimbuf])
+utimes$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], times ptr[in, timeval])
+futimesat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/file%03d"]], times ptr[in, timeval])
+utimensat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/file%03d"]], times ptr[in, timespec], flags flags[at_flags])
+
+# ------------------ 文件扩展 ------------------
+truncate$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], length intptr)
+ftruncate$f2fs(fd fd, length intptr)
+fallocate$f2fs(fd fd, mode flags[fallocate_mode], offset intptr, len intptr)
+
+# ------------------ 链接操作 ------------------
+link$f2fs(oldpath ptr[in, string["/mnt/f2fs/file%03d"]], newpath ptr[in, string["/mnt/f2fs/hardlink_%d"]])
+unlink$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]])
+symlink$f2fs(target ptr[in, string["/mnt/f2fs/target_%d"]], linkpath ptr[in, string["/mnt/f2fs/symlink_%03d"]])
+symlinkat$f2fs(target ptr[in, string["/mnt/f2fs/target_%d"]], newdirfd fd, linkpath ptr[in, string["/mnt/f2fs/symlinkat_%03d"]])
+readlink$f2fs(path ptr[in, string["/mnt/f2fs/symlink_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+readlinkat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/symlinkat_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+rename$f2fs(oldpath ptr[in, string["/mnt/f2fs/old_%03d"]], newpath ptr[in, string["/mnt/f2fs/new_%03d"]])
+
+# ------------------ 特殊文件创建 ------------------
+mknod$f2fs(path ptr[in, string["/mnt/f2fs/nod_%03d"]], mode flags[mknod_mode], dev int32)
+mknodat$f2fs(fd fd, path ptr[in, string["/mnt/f2fs/nodat_%03d"]], mode flags[mknod_mode], dev int32)
+
+# ------------------ 扩展属性操作 ------------------
+setxattr$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+lsetxattr$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsetxattr$f2fs(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+# ------------------ 状态查询 ------------------
+stat$f2fs(path ptr[in, string["/mnt/f2fs/file%03d"]], buf ptr[out, stat_buffer])
+fstat$f2fs(fd fd, buf ptr[out, stat_buffer])
+
+# ------------------ 文件锁 & ioctl ------------------
+fcntl$getlk_f2fs(fd fd, cmd const[F_GETLK], lock ptr[inout, flock])
+ioctl$f2fs(fd fd, cmd int32, arg intptr)

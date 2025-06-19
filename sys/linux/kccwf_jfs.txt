@@ -1,0 +1,65 @@
+# syzkaller/kccwf/linux/jfs.txt
+
+# ------------------ 基础文件操作 ------------------
+open$jfs(file ptr[in, string["/mnt/jfs/test_file_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$jfs(fd fd, file ptr[in, string["/mnt/jfs/test_file_at_%d"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$create_jfs(fd fd, file ptr[in, string["/mnt/jfs/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+open$create_jfs(file ptr[in, string["/mnt/jfs/create_file_%d"]], flags const[O_CREAT], mode flags[open_mode]) fd
+creat$jfs(file ptr[in, string["/mnt/jfs/create_file_%d"]], mode flags[open_mode]) fd
+read$jfs(fd fd, buf ptr[out, array[int8]], count len[buf])
+write$jfs(fd fd, buf ptr[in, array[int8]], count len[buf])
+writev$jfs(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec])
+fsync$jfs(fd fd)
+sync$jfs()
+
+# ------------------ 目录操作 ------------------
+mkdir$jfs(path ptr[in, string["/mnt/jfs/dir_%d"]], mode flags[open_mode])
+mkdirat$jfs(fd fd, path ptr[in, string["/mnt/jfs/dir_at_%d"]], mode flags[open_mode])
+rmdir$jfs(path ptr[in, string["/mnt/jfs/dir_%d"]])
+getdents$jfs(fd fd, buf ptr[out, array[int8]], count len[buf])
+
+# ------------------ 文件元数据 ------------------
+chmod$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], mode flags[open_mode])
+fchmod$jfs(fd fd, mode flags[open_mode])
+fchmodat$jfs(fd fd, path ptr[in, string["/mnt/jfs/file%03d"]], mode flags[open_mode], flag int32)
+
+chown$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], uid int32, gid int32)
+fchown$jfs(fd fd, uid int32, gid int32)
+lchown$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], uid int32, gid int32)
+fchownat$jfs(fd fd, path ptr[in, string["/mnt/jfs/file%03d"]], uid int32, gid int32, flags flags[at_flags])
+
+utime$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], times ptr[in, utimbuf])
+utimes$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], times ptr[in, timeval])
+futimesat$jfs(fd fd, path ptr[in, string["/mnt/jfs/file%03d"]], times ptr[in, timeval])
+utimensat$jfs(fd fd, path ptr[in, string["/mnt/jfs/file%03d"]], times ptr[in, timespec], flags flags[at_flags])
+
+# ------------------ 文件扩展 ------------------
+truncate$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], length intptr)
+ftruncate$jfs(fd fd, length intptr)
+fallocate$jfs(fd fd, mode flags[fallocate_mode], offset intptr, len intptr)
+
+# ------------------ 链接操作 ------------------
+link$jfs(oldpath ptr[in, string["/mnt/jfs/file%03d"]], newpath ptr[in, string["/mnt/jfs/hardlink_%d"]])
+unlink$jfs(path ptr[in, string["/mnt/jfs/file%03d"]])
+symlink$jfs(target ptr[in, string["/mnt/jfs/target_%d"]], linkpath ptr[in, string["/mnt/jfs/symlink_%03d"]])
+symlinkat$jfs(target ptr[in, string["/mnt/jfs/target_%d"]], newdirfd fd, linkpath ptr[in, string["/mnt/jfs/symlinkat_%03d"]])
+readlink$jfs(path ptr[in, string["/mnt/jfs/symlink_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+readlinkat$jfs(fd fd, path ptr[in, string["/mnt/jfs/symlinkat_%03d"]], buf ptr[out, array[int8]], bufsize len[buf])
+rename$jfs(oldpath ptr[in, string["/mnt/jfs/old_%03d"]], newpath ptr[in, string["/mnt/jfs/new_%03d"]])
+
+# ------------------ 特殊文件创建 ------------------
+mknod$jfs(path ptr[in, string["/mnt/jfs/nod_%03d"]], mode flags[mknod_mode], dev int32)
+mknodat$jfs(fd fd, path ptr[in, string["/mnt/jfs/nodat_%03d"]], mode flags[mknod_mode], dev int32)
+
+# ------------------ 扩展属性操作 ------------------
+setxattr$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+lsetxattr$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsetxattr$jfs(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+# ------------------ 状态查询 ------------------
+stat$jfs(path ptr[in, string["/mnt/jfs/file%03d"]], buf ptr[out, stat_buffer])
+fstat$jfs(fd fd, buf ptr[out, stat_buffer])
+
+# ------------------ 文件锁 & ioctl ------------------
+fcntl$getlk_jfs(fd fd, cmd const[F_GETLK], lock ptr[inout, flock])
+ioctl$jfs(fd fd, cmd int32, arg intptr)

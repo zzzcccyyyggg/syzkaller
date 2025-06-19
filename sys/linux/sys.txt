@@ -115,7 +115,6 @@ preadv2(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec], off_low int32, off_
 write(fd fd, buf buffer[in], count len[buf])
 pwrite64(fd fd, buf buffer[in], count len[buf], pos fileoff)
 writev(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec])
-pwritev(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec], off_low int32, off_high int32)
 pwritev2(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec], off_low int32, off_high int32, flags flags[rwf_flags])
 lseek(fd fd, offset fileoff, whence flags[seek_whence])
 copy_file_range(fd_in fd, off_in ptr[inout, fileoff[int64], opt], fd_out fd, off_out ptr[inout, fileoff[int64], opt], len intptr, flags flags[copy_file_range_flags])

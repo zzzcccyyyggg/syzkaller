@@ -29,3 +29,4 @@ dashboard/app/.gcloudignore
 .vscode
 
 /test
+log
