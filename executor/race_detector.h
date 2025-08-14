@@ -5,6 +5,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include "ddrd.h"
 
 #ifdef __cplusplus
 extern "C" {
@@ -12,14 +13,6 @@ extern "C" {
 
 // Forward declarations
 struct PairSyscallSharedData;
-
-// Lock状态枚举
-typedef enum {
-    LOCK_NO_LOCKS = 0,              // 双方都无锁
-    LOCK_ONE_SIDED_LOCK = 1,        // 一方有锁，一方无锁
-    LOCK_UNSYNC_LOCKS = 2,          // 双方有锁，但无公共锁
-    LOCK_SYNC_WITH_COMMON_LOCK = 3  // 双方有锁，且有公共锁
-} LockStatus;
 
 // 锁记录结构
 typedef struct {
@@ -91,38 +84,17 @@ typedef struct {
 typedef struct {
     int call_index;             // syscall在程序中的索引
     int call_num;               // syscall编号
-    const char* call_name;      // syscall名称
     uint64_t start_time;        // syscall开始时间 (nanoseconds)
     uint64_t end_time;          // syscall结束时间 (nanoseconds)
     int thread_id;              // 执行的线程ID
     bool valid;                 // 记录是否有效
 } SyscallTimeRecord;
 
-// Race pair与syscall的映射结构
-typedef struct {
-    RacePair race_pair;         // race pair信息
-    SyscallTimeRecord syscall1; // 第一个相关的syscall
-    SyscallTimeRecord syscall2; // 第二个相关的syscall
-    double correlation_score;   // 时间相关性分数 (0-1)
-    bool mapping_valid;         // 映射是否有效
-} RaceToSyscallMapping;
-
-// Simple thread timing information structure for data passing
-typedef struct {
-    int thread_id;              // Thread ID
-    int call_index;             // Syscall index in program
-    int call_num;               // Syscall number
-    const char* call_name;      // Syscall name (optional)
-    uint64_t start_time;        // Syscall start time (nanoseconds)
-    uint64_t end_time;          // Syscall end time (nanoseconds)
-    bool executing;             // Whether thread is currently executing
-    bool valid;                 // Whether timing data is valid
-} ThreadTimingInfo;
 
 // 函数声明
 void init_race_detector();
 void cleanup_race_detector();
-int analyze_and_generate_race_signals(uint64_t* signals_buffer, int max_signals);
+int analyze_and_generate_may_race_infos(may_race_pair_t* signals_buffer, int max_signals);
 int parse_access_records_to_set(const char* buffer, AccessRecordSet* record_set, int max_records, int max_frees);
 int analyze_race_pairs_from_set(AccessRecordSet* record_set, RacePair* pairs, int max_pairs);
 LockStatus determine_lock_status(const AccessRecord* a, const AccessRecord* b);
@@ -135,19 +107,11 @@ void reset_race_detector();
 bool is_race_detector_available();
 
 // ===============DDRD====================
-// Syscall-Race mapping functions
-int map_race_pairs_to_syscalls(RacePair* race_pairs, int race_count, 
-                               SyscallTimeRecord* syscall_records, int syscall_count,
-                               RaceToSyscallMapping* mappings, int max_mappings);
-SyscallTimeRecord* find_matching_syscall(uint64_t race_time, SyscallTimeRecord* syscalls, int count);
+
+SyscallTimeRecord* find_matching_syscall(uint64_t access_time,int tid);
 
 // Race pairs export (currently used instead of full mapping)
 int export_race_pairs_to_buffer(char* buffer, int buffer_size);
-
-// Export race-syscall mappings with real timing data from threads
-int export_race_syscall_mappings_to_buffer(char* buffer, int buffer_size);
-int export_race_syscall_mappings_with_timing(char* buffer, int buffer_size, void* thread_data, int thread_count);
-int export_race_syscall_mappings_with_pair_data(char* buffer, int buffer_size, struct PairSyscallSharedData* shared_data);
 
 // Function to access pair syscall shared memory data
 struct PairSyscallSharedData* get_pair_shared_data();

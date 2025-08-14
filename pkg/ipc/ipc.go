@@ -730,6 +730,7 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 		if reply.magic != outMagic {
 			return nil, fmt.Errorf("bad reply magic 0x%x", reply.magic)
 		}
+		// 判断是正常syscall写入的相关数据 还是 extra
 		if reply.index != extraReplyIndex {
 			if int(reply.index) >= len(info.Calls) {
 				return nil, fmt.Errorf("bad call %v index %v/%v", i, reply.index, len(info.Calls))
@@ -758,13 +759,7 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 			return nil, fmt.Errorf("call %v/%v/%v: signal overflow: %v/%v",
 				i, reply.index, reply.num, reply.signalSize, len(out))
 		}
-		// ===============DDRD====================
-		// Read race signals into unified RaceData structure
-		if inf.RaceData.Signals, ok = readUint64Array(&out, reply.raceSignalSize); !ok {
-			return nil, fmt.Errorf("call %v/%v/%v: race signal overflow: %v/%v",
-				i, reply.index, reply.num, reply.raceSignalSize, len(out))
-		}
-		// ===============DDRD====================
+
 		if inf.Cover, ok = readUint32Array(&out, reply.coverSize); !ok {
 			return nil, fmt.Errorf("call %v/%v/%v: cover overflow: %v/%v",
 				i, reply.index, reply.num, reply.coverSize, len(out))
@@ -774,11 +769,6 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 			return nil, err
 		}
 		inf.Comps = comps
-		// Read race mapping data into unified RaceData structure
-		if inf.RaceData.MappingData, ok = readByteArray(&out, reply.raceMappingSize); !ok {
-			return nil, fmt.Errorf("call %v/%v/%v: race mapping overflow: %v/%v",
-				i, reply.index, reply.num, reply.raceMappingSize, len(out))
-		}
 	}
 	if len(extraParts) == 0 {
 		return info, nil
@@ -1036,11 +1026,9 @@ type callReply struct {
 	endTimeHigh   uint32 // syscall end time (high 32 bits, nanoseconds)
 	// ===============DDRD====================
 
-	signalSize      uint32 // coverage signals
-	raceSignalSize  uint32 // race signals (separated from coverage)
-	coverSize       uint32
-	compsSize       uint32
-	raceMappingSize uint32 // race-to-syscall mapping data size
+	signalSize uint32 // coverage signals
+	coverSize  uint32
+	compsSize  uint32
 	// signal/race-signal/cover/comps/race-mapping follow
 }
 
