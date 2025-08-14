@@ -504,72 +504,81 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*ProgInfo, error) {
 	out := env.out
 
-	// Read unified race result
-	ncmd, ok := readUint32(&out)
+	// Pair execution output format:
+	// [kOutPairMagic][pair_count][pair1][pair2]...
+	// Each pair record contains fixed-size fields described in executor/ddrd.h.
+
+	magic, ok := readUint32(&out)
 	if !ok {
-		return nil, fmt.Errorf("failed to read number of race calls")
+		return nil, fmt.Errorf("failed to read pair magic")
+	}
+	if magic != outPairMagic {
+		return nil, fmt.Errorf("bad pair magic 0x%x", magic)
+	}
+
+	pairCount, ok := readUint32(&out)
+	if !ok {
+		return nil, fmt.Errorf("failed to read pair count")
 	}
 
 	info := &ProgInfo{
-		Calls: make([]CallInfo, len(p1.Calls)+len(p2.Calls)), // Combined calls
-		Extra: CallInfo{},                                    // Race summary
+		Calls: make([]CallInfo, len(p1.Calls)+len(p2.Calls)),
+		Extra: CallInfo{},
 	}
 
-	// Parse race-focused results
-	for i := uint32(0); i < ncmd; i++ {
-		if len(out) < int(unsafe.Sizeof(callReply{})) {
-			return nil, fmt.Errorf("failed to read race call %v reply", i)
+	const pairRecordSize = 76 // bytes per may_race_pair_t record
+	for i := uint32(0); i < pairCount; i++ {
+		if len(out) < pairRecordSize {
+			return nil, fmt.Errorf("pair %v: truncated output", i)
 		}
-		reply := *(*callReply)(unsafe.Pointer(&out[0]))
-		out = out[unsafe.Sizeof(callReply{}):]
+		record := out[:pairRecordSize]
+		out = out[pairRecordSize:]
 
-		if reply.magic != outMagic {
-			return nil, fmt.Errorf("bad race reply magic 0x%x", reply.magic)
+		tmp := record
+		// Skip metadata we don't currently use.
+		if _, ok = readUint32(&tmp); !ok { // syscall1_idx
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // syscall2_idx
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // syscall1_num
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // syscall2_num
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint64(&tmp); !ok { // varName1
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint64(&tmp); !ok { // varName2
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint64(&tmp); !ok { // call_stack1
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint64(&tmp); !ok { // call_stack2
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		signal, ok := readUint64(&tmp)
+		if !ok {
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // lock_type
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // access_type1
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint32(&tmp); !ok { // access_type2
+			return nil, fmt.Errorf("pair %v: bad data", i)
+		}
+		if _, ok = readUint64(&tmp); !ok { // time_diff
+			return nil, fmt.Errorf("pair %v: bad data", i)
 		}
 
-		var inf *CallInfo
-		if reply.index == extraReplyIndex {
-			// This is the unified race result
-			inf = &info.Extra
-		} else if int(reply.index) < len(info.Calls) {
-			inf = &info.Calls[reply.index]
-			inf.Errno = int(reply.errno)
-			inf.Flags = CallFlags(reply.flags)
-			inf.StartTime = uint64(reply.startTimeLow) | (uint64(reply.startTimeHigh) << 32)
-			inf.EndTime = uint64(reply.endTimeLow) | (uint64(reply.endTimeHigh) << 32)
-		} else {
-			return nil, fmt.Errorf("bad race call index %v/%v", reply.index, len(info.Calls))
-		}
-
-		// For pair execution, we only care about race signals, not coverage
-		// Set signal to empty (as requested - use 0 for coverage)
-		inf.Signal = []uint32{}
-		inf.Cover = []uint32{}
-
-		// ===============DDRD====================
-		// Read race signals into unified RaceData structure
-		if inf.RaceData.Signals, ok = readUint64Array(&out, reply.raceSignalSize); !ok {
-			return nil, fmt.Errorf("race call %v: race signal overflow: %v/%v",
-				i, reply.raceSignalSize, len(out))
-		}
-
-		// Read race mapping data
-		if inf.RaceData.MappingData, ok = readByteArray(&out, reply.raceMappingSize); !ok {
-			return nil, fmt.Errorf("race call %v: race mapping overflow: %v/%v",
-				i, reply.raceMappingSize, len(out))
-		}
-		// ===============DDRD====================
-
-		// Skip other data we don't need for race detection
-		if _, ok = readUint32Array(&out, reply.signalSize); !ok {
-			return nil, fmt.Errorf("race call %v: signal skip failed", i)
-		}
-		if _, ok = readUint32Array(&out, reply.coverSize); !ok {
-			return nil, fmt.Errorf("race call %v: cover skip failed", i)
-		}
-		if _, err := readComps(&out, reply.compsSize); err != nil {
-			return nil, fmt.Errorf("race call %v: comps skip failed: %w", i, err)
-		}
+		info.Extra.RaceData.Signals = append(info.Extra.RaceData.Signals, signal)
+		info.Extra.RaceData.MappingData = append(info.Extra.RaceData.MappingData, record...)
 	}
 
 	return info, nil
@@ -960,9 +969,10 @@ type command struct {
 }
 
 const (
-	inMagic     = uint64(0xbadc0ffeebadface)
-	inPairMagic = uint64(0xbadc0ffeebadfa0e) // Magic for pair execution requests
-	outMagic    = uint32(0xbadf00d)
+	inMagic      = uint64(0xbadc0ffeebadface)
+	inPairMagic  = uint64(0xbadc0ffeebadfa0e) // Magic for pair execution requests
+	outMagic     = uint32(0xbadf00d)
+	outPairMagic = uint32(0xbadfeed)
 )
 
 type handshakeReq struct {
