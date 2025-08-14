@@ -1,0 +1,6 @@
+open$btrfs(&(0x7f0000000040), 0x0, 0x2)
+r1 = open$btrfs(&(0x7f0000000000), 0x0, 0x0)
+ioctl$BTRFS_IOC_TREE_SEARCH_V2(r1, 0xc0709411, &(0x7f0000000340)=ANY=[])
+open$btrfs(&(0x7f0000000080), 0x801, 0x6)
+ioctl$BTRFS_IOC_QGROUP_CREATE(r0, 0xc400941b, &(0x7f0000000000)={0x1}) (fail_nth: 59)
+2025/08/11 14:04:37 SYZFATAL: executor 4 failed 11 times: bad reply magic 0x1

@@ -1,0 +1,4 @@
+14:20:59 executing program 7:
+r0 = open$btrfs(&(0x7f0000000040), 0x0, 0x0)
+ioctl$BTRFS_IOC_INO_LOOKUP(r0, 0x40109441, &(0x7f0000000680)={0x0, 0x1})
+2025/08/11 14:20:59 SYZFATAL: executor 7 failed 11 times: bad reply magic 0x5

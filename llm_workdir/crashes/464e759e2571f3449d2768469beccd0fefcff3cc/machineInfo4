@@ -1,0 +1,34 @@
+QEMU emulator version 8.2.2 (Debian 1:8.2.2+ds-0ubuntu1.7)
+qemu-system-x86_64 ["-m" "8192" "-smp" "4" "-chardev" "socket,id=SOCKSYZ,server=on,wait=off,host=localhost,port=52413" "-mon" "chardev=SOCKSYZ,mode=control" "-display" "none" "-serial" "stdio" "-no-reboot" "-name" "VM-0" "-device" "virtio-rng-pci" "-enable-kvm" "-hdb" "/home/zzzccc/go-work/syzkaller-old/syzkaller/test/btrfs/disk.qcow2" "-device" "e1000,netdev=net0" "-netdev" "user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:51701-:22,hostfwd=tcp::36933-:6060" "-hda" "/home/zzzccc/go-work/syzkaller-old/syzkaller/test/btrfs/bookworm.img" "-snapshot" "-kernel" "/home/zzzccc/linux-DDRD/arch/x86/boot/bzImage" "-append" "root=/dev/sda console=ttyS0 "]
+
+[CPU Info]
+processor           : 0, 1, 2, 3
+vendor_id           : AuthenticAMD
+cpu family          : 15
+model               : 107
+model name          : QEMU Virtual CPU version 2.5+
+stepping            : 1
+microcode           : 0x1000065
+cpu MHz             : 3593.248
+cache size          : 512 KB
+physical id         : 0
+siblings            : 4
+core id             : 0, 1, 2, 3
+cpu cores           : 4
+apicid              : 0, 1, 2, 3
+initial apicid      : 0, 1, 2, 3
+fpu                 : yes
+fpu_exception       : yes
+cpuid level         : 13
+wp                  : yes
+flags               : fpu de pse tsc msr pae mce cx8 apic sep mtrr pge mca cmov pat pse36 clflush mmx fxsr sse sse2 ht syscall nx lm rep_good nopl cpuid extd_apicid tsc_known_freq pni cx16 x2apic hypervisor lahf_lm cmp_legacy svm 3dnowprefetch vmmcall
+bugs                : fxsave_leak sysret_ss_attrs null_seg swapgs_fence amd_e400 spectre_v1 spectre_v2 spectre_v2_user
+bogomips            : 7186.49
+TLB size            : 1024 4K pages
+clflush size        : 64
+cache_alignment     : 64
+address sizes       : 40 bits physical, 48 bits virtual
+power management    : 
+
+--------------------------------------------------------------------------------
+

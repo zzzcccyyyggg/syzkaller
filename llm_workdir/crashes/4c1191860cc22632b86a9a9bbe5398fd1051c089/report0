@@ -1,0 +1,396 @@
+RBP: 00007fc992daf110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000002
+R13: ffffffffffffffb8 R14: 00007fc993b6bf80 R15: 00007ffcc8448570
+ </TASK>
+------------[ cut here ]------------
+kernel BUG at fs/btrfs/extent-io-tree.c:572!
+Oops: invalid opcode: 0000 [#1] SMP KASAN NOPTI
+CPU: 3 UID: 0 PID: 7311 Comm: syz-executor.0 Tainted: G    B               6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+RIP: 0010:clear_state_bit+0xcb3/0xcc0 fs/btrfs/extent-io-tree.c:572
+Code: ff ff 48 8b 0c 24 80 e1 07 38 c1 0f 8c b3 fc ff ff 48 8b 3c 24 e8 bd 24 65 fe e9 a5 fc ff ff e8 b3 e7 30 fe e8 ae e7 30 fe 90 <0f> 0b 66 66 2e 0f 1f 84 00 00 00 00 00 90 90 90 90 90 90 90 90 90
+RSP: 0018:ffff8881158f6c48 EFLAGS: 00010286
+RAX: ffffffff8341cb42 RBX: 00000000fffffff4 RCX: 000000001f000000
+RDX: ffffc90010e05000 RSI: 000000000001ba03 RDI: 000000000001ba04
+RBP: 0000000000000000 R08: 0000000000000080 R09: 1ffffffff4bd96a2
+R10: dffffc0000000000 R11: fffffbfff4bd96a3 R12: 0000000000000800
+R13: ffff888102ab3078 R14: ffff888102ab3080 R15: 1ffff11020556610
+FS:  00007fc992daf6c0(0000) GS:ffff88824eb0d000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007fc993a9e464 CR3: 0000000103d45000 CR4: 00000000000006f0
+Call Trace:
+ <TASK>
+ btrfs_clear_extent_bit_changeset+0xf43/0x1950 fs/btrfs/extent-io-tree.c:748
+ btrfs_clear_record_extent_bits+0x7c/0xe0 fs/btrfs/extent-io-tree.c:1879
+ __btrfs_qgroup_release_data+0x516/0x1920 fs/btrfs/qgroup.c:4387
+BTRFS info (device sdb): balance: start -slimit=893353197631
+ btrfs_qgroup_release_data+0x50/0x70 fs/btrfs/qgroup.c:4443
+ insert_prealloc_file_extent fs/btrfs/inode.c:8896 [inline]
+ __btrfs_prealloc_file_range+0xa2f/0x2960 fs/btrfs/inode.c:8993
+ btrfs_prealloc_file_range+0x59/0x90 fs/btrfs/inode.c:9071
+ btrfs_fallocate+0x2ec9/0x3fd0 fs/btrfs/file.c:3178
+ vfs_fallocate+0x506/0x5e0 fs/open.c:341
+ file_ioctl+0x5c3/0x720 fs/ioctl.c:290
+ do_vfs_ioctl+0xd74/0x1a70 fs/ioctl.c:886
+ __do_sys_ioctl fs/ioctl.c:905 [inline]
+ __se_sys_ioctl+0x82/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7fc993a1c59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007fc992daf088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007fc993b6bf80 RCX: 00007fc993a1c59d
+RDX: 0000000020000040 RSI: 000000004030582a RDI: 0000000000000003
+RBP: 00007fc992daf110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000002
+R13: ffffffffffffffb8 R14: 00007fc993b6bf80 R15: 00007ffcc8448570
+ </TASK>
+Modules linked in:
+---[ end trace 0000000000000000 ]---
+RIP: 0010:clear_state_bit+0xcb3/0xcc0 fs/btrfs/extent-io-tree.c:572
+Code: ff ff 48 8b 0c 24 80 e1 07 38 c1 0f 8c b3 fc ff ff 48 8b 3c 24 e8 bd 24 65 fe e9 a5 fc ff ff e8 b3 e7 30 fe e8 ae e7 30 fe 90 <0f> 0b 66 66 2e 0f 1f 84 00 00 00 00 00 90 90 90 90 90 90 90 90 90
+RSP: 0018:ffff8881158f6c48 EFLAGS: 00010286
+BTRFS info (device sdb): balance: ended with status: 0
+RAX: ffffffff8341cb42 RBX: 00000000fffffff4 RCX: 000000001f000000
+RDX: ffffc90010e05000 RSI: 000000000001ba03 RDI: 000000000001ba04
+RBP: 0000000000000000 R08: 0000000000000080 R09: 1ffffffff4bd96a2
+R10: dffffc0000000000 R11: fffffbfff4bd96a3 R12: 0000000000000800
+R13: ffff888102ab3078 R14: ffff888102ab3080 R15: 1ffff11020556610
+FS:  00007fc992daf6c0(0000) GS:ffff88824eb0d000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007fc993a9e464 CR3: 0000000103d45000 CR4: 00000000000006f0
+note: syz-executor.0[7311] exited with preempt_count 1
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 3 UID: 0 PID: 7319 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ get_or_create_context kernel/kccwf/rec_lock.c:24 [inline]
+ rec_lock_require+0x16e/0x550 kernel/kccwf/rec_lock.c:50
+ qgroup_enabled fs/btrfs/ioctl.c:3726 [inline]
+ btrfs_ioctl_qgroup_assign+0x269/0x970 fs/btrfs/ioctl.c:3748
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+Failed to get or create context for pid 7319
+BTRFS warning (device sdb): get dev_stats failed, device not found
+FAULT_INJECTION: forcing a failure.
+name fail_usercopy, interval 1, probability 0, space 0, times 0
+CPU: 2 UID: 0 PID: 7295 Comm: syz-executor.11 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ _inline_copy_to_user include/linux/uaccess.h:193 [inline]
+ _copy_to_user+0x20/0xa0 lib/usercopy.c:26
+ copy_to_user include/linux/uaccess.h:225 [inline]
+ simple_read_from_buffer+0xa9/0x130 fs/libfs.c:1122
+ proc_fail_nth_read+0x19d/0x210 fs/proc/base.c:1488
+ vfs_read+0x26c/0xb50 fs/read_write.c:570
+ ksys_read+0x147/0x250 fs/read_write.c:715
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f423291b54a
+Code: 55 48 89 e5 48 83 ec 20 48 89 55 e8 48 89 75 f0 89 7d f8 e8 48 e2 02 00 48 8b 55 e8 48 8b 75 f0 41 89 c0 8b 7d f8 31 c0 0f 05 <48> 3d 00 f0 ff ff 77 2e 44 89 c7 48 89 45 f8 e8 a2 e2 02 00 48 8b
+RSP: 002b:00007f4231caf080 EFLAGS: 00000246 ORIG_RAX: 0000000000000000
+RAX: ffffffffffffffda RBX: 0000000000000000 RCX: 00007f423291b54a
+RDX: 000000000000000f RSI: 00007f4231caf120 RDI: 0000000000000004
+RBP: 00007f4231caf0a0 R08: 0000000000000000 R09: 7fffffffffffffff
+R10: 3fffffffffffffff R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f4232a6bf80 R15: 00007ffd65901f00
+ </TASK>
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 2 UID: 0 PID: 7328 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ rec_lock_require+0x32b/0x550 kernel/kccwf/rec_lock.c:66
+ qgroup_enabled fs/btrfs/ioctl.c:3726 [inline]
+ btrfs_ioctl_qgroup_assign+0x269/0x970 fs/btrfs/ioctl.c:3748
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+kzalloc failed ...
+FAULT_INJECTION: forcing a failure.
+name fail_usercopy, interval 1, probability 0, space 0, times 0
+CPU: 3 UID: 0 PID: 7353 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ _inline_copy_from_user include/linux/uaccess.h:163 [inline]
+ _copy_from_user+0x1c/0xa0 lib/usercopy.c:18
+ copy_from_user include/linux/uaccess.h:212 [inline]
+ memdup_user+0x57/0xb0 mm/util.c:224
+ btrfs_ioctl_qgroup_assign+0x36c/0x970 fs/btrfs/ioctl.c:3755
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 3 UID: 0 PID: 7363 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ kmem_cache_alloc_noprof+0x40/0x2c0 mm/slub.c:4231
+ start_transaction+0xae2/0x38a0 fs/btrfs/transaction.c:682
+ btrfs_join_transaction+0x42/0x60 fs/btrfs/transaction.c:830
+ btrfs_ioctl_qgroup_assign+0x4c6/0x970 fs/btrfs/ioctl.c:3769
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+BTRFS warning (device sdb): get dev_stats failed, device not found
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 1 UID: 0 PID: 7371 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ rec_lock_require+0x32b/0x550 kernel/kccwf/rec_lock.c:66
+ join_transaction+0x5d/0x2550 fs/btrfs/transaction.c:272
+ start_transaction+0xe82/0x38a0 fs/btrfs/transaction.c:705
+ btrfs_join_transaction+0x42/0x60 fs/btrfs/transaction.c:830
+ btrfs_ioctl_qgroup_assign+0x4c6/0x970 fs/btrfs/ioctl.c:3769
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+kzalloc failed ...
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 0 UID: 0 PID: 7377 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ rec_lock_require+0x32b/0x550 kernel/kccwf/rec_lock.c:66
+ btrfs_del_qgroup_relation+0xdc/0x160 fs/btrfs/qgroup.c:1677
+ btrfs_ioctl_qgroup_assign+0x678/0x970 fs/btrfs/ioctl.c:3783
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+kzalloc failed ...
+BTRFS info (device sdb): balance: start -ddevid=0,vrange=2..29 -mlimit=111750754074617
+BTRFS info (device sdb): balance: ended with status: 0
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 3 UID: 0 PID: 7385 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ rec_lock_require+0x32b/0x550 kernel/kccwf/rec_lock.c:66
+ join_transaction+0x344/0x2550
+ start_transaction+0xe82/0x38a0 fs/btrfs/transaction.c:705
+ btrfs_join_transaction+0x42/0x60 fs/btrfs/transaction.c:830
+ btrfs_ioctl_qgroup_assign+0x4c6/0x970 fs/btrfs/ioctl.c:3769
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+kzalloc failed ...
+BTRFS warning (device sdb): get dev_stats failed, device not found
+FAULT_INJECTION: forcing a failure.
+name failslab, interval 1, probability 0, space 0, times 0
+CPU: 2 UID: 0 PID: 7395 Comm: syz-executor.3 Tainted: G    B D             6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE, [D]=DIE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+Call Trace:
+ <TASK>
+ __dump_stack lib/dump_stack.c:94 [inline]
+ dump_stack_lvl+0x12e/0x1a0 lib/dump_stack.c:120
+ fail_dump lib/fault-inject.c:73 [inline]
+ should_fail_ex+0xadf/0xc70 lib/fault-inject.c:174
+ should_failslab+0xa8/0x100 mm/failslab.c:46
+ slab_pre_alloc_hook mm/slub.c:4108 [inline]
+ slab_alloc_node mm/slub.c:4204 [inline]
+ __kmalloc_cache_noprof+0x45/0x2f0 mm/slub.c:4381
+ kmalloc_noprof include/linux/slab.h:905 [inline]
+ kzalloc_noprof include/linux/slab.h:1039 [inline]
+ rec_lock_require+0x32b/0x550 kernel/kccwf/rec_lock.c:66
+ btrfs_record_root_in_trans+0x3c1/0x4b0 fs/btrfs/transaction.c:503
+ start_transaction+0x8dc/0x38a0 fs/btrfs/transaction.c:779
+ btrfs_join_transaction+0x42/0x60 fs/btrfs/transaction.c:830
+ btrfs_ioctl_qgroup_assign+0x4c6/0x970 fs/btrfs/ioctl.c:3769
+ btrfs_ioctl+0x7ea/0x1080 fs/btrfs/ioctl.c:5325
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7f032d3cc59d
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007f032c75f088 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007f032d51bf80 RCX: 00007f032d3cc59d
+RDX: 0000000020000080 RSI: 0000000040189429 RDI: 0000000000000003
+RBP: 00007f032c75f110 R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000001
+R13: ffffffffffffffb8 R14: 00007f032d51bf80 R15: 00007ffc483dcf80
+ </TASK>
+kzalloc failed ...
+BTRFS info (device sdb): balance: start -ddevid=0,vrange=2..29 -mlimit=111750754074617
+BTRFS info (device sdb): balance: paused

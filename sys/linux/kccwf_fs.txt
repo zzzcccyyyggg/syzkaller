@@ -1,0 +1,88 @@
+# syzkaller/sys/linux/kccwf_fs.txt
+
+close$kccwf(fd fd)
+dup$kccwf(oldfd fd) fd
+dup2$kccwf(oldfd fd, newfd fd) fd
+dup3$kccwf(oldfd fd, newfd fd, flags flags[dup_flags]) fd
+
+mknodat$loop$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev proc[1792, 2])
+mknodat$null$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev const[0x103])
+mknodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev int32)
+
+getdents$kccwf(fd fd_dir, ent buffer[out], count len[ent])
+getdents64$kccwf(fd fd_dir, ent buffer[out], count len[ent])
+name_to_handle_at$kccwf(fd fd_dir, file ptr[in, string["testfile"]], handle ptr[in, file_handle], mnt ptr[out, int32], flags flags[name_to_handle_at_flags])
+getcwd$kccwf(buf buffer[out], size len[buf])
+fchdir$kccwf(fd fd)
+
+### 文件 I/O 和数据传输 (File I/O and Data Transfer)
+
+read$kccwf(fd fd, buf buffer[out], count len[buf])
+pread64$kccwf(fd fd, buf buffer[out], count len[buf], pos fileoff)
+readv$kccwf(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec])
+preadv$kccwf(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec], off_low int32, off_high int32)
+preadv2$kccwf(fd fd, vec ptr[in, array[iovec_out]], vlen len[vec], off_low int32, off_high int32, flags flags[rwf_flags])
+write$kccwf(fd fd, buf buffer[in], count len[buf])
+pwrite64$kccwf(fd fd, buf buffer[in], count len[buf], pos fileoff)
+writev$kccwf(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec])
+pwritev2$kccwf(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec], off_low int32, off_high int32, flags flags[rwf_flags])
+lseek$kccwf(fd fd, offset fileoff, whence flags[seek_whence])
+copy_file_range$kccwf(fd_in fd, off_in ptr[inout, fileoff[int64], opt], fd_out fd, off_out ptr[inout, fileoff[int64], opt], len intptr, flags flags[copy_file_range_flags])
+tee$kccwf(fdin fd, fdout fd, len intptr, f flags[splice_flags])
+splice$kccwf(fdin fd, offin ptr[in, fileoff[int64]], fdout fd, offout ptr[in, fileoff[int64]], len intptr, f flags[splice_flags])
+vmsplice$kccwf(fd fd, vec ptr[in, array[iovec_in]], vlen len[vec], f flags[splice_flags])
+sendfile$kccwf(fdout fd, fdin fd, off ptr[inout, fileoff[intptr], opt], count intptr)
+sendfile64$kccwf(fdout fd, fdin fd, off ptr[inout, fileoff[int64], opt], count intptr)
+readahead$kccwf(fd fd, off intptr, count intptr)
+
+### 元数据和属性 (Metadata and Attributes)
+
+
+fstat$kccwf(fd fd, statbuf ptr[out, stat])
+fstat64$kccwf(fd fd, statbuf ptr[out, stat64])
+cachestat$kccwf(fd fd, cstat_range ptr[in, cachestat_range], cstat ptr[out, cachestat], flags const[0])
+fadvise64$kccwf(fd fd, offset fileoff, len intptr, advice flags[fadvise_flags])
+fchmod$kccwf(fd fd, mode flags[open_mode])
+fchown$kccwf(fd fd, uid uid, gid gid)
+fallocate$kccwf(fd fd, mode flags[fallocate_mode], off intptr, len intptr)
+faccessat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
+futimesat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval])
+utimensat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval], flags flags[utimensat_flags])
+statx$kccwf(fd fd_dir, file ptr[in, string["testfile"]], flags flags[statx_flags], mask flags[statx_mask], statxbuf ptr[out, statx])
+fchmodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
+
+ftruncate$kccwf(fd fd, len intptr)
+flock$kccwf(fd fd, op flags[flock_op])
+ioctl$kccwf(fd fd, cmd int32, arg buffer[in])
+ioctl$int_in$kccwf(fd fd, cmd flags[ioctl_int_in], v ptr[in, int64])
+ioctl$int_out$kccwf(fd fd, cmd flags[ioctl_int_out], v ptr[out, intptr])
+ioctl$FIOCLEX$kccwf(fd fd, cmd const[FIOCLEX])
+ioctl$FIONCLEX$kccwf(fd fd, cmd const[FIONCLEX])
+ioctl$FITHAW$kccwf(fd fd, cmd const[FITHAW])
+ioctl$FIFREEZE$kccwf(fd fd, cmd const[FIFREEZE]) (disabled)
+fcntl$dupfd$kccwf(fd fd, cmd flags[fcntl_dupfd], arg fd) fd
+fcntl$getflags$kccwf(fd fd, cmd flags[fcntl_getflags])
+fcntl$setflags$kccwf(fd fd, cmd const[F_SETFD], flags flags[fcntl_flags])
+fcntl$setstatus$kccwf(fd fd, cmd const[F_SETFL], flags flags[fcntl_status])
+fcntl$lock$kccwf(fd fd, cmd flags[fcntl_lock], lock ptr[in, flock])
+fcntl$getown$kccwf(fd fd, cmd const[F_GETOWN]) pid
+fcntl$setown$kccwf(fd fd, cmd const[F_SETOWN], pid pid)
+fcntl$getownex$kccwf(fd fd, cmd const[F_GETOWN_EX], arg ptr[out, f_owner_ex])
+fcntl$setownex$kccwf(fd fd, cmd const[F_SETOWN_EX], arg ptr[in, f_owner_ex])
+fcntl$setsig$kccwf(fd fd, cmd const[F_SETSIG], sig signalnoptr)
+fcntl$setlease$kccwf(fd fd, cmd const[F_SETLEASE], typ flags[flock_type])
+fcntl$notify$kccwf(fd fd, cmd const[F_NOTIFY], typ flags[fcntl_notify])
+fcntl$setpipe$kccwf(fd fd, cmd const[F_SETPIPE_SZ], sz intptr)
+fcntl$addseals$kccwf(fd fd, cmd const[F_ADD_SEALS], seals flags[seal_types])
+fcntl$F_GET_RW_HINT$kccwf(fd fd, cmd const[F_GET_RW_HINT], hint ptr[out, int64])
+fcntl$F_GET_FILE_RW_HINT$kccwf(fd fd, cmd const[F_GET_FILE_RW_HINT], hint ptr[out, int64])
+fcntl$F_SET_RW_HINT$kccwf(fd fd, cmd const[F_SET_RW_HINT], hint ptr[in, flags[fcntl_rw_hint, int64]])
+fcntl$F_SET_FILE_RW_HINT$kccwf(fd fd, cmd const[F_SET_FILE_RW_HINT], hint ptr[in, flags[fcntl_rw_hint, int64]])
+
+### 文件系统和同步 (Filesystem and Synchronization)
+
+fsync$kccwf(fd fd)
+fdatasync$kccwf(fd fd)
+sync$kccwf()
+syncfs$kccwf(fd fd)
+sync_file_range$kccwf(fd fd, off intptr, nbytes intptr, flags flags[sync_file_flags])

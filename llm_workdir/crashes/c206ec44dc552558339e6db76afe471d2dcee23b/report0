@@ -1,0 +1,53 @@
+assertion failed: fs_info->exclusive_operation == BTRFS_EXCLOP_BALANCE_PAUSED :: 0, in fs/btrfs/fs.c:127
+BTRFS warning (device sdb): get dev_stats failed, device not found
+------------[ cut here ]------------
+kernel BUG at fs/btrfs/fs.c:127!
+Oops: invalid opcode: 0000 [#1] SMP KASAN NOPTI
+CPU: 0 UID: 0 PID: 84460 Comm: syz-executor.3 Tainted: G    B               6.16.0-rc1-g836c2326e999-dirty #41 PREEMPT(voluntary) 
+Tainted: [B]=BAD_PAGE
+Hardware name: QEMU Ubuntu 24.04 PC (i440FX + PIIX, 1996), BIOS 1.16.3-debian-1.16.3-2 04/01/2014
+RIP: 0010:btrfs_exclop_balance+0x5c5/0x5d0 fs/btrfs/fs.c:127
+Code: 2f fe e8 4e 78 2f fe 48 c7 c7 00 14 3f ac 48 c7 c6 20 16 3f ac 31 d2 48 c7 c1 e0 15 3f ac 41 b8 7f 00 00 00 e8 0c af df fd 90 <0f> 0b 66 0f 1f 84 00 00 00 00 00 90 90 90 90 90 90 90 90 90 90 90
+RSP: 0018:ffff8881529c7db8 EFLAGS: 00010246
+RAX: 0000000000000068 RBX: ffffed10213bc5ae RCX: 33701d8d263bad00
+RDX: ffffc90000b10000 RSI: 00000000000078e0 RDI: 00000000000078e1
+RBP: 0000000000000003 R08: ffff8881529c7b27 R09: 1ffff1102a538f64
+R10: dffffc0000000000 R11: ffffed102a538f65 R12: 1ffffda2042778b5
+R13: 1ffff110213bc5ae R14: ffff888109de2d70 R15: ffff888109de22d8
+FS:  00007fdaa21df6c0(0000) GS:ffff88823bf8d000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007fff6d3e4e18 CR3: 00000001521a4000 CR4: 00000000000006f0
+Call Trace:
+ <TASK>
+ btrfs_ioctl_balance+0x92c/0xdc0 fs/btrfs/ioctl.c:3548
+ btrfs_ioctl+0xd2b/0x1080 fs/btrfs/ioctl.c:5303
+ vfs_ioctl fs/ioctl.c:51 [inline]
+ __do_sys_ioctl fs/ioctl.c:907 [inline]
+ __se_sys_ioctl+0xfc/0x170 fs/ioctl.c:893
+ do_syscall_x64 arch/x86/entry/syscall_64.c:63 [inline]
+ do_syscall_64+0xd2/0x200 arch/x86/entry/syscall_64.c:94
+ entry_SYSCALL_64_after_hwframe+0x77/0x7f
+RIP: 0033:0x7fdaa2e49cdd
+Code: ff c3 66 2e 0f 1f 84 00 00 00 00 00 90 f3 0f 1e fa 48 89 f8 48 89 f7 48 89 d6 48 89 ca 4d 89 c2 4d 89 c8 4c 8b 4c 24 08 0f 05 <48> 3d 01 f0 ff ff 73 01 c3 48 c7 c1 b8 ff ff ff f7 d8 64 89 01 48
+RSP: 002b:00007fdaa21df0a8 EFLAGS: 00000246 ORIG_RAX: 0000000000000010
+RAX: ffffffffffffffda RBX: 00007fdaa2f9bf80 RCX: 00007fdaa2e49cdd
+RDX: 00000000200009c0 RSI: 00000000c4009420 RDI: 0000000000000003
+RBP: 00007fdaa2ebb4de R08: 0000000000000000 R09: 0000000000000000
+R10: 0000000000000000 R11: 0000000000000246 R12: 0000000000000000
+R13: ffffffffffffffb8 R14: 00007fdaa2f9bf80 R15: 00007ffd363a3ac0
+ </TASK>
+Modules linked in:
+---[ end trace 0000000000000000 ]---
+RIP: 0010:btrfs_exclop_balance+0x5c5/0x5d0 fs/btrfs/fs.c:127
+Code: 2f fe e8 4e 78 2f fe 48 c7 c7 00 14 3f ac 48 c7 c6 20 16 3f ac 31 d2 48 c7 c1 e0 15 3f ac 41 b8 7f 00 00 00 e8 0c af df fd 90 <0f> 0b 66 0f 1f 84 00 00 00 00 00 90 90 90 90 90 90 90 90 90 90 90
+RSP: 0018:ffff8881529c7db8 EFLAGS: 00010246
+RAX: 0000000000000068 RBX: ffffed10213bc5ae RCX: 33701d8d263bad00
+RDX: ffffc90000b10000 RSI: 00000000000078e0 RDI: 00000000000078e1
+RBP: 0000000000000003 R08: ffff8881529c7b27 R09: 1ffff1102a538f64
+R10: dffffc0000000000 R11: ffffed102a538f65 R12: 1ffffda2042778b5
+R13: 1ffff110213bc5ae R14: ffff888109de2d70 R15: ffff888109de22d8
+FS:  00007fdaa21df6c0(0000) GS:ffff88823bf8d000(0000) knlGS:0000000000000000
+CS:  0010 DS: 0000 ES: 0000 CR0: 0000000080050033
+CR2: 00007fff6d3e4e18 CR3: 00000001521a4000 CR4: 00000000000006f0
+note: syz-executor.3[84460] exited with preempt_count 1
+BTRFS warning (device sdb): get dev_stats failed, device not found

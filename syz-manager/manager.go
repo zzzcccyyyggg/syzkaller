@@ -17,6 +17,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
+	"unsafe"
 
 	"github.com/google/syzkaller/dashboard/dashapi"
 	"github.com/google/syzkaller/pkg/asset"
@@ -65,6 +66,18 @@ type Manager struct {
 	fresh          bool
 	numFuzzing     uint32
 	numReproducing uint32
+
+	// ===============DDRD====================
+	// 并发测试协调器 - 统一管理所有并发测试组件
+	concurrencyCoordinator *ConcurrencyCoordinator
+
+	// 保持原有组件的引用以支持现有API（由协调器管理）
+	fuzzScheduler           *FuzzScheduler
+	racePairCoverageManager *RacePairCoverageManager
+	testPairDispatcher      *TestPairDispatcher
+	raceReportManager       *RaceReportManager
+	raceReproductionManager *RaceReproductionManager
+	// ===============DDRD====================
 
 	dash *dashapi.Dashboard
 
@@ -204,11 +217,25 @@ func RunManager(cfg *mgrconfig.Config) {
 		reproRequest:       make(chan chan map[string]bool),
 		usedFiles:          make(map[string]time.Time),
 		saturatedCalls:     make(map[string]bool),
+		// ===============DDRD====================
+		// 先初始化基础组件
+		fuzzScheduler:           NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
+		racePairCoverageManager: NewRacePairCoverageManager(),
+		raceReportManager:       NewRaceReportManager(),
+		raceReproductionManager: NewRaceReproductionManager(cfg.Experimental.RaceReproduction, cfg.Workdir),
+		// ===============DDRD====================
 	}
+
+	// 在manager创建后初始化需要Manager引用的组件
+	mgr.testPairDispatcher = NewTestPairDispatcher(mgr)
+
+	// 在manager创建后初始化ConcurrencyCoordinator
+	mgr.concurrencyCoordinator = NewConcurrencyCoordinator(mgr)
 
 	mgr.preloadCorpus()
 	mgr.initStats() // Initializes prometheus variables.
-	mgr.initHTTP()  // Creates HTTP server.
+
+	mgr.initHTTP() // Creates HTTP server.
 	mgr.collectUsedFiles()
 
 	// Create RPC server for fuzzers.
@@ -248,13 +275,15 @@ func RunManager(cfg *mgrconfig.Config) {
 			corpusCover := mgr.stats.corpusCover.get()
 			corpusSignal := mgr.stats.corpusSignal.get()
 			maxSignal := mgr.stats.maxSignal.get()
+			raceSignals := mgr.stats.raceSignals.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v, cover %v, signal %v/%v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, corpusCover, corpusSignal, maxSignal, crashes, numReproducing, triageQLen)
+			log.Logf(0, "VMs %v, executed %v, cover %v, signal %v/%v, races %v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, corpusCover, corpusSignal, maxSignal, raceSignals, crashes, numReproducing, triageQLen)
+
 		}
 	}()
 
@@ -884,6 +913,27 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 		mgr.mu.Lock()
 		mgr.dataRaceFrames[crash.Frame] = true
 		mgr.mu.Unlock()
+
+		// 处理自定义datarace报告
+		if crash.Report.IsDataRaceReport() {
+			titleLen := len(crash.Title)
+			if titleLen > 20 {
+				titleLen = 20
+			}
+			reportID := fmt.Sprintf("crash-%d-%s", time.Now().Unix(), crash.Title[:titleLen])
+			mgr.raceReportManager.AddReport(crash.Report, reportID)
+
+			// 记录race报告的统计信息
+			raceStats := mgr.raceReportManager.GetRaceStats()
+			log.Logf(0, "vm-%v: datarace report processed: %+v", crash.vmIndex, raceStats)
+
+			// 输出race摘要
+			if len(crash.Report.GetReportedRaces()) > 0 {
+				raceSummary := crash.Report.FormatRacesSummary()
+				log.Logf(0, "vm-%v: race details: %s", crash.vmIndex, raceSummary)
+			}
+		}
+
 	}
 	flags := ""
 	if crash.Corrupted {
@@ -1383,6 +1433,33 @@ func (mgr *Manager) newInput(inp rpctype.Input, sign signal.Signal) bool {
 	if mgr.saturatedCalls[inp.Call] {
 		return false
 	}
+
+	// 处理race信号
+	progHash := hash.String(inp.Prog)
+
+	// ===============DDRD====================
+	// Process unified race data structure
+	var raceSignal signal.Signal
+	if len(inp.RaceData.Signals) > 0 {
+		// Convert uint64 signals to uint32 for signal processing
+		uint32Signals := make([]uint32, len(inp.RaceData.Signals))
+		for i, sig := range inp.RaceData.Signals {
+			uint32Signals[i] = uint32(sig)
+		}
+		raceSignal = signal.FromRaw(uint32Signals, 0)
+		// 将race signals转换为coverage统计，简化处理逻辑
+		newRaceSignals := mgr.processRaceSignalsForCoverage(raceSignal, inp.Call, progHash)
+		if newRaceSignals > 0 {
+			mgr.stats.newRaceSignals.add(int(newRaceSignals))
+		}
+	}
+
+	// Process race-to-syscall mapping data
+	if len(inp.RaceData.MappingData) > 0 {
+		mgr.processRaceMappingData(inp.RaceData.MappingData, inp.Call)
+	}
+	// ===============DDRD====================
+
 	update := CorpusItemUpdate{
 		CallID:   inp.CallID,
 		RawCover: inp.RawCover,
@@ -1595,4 +1672,78 @@ func publicWebAddr(addr string) string {
 		}
 	}
 	return "http://" + addr
+}
+
+// processRaceMappingData processes serialized race-to-syscall mapping data
+func (mgr *Manager) processRaceMappingData(data []byte, callName string) {
+	if len(data) == 0 {
+		return
+	}
+
+	log.Logf(1, "=== RACE-SYSCALL MAPPING ANALYSIS ===")
+	log.Logf(1, "收到来自 %s 的race mapping数据，大小: %d bytes", callName, len(data))
+
+	// Parse the binary mapping data
+	mappings, err := mgr.parseRaceMappingData(data)
+	if err != nil {
+		log.Logf(0, "解析race mapping数据失败: %v", err)
+		return
+	}
+
+	if len(mappings) > 0 {
+		log.Logf(1, "成功解析 %d 个race-syscall映射", len(mappings))
+
+		// Process each mapping
+		for i, mapping := range mappings {
+			log.Logf(1, "映射 %d: race_id=%d, syscall1_index=%d, syscall2_index=%d, score=%.3f",
+				i, mapping.RaceID, mapping.Syscall1Index, mapping.Syscall2Index, mapping.Score)
+		}
+
+		// Export to CSV for analysis
+		filename := fmt.Sprintf("race_mappings_%s_%d.csv", callName, time.Now().Unix())
+		// TODO: implement exportRaceMappingsToCSV method if needed
+		log.Logf(1, "映射数据需要导出到: %s (功能待实现)", filename)
+	}
+
+	log.Logf(1, "=== END RACE-SYSCALL MAPPING ANALYSIS ===")
+}
+
+// RaceMappingEntry represents a parsed race-to-syscall mapping
+type RaceMappingEntry struct {
+	RaceID        int
+	Syscall1Index int
+	Syscall2Index int
+	Score         float64
+}
+
+// parseRaceMappingData parses binary race mapping data
+func (mgr *Manager) parseRaceMappingData(data []byte) ([]RaceMappingEntry, error) {
+	if len(data) < 4 {
+		return nil, fmt.Errorf("数据太短，无法包含映射计数")
+	}
+
+	// Read mapping count
+	count := int(*(*uint32)(unsafe.Pointer(&data[0])))
+	offset := 4
+
+	var mappings []RaceMappingEntry
+
+	// Parse each mapping entry
+	for i := 0; i < count; i++ {
+		if offset+16 > len(data) { // 4 ints = 16 bytes
+			break
+		}
+
+		mapping := RaceMappingEntry{
+			RaceID:        int(*(*uint32)(unsafe.Pointer(&data[offset]))),
+			Syscall1Index: int(*(*uint32)(unsafe.Pointer(&data[offset+4]))),
+			Syscall2Index: int(*(*uint32)(unsafe.Pointer(&data[offset+8]))),
+			Score:         float64(*(*uint32)(unsafe.Pointer(&data[offset+12]))) / 1000.0, // Convert back from fixed-point
+		}
+
+		mappings = append(mappings, mapping)
+		offset += 16
+	}
+
+	return mappings, nil
 }

@@ -1,0 +1,6 @@
+truncate$btrfs(&(0x7f0000000180), 0x100)
+truncate$btrfs(&(0x7f00000001c0), 0x80)
+truncate$btrfs(&(0x7f0000000240), 0x6)
+truncate$btrfs(&(0x7f0000000280), 0x100)
+truncate$btrfs(&(0x7f00000005c0), 0x7609)
+2025/08/11 15:32:07 SYZFATAL: executor 1 failed 11 times: bad reply magic 0x6

@@ -212,6 +212,25 @@ static uint64 current_time_ms(void)
 		fail("clock_gettime failed");
 	return (uint64)ts.tv_sec * 1000 + (uint64)ts.tv_nsec / 1000000;
 }
+
+// ===============DDRD====================
+// High precision time functions for race detection
+static inline uint64 current_time_us(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		fail("clock_gettime failed");
+	return (uint64)ts.tv_sec * 1000000 + (uint64)ts.tv_nsec / 1000;
+}
+
+static uint64 current_time_ns(void)
+{
+	struct timespec ts;
+	if (clock_gettime(CLOCK_MONOTONIC, &ts))
+		fail("clock_gettime failed");
+	return (uint64)ts.tv_sec * 1000000000ULL + (uint64)ts.tv_nsec;
+}
+// ===============DDRD====================
 #endif
 
 #if SYZ_EXECUTOR || SYZ_SANDBOX_ANDROID || SYZ_USE_TMP_DIR
@@ -659,7 +678,14 @@ static void loop(void)
 		reset_loop();
 #endif
 #if SYZ_EXECUTOR
-		receive_execute();
+		// Use dispatch function to handle both regular and pair execution requests
+		int need_fork = receive_execute_dispatch();
+		if (!need_fork) {
+			// 配对执行已完成，跳过后续 fork
+			reply_execute(0);
+			remove_dir(cwdbuf);
+			continue;  // 直接进入下一轮循环
+		}
 #endif
 		int pid = fork();
 		if (pid < 0)

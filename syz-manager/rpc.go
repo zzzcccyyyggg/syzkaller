@@ -380,6 +380,14 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 	for _, inp := range r.NewInputs {
 		inp.Cover, inp.Signal = f.instModules.Decanonicalize(inp.Cover, inp.Signal)
 	}
+
+	// ===============DDRD====================
+	// 使用ConcurrencyCoordinator处理并发测试逻辑
+	if mgr := serv.mgr.(*Manager); mgr.concurrencyCoordinator != nil {
+		mgr.concurrencyCoordinator.HandlePoll(a, r)
+	}
+	// ===============DDRD====================
+
 	log.Logf(4, "poll from %v: candidates=%v inputs=%v maxsignal=%v",
 		a.Name, len(r.Candidates), len(r.NewInputs), len(r.MaxSignal.Elems))
 	return nil
@@ -399,5 +407,35 @@ func (serv *RPCServer) shutdownInstance(name string) []byte {
 
 func (serv *RPCServer) LogMessage(m *rpctype.LogMessageReq, r *int) error {
 	log.Logf(m.Level, "%s: %s", m.Name, m.Message)
+	return nil
+}
+
+// PollTestPairs 供 fuzzer 轮询获取test pair任务
+func (serv *RPCServer) PollTestPairs(a *rpctype.PollTestPairsArgs, r *rpctype.PollTestPairsRes) error {
+	mgr := serv.mgr.(*Manager)
+	if mgr.testPairDispatcher == nil || !mgr.testPairDispatcher.IsEnabled() {
+		r.Tasks = nil
+		return nil
+	}
+
+	tasks := mgr.testPairDispatcher.GetTasksForFuzzer(a.FuzzerName, a.MaxTasks)
+	r.Tasks = tasks
+	return nil
+}
+
+// CheckTestPairMode 检查是否处于test pair模式
+func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.CheckModeRes) error {
+	mgr := serv.mgr.(*Manager)
+	return mgr.CheckTestPairMode(a, r)
+}
+
+// SubmitTestPairResults 供 fuzzer 提交test pair执行结果
+func (serv *RPCServer) SubmitTestPairResults(a *rpctype.SubmitTestPairResultsArgs, r *int) error {
+	mgr := serv.mgr.(*Manager)
+	if mgr.testPairDispatcher == nil {
+		return nil
+	}
+
+	mgr.testPairDispatcher.HandleTestPairResults(a.FuzzerName, a.Results)
 	return nil
 }

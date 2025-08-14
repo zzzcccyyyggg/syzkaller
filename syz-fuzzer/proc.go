@@ -66,7 +66,30 @@ func (proc *Proc) loop() {
 		// because fallback signal is weak.
 		generatePeriod = 2
 	}
+
+	var lastModeCheck time.Time
+	var isTestPairMode bool
+
 	for i := 0; ; i++ {
+		// 每5秒检查一次模式，避免频繁RPC调用
+		if time.Since(lastModeCheck) > 5*time.Second {
+			// Use the new concurrency fuzzer API
+			newMode := proc.fuzzer.concurrencyFuzzer.IsConcurrencyMode()
+			if newMode != isTestPairMode {
+				log.Logf(0, "proc %d concurrency mode changed: %v -> %v", proc.pid, isTestPairMode, newMode)
+				isTestPairMode = newMode
+			}
+			lastModeCheck = time.Now()
+		}
+
+		// Enhanced mode execution
+		if isTestPairMode {
+			// Concurrency mode: execute test pairs and concurrency-optimized programs
+			proc.handleConcurrencyMode()
+			continue
+		}
+
+		// Normal模式：正常处理工作队列
 		item := proc.fuzzer.workQueue.dequeue()
 		if item != nil {
 			switch item := item.(type) {
@@ -96,6 +119,46 @@ func (proc *Proc) loop() {
 			log.Logf(1, "#%v: mutated", proc.pid)
 			proc.executeAndCollide(proc.execOpts, p, ProgNormal, StatFuzz)
 		}
+	}
+}
+
+// handleConcurrencyMode handles execution in concurrency testing mode
+func (proc *Proc) handleConcurrencyMode() {
+	// First, try to execute any test pairs
+	if pair := proc.fuzzer.concurrencyFuzzer.GetNextTestPair(); pair != nil {
+		result, err := proc.fuzzer.concurrencyFuzzer.ExecuteTestPair(pair, proc)
+		if err != nil {
+			log.Logf(1, "test pair execution failed: %v", err)
+		} else if result.RaceDetected {
+			log.Logf(0, "Race detected in test pair %s", pair.ID)
+			// TODO: Report race to manager
+		}
+		return
+	}
+
+	// If no test pairs, process work queue with concurrency bias
+	item := proc.fuzzer.workQueue.dequeue()
+	if item != nil {
+		switch item := item.(type) {
+		case *WorkTriage:
+			proc.triageInput(item)
+		case *WorkCandidate:
+			proc.executeAndCollide(proc.execOpts, item.p, item.flags, StatCandidate)
+		case *WorkSmash:
+			proc.smashInput(item)
+		default:
+			log.SyzFatalf("unknown work type: %#v", item)
+		}
+		return
+	}
+
+	// Generate concurrency-optimized programs
+	if p := proc.fuzzer.concurrencyFuzzer.GenerateConcurrencyCandidate(); p != nil {
+		log.Logf(1, "proc %d: executing concurrency candidate", proc.pid)
+		proc.executeAndCollide(proc.execOpts, p, ProgNormal, StatGenerate)
+	} else {
+		// Fallback: short sleep
+		time.Sleep(100 * time.Millisecond)
 	}
 }
 
@@ -176,6 +239,12 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		Signal:   inputSignal.Serialize(),
 		Cover:    inputCover.Serialize(),
 		RawCover: rawCover,
+		// ===============DDRD====================
+		RaceData: rpctype.RaceData{
+			Signals:     item.info.RaceData.Signals,
+			MappingData: item.info.RaceData.MappingData,
+		},
+		// ===============DDRD====================
 	})
 
 	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig)

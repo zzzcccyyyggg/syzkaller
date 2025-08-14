@@ -8,10 +8,23 @@ package rpctype
 import (
 	"math"
 
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/pkg/signal"
 )
+
+// ===============DDRD====================
+
+// RaceData contains all race-related information in a unified structure
+type RaceData struct {
+	Signals     []uint64 // race detection signals (64-bit to match executor output)
+	MappingData []byte   // serialized race-to-syscall mapping data
+	// Extended race pair information from executor
+	RacePairs []ddrd.MayRacePair // detailed race pair information with metadata
+}
+
+// ===============DDRD====================
 
 type Input struct {
 	Call     string
@@ -20,6 +33,9 @@ type Input struct {
 	Cover    []uint32
 	CallID   int // seq number of call in the prog to which the item is related (-1 for extra)
 	RawCover []uint32
+	// ===============DDRD====================
+	RaceData RaceData // unified race data structure containing both signals and mapping data
+	// ===============DDRD====================
 }
 
 type Candidate struct {
@@ -126,6 +142,14 @@ type NextExchangeRes struct {
 	ExecTask
 }
 
+type CheckModeArgs struct {
+	Name string
+}
+
+type CheckModeRes struct {
+	IsTestPairMode bool
+}
+
 const (
 	NoTask int64 = math.MaxInt64
 )
@@ -206,3 +230,52 @@ type LogMessageReq struct {
 	Name    string
 	Message string
 }
+
+// ===============DDRD====================
+
+// TestPairTask represents a test pair execution task
+type TestPairTask struct {
+	ID       string        // unique test pair ID
+	Prog1    []byte        // first program serialized data
+	Prog2    []byte        // second program serialized data
+	Hash1    string        // first program hash
+	Hash2    string        // second program hash
+	Opts     *ipc.ExecOpts // execution options
+	Priority int           // execution priority
+}
+
+// TestPairResult represents the result of test pair execution
+type TestPairResult struct {
+	ID       string             // test pair ID
+	Success  bool               // execution success
+	Error    string             // error message if failed
+	Info1    *ipc.ProgInfo      // first program execution info
+	Info2    *ipc.ProgInfo      // second program execution info
+	ExecTime int64              // execution time in nanoseconds
+	Races    []ddrd.MayRacePair // detected race conditions
+}
+
+// PollTestPairsArgs for fuzzer requesting test pairs from manager
+type PollTestPairsArgs struct {
+	FuzzerName string // fuzzer name
+	MaxTasks   int    // maximum number of tasks to request
+}
+
+// PollTestPairsRes for manager sending test pairs to fuzzer
+type PollTestPairsRes struct {
+	Tasks []TestPairTask // test pair tasks to execute
+}
+
+// SubmitTestPairResultsArgs for fuzzer submitting results to manager
+type SubmitTestPairResultsArgs struct {
+	FuzzerName string           // fuzzer name
+	Results    []TestPairResult // completed test pair results
+}
+
+// ParseRacePairInfoFromMappingData extracts RacePairInfo structures from executor mapping data
+// This is a wrapper function for backward compatibility, delegates to ddrd package
+func ParseRacePairInfoFromMappingData(mappingData []byte) []ddrd.MayRacePair {
+	return ddrd.ParseRacePairInfoFromMappingData(mappingData)
+}
+
+// ===============DDRD====================

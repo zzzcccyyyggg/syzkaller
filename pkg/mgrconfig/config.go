@@ -215,6 +215,19 @@ type Experimental struct {
 	// Don't let the VM state accumulate too much by restarting
 	// syz-executor before most prog executions.
 	ResetAccState bool `json:"reset_acc_state"`
+
+	// ===============DDRD====================
+	// Control fuzzing execution mode:
+	// "auto" (default): automatic two-phase mode (normal -> concurrency)
+	// "normal": only execute normal syzkaller fuzzing
+	// "concurrency": only execute concurrency testing
+	FuzzMode string `json:"fuzz_mode,omitempty"`
+
+	// Race reproduction enable/disable control:
+	// "enabled": enable automatic race reproduction based on lock status analysis
+	// "disabled" (default): disable race reproduction
+	RaceReproduction string `json:"race_reproduction,omitempty"`
+	// ===============DDRD====================
 }
 
 type Subsystem struct {

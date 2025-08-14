@@ -18,6 +18,17 @@ import (
 	"github.com/google/syzkaller/sys/targets"
 )
 
+// ReportedRace contains information about a reported race condition
+type ReportedRace struct {
+	VarName1         string // First variable name involved in the race
+	VarName2         string // Second variable name involved in the race (if available)
+	BlockLineNumber1 int    // Block line number for first access
+	BlockLineNumber2 int    // Block line number for second access (if available)
+	IsWrite1         bool   // Whether first access is a write
+	IsWrite2         bool   // Whether second access is a write (if available)
+	WatchpointIndex  int    // Watchpoint index (if available)
+}
+
 type reporterImpl interface {
 	// ContainsCrash searches kernel console output for oops messages.
 	ContainsCrash(output []byte) bool
@@ -66,6 +77,8 @@ type Report struct {
 	Recipients vcs.Recipients
 	// GuiltyFile is the source file that we think is to blame for the crash  (filled in by Symbolize).
 	GuiltyFile string
+	// ReportedRaces contains information about reported races (VarNames etc.)
+	ReportedRaces []ReportedRace
 	// reportPrefixLen is length of additional prefix lines that we added before actual crash report.
 	reportPrefixLen int
 	// symbolized is set if the report is symbolized.

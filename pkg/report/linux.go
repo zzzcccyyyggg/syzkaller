@@ -181,6 +181,12 @@ func (ctx *linux) Parse(output []byte) *Report {
 		if !rep.Corrupted {
 			rep.Corrupted, rep.CorruptedReason = ctx.isCorrupted(title, report, format)
 		}
+
+		// Parse custom datarace information if present
+		if rep.Type == crash.DataRace && bytes.Contains(report, []byte("============ DATARACE ============")) {
+			rep.ReportedRaces = ctx.parseCustomDatarace(report)
+		}
+
 		if rep.CorruptedReason == corruptedNoFrames && context != contextConsole && !questionable {
 			// We used to look at questionable frame with the following incentive:
 			// """
@@ -1675,209 +1681,209 @@ var linuxOopses = append([]*oops{
 		},
 		crash.UnknownType,
 	},
-	{
-		[]byte("WARNING:"),
-		[]oopsFormat{
-			{
-				title: compile("WARNING: .*lib/debugobjects\\.c.* (?:debug_print|debug_check)"),
-				fmt:   "WARNING: ODEBUG bug in %[1]v",
-				// Skip all users of ODEBUG as well.
-				stack: warningStackFmt("debug_", "rcu", "hrtimer_", "timer_",
-					"work_", "percpu_", "vunmap",
-					"vfree", "__free_", "debug_check", "kobject_"),
-			},
-			{
-				title: compile("WARNING: .*mm/usercopy\\.c.* usercopy_warn"),
-				fmt:   "WARNING: bad usercopy in %[1]v",
-				stack: warningStackFmt("usercopy", "__check"),
-			},
-			{
-				title: compile("WARNING: .*lib/kobject\\.c.* kobject_"),
-				fmt:   "WARNING: kobject bug in %[1]v",
-				stack: warningStackFmt("kobject_"),
-			},
-			{
-				title: compile("WARNING: .*fs/proc/generic\\.c.* proc_register"),
-				fmt:   "WARNING: proc registration bug in %[1]v",
-				stack: warningStackFmt("proc_"),
-			},
-			{
-				title: compile("WARNING: .*lib/refcount\\.c.* refcount_"),
-				fmt:   "WARNING: refcount bug in %[1]v",
-				stack: warningStackFmt("refcount", "kobject_"),
-			},
-			{
-				title:      compile("WARNING: .*kernel/locking/lockdep\\.c.*lock_"),
-				fmt:        "WARNING: locking bug in %[1]v",
-				stack:      warningStackFmt("lock_sock", "release_sock"),
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:      compile("WARNING: .*still has locks held!"),
-				report:     compile("WARNING: .*still has locks held!(?:.*\\n)+?.*at: {{FUNC}}"),
-				fmt:        "WARNING: still has locks held in %[1]v",
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:      compile("WARNING: Nested lock was not taken"),
-				fmt:        "WARNING: nested lock was not taken in %[1]v",
-				stack:      warningStackFmt(),
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:        compile("WARNING: lock held when returning to user space"),
-				report:       compile("WARNING: lock held when returning to user space(?:.*\\n)+?.*leaving the kernel with locks still held(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
-				fmt:          "WARNING: lock held when returning to user space in %[1]v",
-				noStackTrace: true,
-				reportType:   crash.LockdepBug,
-			},
-			{
-				title: compile("WARNING: .*mm/.*\\.c.* k?.?malloc"),
-				fmt:   "WARNING: kmalloc bug in %[1]v",
-				stack: warningStackFmt("kmalloc", "krealloc", "slab", "kmem"),
-			},
-			{
-				title: compile("WARNING: .*mm/vmalloc.c.*__vmalloc_node"),
-				fmt:   "WARNING: zero-size vmalloc in %[1]v",
-				stack: warningStackFmt(),
-			},
-			{
-				title: compile("WARNING: .* usb_submit_urb"),
-				fmt:   "WARNING in %[1]v/usb_submit_urb",
-				stack: warningStackFmt("usb_submit_urb", "usb_start_wait_urb", "usb_bulk_msg", "usb_interrupt_msg", "usb_control_msg"),
-			},
-			{
-				title: compile("WARNING: .* at {{SRC}} {{FUNC}}"),
-				fmt:   "WARNING in %[3]v",
-				stack: warningStackFmt(),
-			},
-			{
-				title:  compile("WARNING: possible circular locking dependency detected"),
-				report: compile("WARNING: possible circular locking dependency detected(?:.*\\n)+?.*is trying to acquire lock"),
-				fmt:    "possible deadlock in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						compile("at: (?:{{PC}} +)?{{FUNC}}"),
-						compile("at: (?:{{PC}} +)?{{FUNC}}"),
-						parseStackTrace,
-					},
-					// These workqueue functions take locks associated with work items.
-					// All deadlocks observed in these functions are
-					// work-item-subsystem-related.
-					skip: []string{"process_one_work", "flush_workqueue",
-						"drain_workqueue", "destroy_workqueue"},
-				},
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:      compile("WARNING: possible irq lock inversion dependency detected"),
-				report:     compile("WARNING: possible irq lock inversion dependency detected(?:.*\\n)+?.*just changed the state of lock(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
-				fmt:        "possible deadlock in %[1]v",
-				reportType: crash.LockdepBug,
-			},
-			{
-				title: compile("WARNING: .*-safe -> .*-unsafe lock order detected"),
-				fmt:   "possible deadlock in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						compile("which became (?:.*) at:"),
-						parseStackTrace,
-					},
-				},
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:      compile("WARNING: possible recursive locking detected"),
-				report:     compile("WARNING: possible recursive locking detected(?:.*\\n)+?.*is trying to acquire lock(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
-				fmt:        "possible deadlock in %[1]v",
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:  compile("WARNING: inconsistent lock state"),
-				report: compile("WARNING: inconsistent lock state(?:.*\\n)+?.*takes(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
-				fmt:    "inconsistent lock state in %[2]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						linuxCallTrace,
-						parseStackTrace,
-					},
-				},
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:  compile("WARNING: suspicious RCU usage"),
-				report: compile("WARNING: suspicious RCU usage(?:.*\n)+?.*?{{SRC}}"),
-				fmt:    "WARNING: suspicious RCU usage in %[2]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						linuxCallTrace,
-						parseStackTrace,
-					},
-					skip: []string{"rcu", "kmem", "slab"},
-				},
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:        compile("WARNING: kernel stack regs at [0-9a-f]+ in [^ ]* has bad '([^']+)' value"),
-				fmt:          "WARNING: kernel stack regs has bad '%[1]v' value",
-				noStackTrace: true,
-				reportType:   unspecifiedType, // This is printk().
-			},
-			{
-				title:        compile("WARNING: kernel stack frame pointer at [0-9a-f]+ in [^ ]* has bad value"),
-				fmt:          "WARNING: kernel stack frame pointer has bad value",
-				noStackTrace: true,
-				reportType:   unspecifiedType, // This is printk().
-			},
-			{
-				title: compile("WARNING: bad unlock balance detected!"),
-				fmt:   "WARNING: bad unlock balance in %[1]v",
-				stack: &stackFmt{
-					parts: []*regexp.Regexp{
-						compile("{{PC}} +{{FUNC}}"),
-						linuxCallTrace,
-						parseStackTrace,
-					},
-				},
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:      compile("WARNING: held lock freed!"),
-				report:     compile("WARNING: held lock freed!(?:.*\\n)+?.*at:(?: {{PC}})? +{{FUNC}}"),
-				fmt:        "WARNING: held lock freed in %[1]v",
-				reportType: crash.LockdepBug,
-			},
-			{
-				title:        compile("WARNING: kernel stack regs .* has bad 'bp' value"),
-				fmt:          "WARNING: kernel stack regs has bad value",
-				noStackTrace: true,
-				reportType:   unspecifiedType, // This is printk().
-			},
-			{
-				title:        compile("WARNING: kernel stack frame pointer .* has bad value"),
-				fmt:          "WARNING: kernel stack regs has bad value",
-				noStackTrace: true,
-				reportType:   unspecifiedType, // This is printk().
-			},
-			{
-				title:      compile(`WARNING:[[:space:]]*(?:\n|$)`),
-				fmt:        "WARNING: corrupted",
-				corrupted:  true,
-				reportType: unspecifiedType, // This is printk().
-			},
-		},
-		[]*regexp.Regexp{
-			compile("WARNING: /etc/ssh/moduli does not exist, using fixed modulus"), // printed by sshd
-			compile("WARNING: workqueue cpumask: online intersect > possible intersect"),
-			compile("WARNING: [Tt]he mand mount option (is being|has been) deprecated"),
-			compile("WARNING: Unsupported flag value\\(s\\) of 0x%x in DT_FLAGS_1"), // printed when glibc is dumped
-			compile("WARNING: Unprivileged eBPF is enabled with eIBRS"),
-			compile(`WARNING: fbcon: Driver '(.*)' missed to adjust virtual screen size (\((?:\d+)x(?:\d+) vs\. (?:\d+)x(?:\d+)\))`),
-			compile(`WARNING: See https.* for mitigation options.`),
-			compile(`WARNING: kernel not compiled with CPU_SRSO`),
-		},
-		crash.Warning,
-	},
+	// // {
+	// // 	[]byte("WARNING:"),
+	// // 	[]oopsFormat{
+	// // 		{
+	// // 			title: compile("WARNING: .*lib/debugobjects\\.c.* (?:debug_print|debug_check)"),
+	// // 			fmt:   "WARNING: ODEBUG bug in %[1]v",
+	// // 			// Skip all users of ODEBUG as well.
+	// // 			stack: warningStackFmt("debug_", "rcu", "hrtimer_", "timer_",
+	// // 				"work_", "percpu_", "vunmap",
+	// // 				"vfree", "__free_", "debug_check", "kobject_"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*mm/usercopy\\.c.* usercopy_warn"),
+	// // 			fmt:   "WARNING: bad usercopy in %[1]v",
+	// // 			stack: warningStackFmt("usercopy", "__check"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*lib/kobject\\.c.* kobject_"),
+	// // 			fmt:   "WARNING: kobject bug in %[1]v",
+	// // 			stack: warningStackFmt("kobject_"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*fs/proc/generic\\.c.* proc_register"),
+	// // 			fmt:   "WARNING: proc registration bug in %[1]v",
+	// // 			stack: warningStackFmt("proc_"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*lib/refcount\\.c.* refcount_"),
+	// // 			fmt:   "WARNING: refcount bug in %[1]v",
+	// // 			stack: warningStackFmt("refcount", "kobject_"),
+	// // 		},
+	// // 		{
+	// // 			title:      compile("WARNING: .*kernel/locking/lockdep\\.c.*lock_"),
+	// // 			fmt:        "WARNING: locking bug in %[1]v",
+	// // 			stack:      warningStackFmt("lock_sock", "release_sock"),
+	// // 			reportType: crash.LockdepBug,
+	// // 		},
+	// // 		{
+	// // 			title:      compile("WARNING: .*still has locks held!"),
+	// // 			report:     compile("WARNING: .*still has locks held!(?:.*\\n)+?.*at: {{FUNC}}"),
+	// // 			fmt:        "WARNING: still has locks held in %[1]v",
+	// // 			reportType: crash.LockdepBug,
+	// // 		},
+	// // 		{
+	// // 			title:      compile("WARNING: Nested lock was not taken"),
+	// // 			fmt:        "WARNING: nested lock was not taken in %[1]v",
+	// // 			stack:      warningStackFmt(),
+	// // 			reportType: crash.LockdepBug,
+	// // 		},
+	// // 		{
+	// // 			title:        compile("WARNING: lock held when returning to user space"),
+	// // 			report:       compile("WARNING: lock held when returning to user space(?:.*\\n)+?.*leaving the kernel with locks still held(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
+	// // 			fmt:          "WARNING: lock held when returning to user space in %[1]v",
+	// // 			noStackTrace: true,
+	// // 			reportType:   crash.LockdepBug,
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*mm/.*\\.c.* k?.?malloc"),
+	// // 			fmt:   "WARNING: kmalloc bug in %[1]v",
+	// // 			stack: warningStackFmt("kmalloc", "krealloc", "slab", "kmem"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .*mm/vmalloc.c.*__vmalloc_node"),
+	// // 			fmt:   "WARNING: zero-size vmalloc in %[1]v",
+	// // 			stack: warningStackFmt(),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .* usb_submit_urb"),
+	// // 			fmt:   "WARNING in %[1]v/usb_submit_urb",
+	// // 			stack: warningStackFmt("usb_submit_urb", "usb_start_wait_urb", "usb_bulk_msg", "usb_interrupt_msg", "usb_control_msg"),
+	// // 		},
+	// // 		{
+	// // 			title: compile("WARNING: .* at {{SRC}} {{FUNC}}"),
+	// // 			fmt:   "WARNING in %[3]v",
+	// // 			stack: warningStackFmt(),
+	// // 		},
+	// // 		{
+	// // 			title:  compile("WARNING: possible circular locking dependency detected"),
+	// // 			report: compile("WARNING: possible circular locking dependency detected(?:.*\\n)+?.*is trying to acquire lock"),
+	// // 			fmt:    "possible deadlock in %[1]v",
+	// // 			stack: &stackFmt{
+	// // 				parts: []*regexp.Regexp{
+	// // 					compile("at: (?:{{PC}} +)?{{FUNC}}"),
+	// // 					compile("at: (?:{{PC}} +)?{{FUNC}}"),
+	// // 					parseStackTrace,
+	// // 				},
+	// // 				// These workqueue functions take locks associated with work items.
+	// // 				// All deadlocks observed in these functions are
+	// // 				// work-item-subsystem-related.
+	// // 				skip: []string{"process_one_work", "flush_workqueue",
+	// // 					"drain_workqueue", "destroy_workqueue"},
+	// // 			},
+	// // 			reportType: crash.LockdepBug,
+	// // 		},
+	// // 		{
+	// // 			title:      compile("WARNING: possible irq lock inversion dependency detected"),
+	// // 			report:     compile("WARNING: possible irq lock inversion dependency detected(?:.*\\n)+?.*just changed the state of lock(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
+	// // 			fmt:        "possible deadlock in %[1]v",
+	// // 			reportType: crash.LockdepBug,
+	// // 		},
+	// 		{
+	// 			title: compile("WARNING: .*-safe -> .*-unsafe lock order detected"),
+	// 			fmt:   "possible deadlock in %[1]v",
+	// 			stack: &stackFmt{
+	// 				parts: []*regexp.Regexp{
+	// 					compile("which became (?:.*) at:"),
+	// 					parseStackTrace,
+	// 				},
+	// 			},
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:      compile("WARNING: possible recursive locking detected"),
+	// 			report:     compile("WARNING: possible recursive locking detected(?:.*\\n)+?.*is trying to acquire lock(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
+	// 			fmt:        "possible deadlock in %[1]v",
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:  compile("WARNING: inconsistent lock state"),
+	// 			report: compile("WARNING: inconsistent lock state(?:.*\\n)+?.*takes(?:.*\\n)+?.*at: (?:{{PC}} +)?{{FUNC}}"),
+	// 			fmt:    "inconsistent lock state in %[2]v",
+	// 			stack: &stackFmt{
+	// 				parts: []*regexp.Regexp{
+	// 					linuxCallTrace,
+	// 					parseStackTrace,
+	// 				},
+	// 			},
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:  compile("WARNING: suspicious RCU usage"),
+	// 			report: compile("WARNING: suspicious RCU usage(?:.*\n)+?.*?{{SRC}}"),
+	// 			fmt:    "WARNING: suspicious RCU usage in %[2]v",
+	// 			stack: &stackFmt{
+	// 				parts: []*regexp.Regexp{
+	// 					linuxCallTrace,
+	// 					parseStackTrace,
+	// 				},
+	// 				skip: []string{"rcu", "kmem", "slab"},
+	// 			},
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:        compile("WARNING: kernel stack regs at [0-9a-f]+ in [^ ]* has bad '([^']+)' value"),
+	// 			fmt:          "WARNING: kernel stack regs has bad '%[1]v' value",
+	// 			noStackTrace: true,
+	// 			reportType:   unspecifiedType, // This is printk().
+	// 		},
+	// 		{
+	// 			title:        compile("WARNING: kernel stack frame pointer at [0-9a-f]+ in [^ ]* has bad value"),
+	// 			fmt:          "WARNING: kernel stack frame pointer has bad value",
+	// 			noStackTrace: true,
+	// 			reportType:   unspecifiedType, // This is printk().
+	// 		},
+	// 		{
+	// 			title: compile("WARNING: bad unlock balance detected!"),
+	// 			fmt:   "WARNING: bad unlock balance in %[1]v",
+	// 			stack: &stackFmt{
+	// 				parts: []*regexp.Regexp{
+	// 					compile("{{PC}} +{{FUNC}}"),
+	// 					linuxCallTrace,
+	// 					parseStackTrace,
+	// 				},
+	// 			},
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:      compile("WARNING: held lock freed!"),
+	// 			report:     compile("WARNING: held lock freed!(?:.*\\n)+?.*at:(?: {{PC}})? +{{FUNC}}"),
+	// 			fmt:        "WARNING: held lock freed in %[1]v",
+	// 			reportType: crash.LockdepBug,
+	// 		},
+	// 		{
+	// 			title:        compile("WARNING: kernel stack regs .* has bad 'bp' value"),
+	// 			fmt:          "WARNING: kernel stack regs has bad value",
+	// 			noStackTrace: true,
+	// 			reportType:   unspecifiedType, // This is printk().
+	// 		},
+	// 		{
+	// 			title:        compile("WARNING: kernel stack frame pointer .* has bad value"),
+	// 			fmt:          "WARNING: kernel stack regs has bad value",
+	// 			noStackTrace: true,
+	// 			reportType:   unspecifiedType, // This is printk().
+	// 		},
+	// 		{
+	// 			title:      compile(`WARNING:[[:space:]]*(?:\n|$)`),
+	// 			fmt:        "WARNING: corrupted",
+	// 			corrupted:  true,
+	// 			reportType: unspecifiedType, // This is printk().
+	// 		},
+	// 	},
+	// 	[]*regexp.Regexp{
+	// 		compile("WARNING: /etc/ssh/moduli does not exist, using fixed modulus"), // printed by sshd
+	// 		compile("WARNING: workqueue cpumask: online intersect > possible intersect"),
+	// 		compile("WARNING: [Tt]he mand mount option (is being|has been) deprecated"),
+	// 		compile("WARNING: Unsupported flag value\\(s\\) of 0x%x in DT_FLAGS_1"), // printed when glibc is dumped
+	// 		compile("WARNING: Unprivileged eBPF is enabled with eIBRS"),
+	// 		compile(`WARNING: fbcon: Driver '(.*)' missed to adjust virtual screen size (\((?:\d+)x(?:\d+) vs\. (?:\d+)x(?:\d+)\))`),
+	// 		compile(`WARNING: See https.* for mitigation options.`),
+	// 		compile(`WARNING: kernel not compiled with CPU_SRSO`),
+	// 	},
+	// 	crash.Warning,
+	// },
 	{
 		[]byte("INFO:"),
 		[]oopsFormat{
@@ -2066,6 +2072,21 @@ var linuxOopses = append([]*oops{
 	{
 		[]byte("Kernel panic"),
 		[]oopsFormat{
+			// Custom DATARACE format with VarName extraction
+			{
+				title:  compile("Kernel panic: ============ DATARACE ============"),
+				report: compile("Kernel panic: ============ DATARACE ============\\nVarName ([0-9]+),"),
+				fmt:    "CUSTOM_DATARACE: VarName %[1]v",
+				alt:    []string{"data-race with VarName %[1]v"},
+				stack: &stackFmt{
+					parts: []*regexp.Regexp{
+						compile("Function: ([^\\n]+)"),
+						parseStackTrace,
+					},
+				},
+				reportType:   crash.DataRace,
+				noStackTrace: false,
+			},
 			// Note: for stack corruption reports kernel may fail
 			// to print function symbol name and/or unwind stack.
 			{
@@ -2464,3 +2485,42 @@ var linuxOopses = append([]*oops{
 	},
 	&groupGoRuntimeErrors,
 }, commonOopses...)
+
+// parseCustomDatarace extracts VarName and other information from custom datarace reports
+func (ctx *linux) parseCustomDatarace(report []byte) []ReportedRace {
+	var races []ReportedRace
+
+	// Convert to string for easier parsing
+	reportStr := string(report)
+
+	// Regular expressions for parsing the custom datarace format
+	varNameRe := regexp.MustCompile(`VarName (\d+), BlockLineNumber (\d+), IrLineNumber \d+, is write ([01])`)
+	otherInfoRe := regexp.MustCompile(`============OTHER_INFO============\s*VarName (\d+), BlockLineNumber (\d+), IrLineNumber \d+,\s*(?:.*\n)*?watchpoint index (\d+)`)
+
+	// Find first VarName (main race participant)
+	matches := varNameRe.FindStringSubmatch(reportStr)
+	if len(matches) >= 4 {
+		race := ReportedRace{}
+		race.VarName1 = matches[1]
+		if blockLine, err := strconv.Atoi(matches[2]); err == nil {
+			race.BlockLineNumber1 = blockLine
+		}
+		race.IsWrite1 = matches[3] == "1"
+
+		// Look for OTHER_INFO section for second variable
+		otherMatches := otherInfoRe.FindStringSubmatch(reportStr)
+		if len(otherMatches) >= 4 {
+			race.VarName2 = otherMatches[1]
+			if blockLine, err := strconv.Atoi(otherMatches[2]); err == nil {
+				race.BlockLineNumber2 = blockLine
+			}
+			if watchpoint, err := strconv.Atoi(otherMatches[3]); err == nil {
+				race.WatchpointIndex = watchpoint
+			}
+		}
+
+		races = append(races, race)
+	}
+
+	return races
+}

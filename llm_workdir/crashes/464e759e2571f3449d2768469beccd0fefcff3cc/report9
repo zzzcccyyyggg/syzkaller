@@ -1,0 +1,6 @@
+ioctl$BTRFS_IOC_SCRUB(r2, 0xc400941b, &(0x7f00000036c0)={0x0, 0x2, 0x2e})
+ioctl$BTRFS_IOC_RESIZE(r0, 0x50009403, 0x0)
+open$btrfs(&(0x7f0000000000), 0x202, 0xc)
+r5 = open$btrfs(&(0x7f0000002b00), 0x129002, 0x9)
+ioctl$BTRFS_IOC_BALANCE_CTL(r5, 0x40049421, 0x2)
+2025/08/11 15:23:20 SYZFATAL: executor 2 failed 11 times: bad reply magic 0x1

@@ -56,6 +56,9 @@ func (mgr *Manager) initHTTP() {
 	handle("/input", mgr.httpInput)
 	handle("/debuginput", mgr.httpDebugInput)
 	handle("/modules", mgr.modulesInfo)
+	handle("/raceReports", mgr.httpRaceReports)
+	handle("/racePairCoverage", mgr.httpRacePairCoverage)
+	handle("/fuzzScheduler", mgr.httpFuzzScheduler)
 	// Browsers like to request this, without special handler this goes to / handler.
 	handle("/favicon.ico", func(w http.ResponseWriter, r *http.Request) {})
 
@@ -154,6 +157,30 @@ func (mgr *Manager) collectStats() []UIStat {
 			Link:  "/syscalls",
 		})
 	}
+
+	// 添加race报告统计
+	raceStats := mgr.raceReportManager.GetRaceStats()
+	if totalRaces, ok := raceStats["total_unique_races"].(int); ok && totalRaces > 0 {
+		stats = append(stats, UIStat{
+			Name:  "reported races",
+			Value: fmt.Sprint(totalRaces),
+			Link:  "/raceReports",
+		})
+	}
+
+	// 添加fuzz调度器统计
+	fuzzStats := mgr.fuzzScheduler.GetPhaseStats()
+	currentPhase := fuzzStats["current_phase"].(FuzzPhase)
+	phaseRuntime := fuzzStats["phase_runtime"].(time.Duration)
+	phaseName := "Normal Fuzz"
+	if currentPhase == PhaseRaceFuzz {
+		phaseName = "Race Fuzz"
+	}
+	stats = append(stats, UIStat{
+		Name:  "fuzz phase",
+		Value: fmt.Sprintf("%s (%v)", phaseName, phaseRuntime/time.Second*time.Second),
+		Link:  "/fuzzScheduler",
+	})
 
 	secs := uint64(1)
 	if !mgr.firstConnect.IsZero() {
@@ -1036,3 +1063,593 @@ var rawCoverTemplate = pages.Create(`
 </table>
 </body></html>
 `)
+
+func (mgr *Manager) httpRaceReports(w http.ResponseWriter, r *http.Request) {
+	// 获取URL参数
+	viewType := r.URL.Query().Get("view")
+	varName := r.URL.Query().Get("varname")
+	groupKey := r.URL.Query().Get("group")
+
+	// 获取统计信息
+	stats := mgr.raceReportManager.GetRaceStats()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	// 根据view类型展示不同的内容
+	switch viewType {
+	case "groups":
+		mgr.renderRaceGroups(w, groupKey, stats)
+	case "individual":
+		mgr.renderIndividualRaces(w, varName, stats)
+	default:
+		mgr.renderRaceOverview(w, stats)
+	}
+}
+
+// renderRaceOverview shows the main race reports overview with navigation
+func (mgr *Manager) renderRaceOverview(w http.ResponseWriter, stats map[string]interface{}) {
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Race Reports Overview - %s</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .nav-tabs { margin-bottom: 20px; }
+        .nav-tabs a { 
+            display: inline-block; 
+            padding: 10px 20px; 
+            margin-right: 5px; 
+            background-color: #f1f1f1; 
+            text-decoration: none; 
+            border: 1px solid #ccc; 
+        }
+        .nav-tabs a.active { background-color: #007cba; color: white; }
+        .stats { background-color: #f9f9f9; padding: 15px; margin-bottom: 20px; }
+        .overview-section { margin-bottom: 30px; }
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+    </style>
+</head>
+<body>
+    <h1>Race Reports for %s</h1>
+    
+    <div class="nav-tabs">
+        <a href="/raceReports" class="active">Overview</a>
+        <a href="/raceReports?view=groups">VarName Pair Groups</a>
+        <a href="/raceReports?view=individual">Individual Reports</a>
+    </div>
+    
+    <div class="stats">
+        <h3>总体统计</h3>
+        <p>唯一竞争总数: %v</p>
+        <p>唯一变量名总数: %v</p>
+        <p>总发生次数: %v</p>
+        <p>VarName对分组数量: %v</p>
+    </div>
+    
+    <div class="overview-section">
+        <h3>快速导航</h3>
+        <ul>
+            <li><a href="/raceReports?view=groups">按VarName对查看分组</a> - 查看相同变量名对的竞争归类</li>
+            <li><a href="/raceReports?view=individual">查看所有单个报告</a> - 详细的时间顺序列表</li>
+        </ul>
+    </div>
+    
+    <a href="/">返回主页</a>
+</body>
+</html>`, mgr.cfg.Name, mgr.cfg.Name,
+		stats["total_unique_races"], stats["unique_var_names"], stats["total_occurrences"],
+		len(mgr.raceReportManager.GetRaceGroups()))
+}
+
+// renderRaceGroups shows races grouped by VarName pairs
+func (mgr *Manager) renderRaceGroups(w http.ResponseWriter, selectedGroup string, _ map[string]interface{}) {
+	raceGroups := mgr.raceReportManager.GetRaceGroups()
+
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Race Groups by VarName Pairs - %s</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .nav-tabs { margin-bottom: 20px; }
+        .nav-tabs a { 
+            display: inline-block; 
+            padding: 10px 20px; 
+            margin-right: 5px; 
+            background-color: #f1f1f1; 
+            text-decoration: none; 
+            border: 1px solid #ccc; 
+        }
+        .nav-tabs a.active { background-color: #007cba; color: white; }
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .varname { font-family: monospace; background-color: #fffacd; }
+        .group-details { margin-top: 20px; }
+    </style>
+</head>
+<body>
+    <h1>VarName对分组 - %s</h1>
+    
+    <div class="nav-tabs">
+        <a href="/raceReports">Overview</a>
+        <a href="/raceReports?view=groups" class="active">VarName Pair Groups</a>
+        <a href="/raceReports?view=individual">Individual Reports</a>
+    </div>
+    
+    <h2>按VarName对分组的竞争报告</h2>
+    <p>总共 %d 个不同的VarName对</p>
+    
+    <table>
+        <tr>
+            <th>VarName1</th>
+            <th>VarName2</th>
+            <th>报告数量</th>
+            <th>首次发现</th>
+            <th>最后发现</th>
+            <th>操作</th>
+        </tr>`, mgr.cfg.Name, mgr.cfg.Name, len(raceGroups))
+
+	for _, group := range raceGroups {
+		fmt.Fprintf(w, `
+        <tr>
+            <td class="varname">%s</td>
+            <td class="varname">%s</td>
+            <td>%d</td>
+            <td>%s</td>
+            <td>%s</td>
+            <td><a href="/raceReports?view=groups&group=%s">查看详情</a></td>
+        </tr>`,
+			group.VarName1,
+			group.VarName2,
+			group.TotalCount,
+			group.FirstSeen.Format("2006-01-02 15:04:05"),
+			group.LastSeen.Format("2006-01-02 15:04:05"),
+			group.VarNameKey)
+	}
+
+	fmt.Fprintf(w, `
+    </table>`)
+
+	// 如果选择了特定的组，显示详细信息
+	if selectedGroup != "" {
+		if group, exists := raceGroups[selectedGroup]; exists {
+			fmt.Fprintf(w, `
+    <div class="group-details">
+        <h3>组详情: %s ↔ %s</h3>
+        <table>
+            <tr>
+                <th>时间戳</th>
+                <th>报告ID</th>
+                <th>块行号</th>
+                <th>写入标志</th>
+                <th>观察点索引</th>
+            </tr>`, group.VarName1, group.VarName2)
+
+			for _, entry := range group.Entries {
+				fmt.Fprintf(w, `
+            <tr>
+                <td>%s</td>
+                <td>%s</td>
+                <td>%d / %d</td>
+                <td>%v / %v</td>
+                <td>%d</td>
+            </tr>`,
+					entry.Timestamp.Format("2006-01-02 15:04:05"),
+					entry.ReportID,
+					entry.Race.BlockLineNumber1, entry.Race.BlockLineNumber2,
+					entry.Race.IsWrite1, entry.Race.IsWrite2,
+					entry.Race.WatchpointIndex)
+			}
+
+			fmt.Fprintf(w, `
+        </table>
+    </div>`)
+		}
+	}
+
+	fmt.Fprintf(w, `
+    <br>
+    <a href="/raceReports">返回概览</a> | <a href="/">返回主页</a>
+</body>
+</html>`)
+}
+
+// renderIndividualRaces shows individual race reports with optional filtering
+func (mgr *Manager) renderIndividualRaces(w http.ResponseWriter, varName string, stats map[string]interface{}) {
+	// 获取所有race报告
+	allRaces := mgr.raceReportManager.GetAllRaces()
+
+	// 按VarName查询
+	var filteredRaces []*ReportedRaceEntry
+	if varName != "" {
+		filteredRaces = mgr.raceReportManager.GetRacesByVarName(varName)
+	} else {
+		filteredRaces = allRaces
+	}
+
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Individual Race Reports - %s</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .nav-tabs { margin-bottom: 20px; }
+        .nav-tabs a { 
+            display: inline-block; 
+            padding: 10px 20px; 
+            margin-right: 5px; 
+            background-color: #f1f1f1; 
+            text-decoration: none; 
+            border: 1px solid #ccc; 
+        }
+        .nav-tabs a.active { background-color: #007cba; color: white; }
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .stats { background-color: #f9f9f9; padding: 10px; margin-bottom: 20px; }
+        .varname { font-family: monospace; background-color: #fffacd; }
+    </style>
+</head>
+<body>
+    <h1>单个竞争报告 - %s</h1>
+    
+    <div class="nav-tabs">
+        <a href="/raceReports">Overview</a>
+        <a href="/raceReports?view=groups">VarName Pair Groups</a>
+        <a href="/raceReports?view=individual" class="active">Individual Reports</a>
+    </div>
+    
+    <div class="stats">
+        <h3>统计信息</h3>
+        <p>总唯一竞争: %v</p>
+        <p>唯一变量名: %v</p>
+        <p>总发生次数: %v</p>
+    </div>
+    
+    <form method="GET" style="margin-bottom: 20px;">
+        <input type="hidden" name="view" value="individual">
+        <label for="varname">按VarName过滤:</label>
+        <input type="text" id="varname" name="varname" value="%s" placeholder="输入VarName">
+        <input type="submit" value="过滤">
+        <a href="/raceReports?view=individual">清除过滤</a>
+    </form>
+    
+    <h2>竞争报告 (共%d个)</h2>
+    <table>
+        <tr>
+            <th>时间戳</th>
+            <th>报告ID</th>
+            <th>VarName1</th>
+            <th>VarName2</th>
+            <th>块行号</th>
+            <th>写入标志</th>
+            <th>观察点索引</th>
+            <th>次数</th>
+        </tr>`,
+		mgr.cfg.Name, mgr.cfg.Name,
+		stats["total_unique_races"], stats["unique_var_names"], stats["total_occurrences"],
+		varName, len(filteredRaces))
+
+	for _, entry := range filteredRaces {
+		fmt.Fprintf(w, `
+        <tr>
+            <td>%s</td>
+            <td>%s</td>
+            <td class="varname">%s</td>
+            <td class="varname">%s</td>
+            <td>%d / %d</td>
+            <td>%v / %v</td>
+            <td>%d</td>
+            <td>%d</td>
+        </tr>`,
+			entry.Timestamp.Format("2006-01-02 15:04:05"),
+			entry.ReportID,
+			entry.Race.VarName1,
+			entry.Race.VarName2,
+			entry.Race.BlockLineNumber1, entry.Race.BlockLineNumber2,
+			entry.Race.IsWrite1, entry.Race.IsWrite2,
+			entry.Race.WatchpointIndex,
+			entry.Count)
+	}
+
+	fmt.Fprintf(w, `
+    </table>
+    <br>
+    <a href="/raceReports">返回概览</a> | <a href="/">返回主页</a>
+</body>
+</html>`)
+}
+
+// httpFuzzScheduler displays the fuzz scheduler status and statistics
+func (mgr *Manager) httpFuzzScheduler(w http.ResponseWriter, r *http.Request) {
+	stats := mgr.fuzzScheduler.GetPhaseStats()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	fmt.Fprintf(w, `
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Fuzz Scheduler Status</title>
+    <style>
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .phase-normal { background-color: #e8f5e8; }
+        .phase-race { background-color: #fff8e8; }
+    </style>
+</head>
+<body>
+    <h1>Fuzz Scheduler Status</h1>
+    
+    <h2>Current Phase Information</h2>
+    <table>
+        <tr><th>Parameter</th><th>Value</th></tr>`)
+
+	// 显示当前阶段信息
+	currentPhase := stats["current_phase"].(FuzzPhase)
+	phaseClass := "phase-normal"
+	phaseName := "Normal Fuzz"
+	if currentPhase == PhaseRaceFuzz {
+		phaseName = "Race Fuzz"
+		phaseClass = "phase-race"
+	}
+
+	fmt.Fprintf(w, `
+        <tr class="%s"><td>Current Phase</td><td><strong>%s</strong></td></tr>
+        <tr><td>Phase Start Time</td><td>%v</td></tr>
+        <tr><td>Phase Runtime</td><td>%v</td></tr>
+        <tr><td>Normal Fuzz Enabled</td><td>%v</td></tr>
+        <tr><td>Race Fuzz Enabled</td><td>%v</td></tr>
+    </table>
+    
+    <h2>Signal Statistics</h2>
+    <table>
+        <tr><th>Signal Type</th><th>Count</th><th>Last Update</th><th>Stable Time</th></tr>`,
+		phaseClass, phaseName,
+		stats["phase_start_time"],
+		stats["phase_runtime"],
+		stats["normal_fuzz_enabled"],
+		stats["race_fuzz_enabled"])
+
+	fmt.Fprintf(w, `
+        <tr><td>Normal Signal</td><td>%v</td><td>%v</td><td>%v</td></tr>
+        <tr><td>Race Signal</td><td>%v</td><td>%v</td><td>%v</td></tr>
+    </table>
+    
+    <h2>Phase Logic</h2>
+    <p><strong>Normal Fuzz Phase:</strong> Runs until signal is stable for 5 minutes OR 1 hour elapsed</p>
+    <p><strong>Race Fuzz Phase:</strong> Runs until race signal is stable for 5 minutes OR 1 hour elapsed</p>
+    <p>Race detection and collection are <strong>disabled</strong> during Normal Fuzz phase for performance.</p>
+    
+    <br>
+    <a href="/">Back to Summary</a>
+</body>
+</html>`,
+		stats["last_signal_count"],
+		stats["last_signal_update"],
+		stats["signal_stable_time"],
+		stats["last_race_signal_count"],
+		stats["last_race_signal_update"],
+		stats["race_signal_stable_time"])
+}
+
+// httpRacePairCoverage displays race pair coverage statistics and discovered pairs
+func (mgr *Manager) httpRacePairCoverage(w http.ResponseWriter, r *http.Request) {
+	viewType := r.URL.Query().Get("view")
+	lockStatus := r.URL.Query().Get("status")
+
+	stats := mgr.racePairCoverageManager.GetStatistics()
+
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+
+	switch viewType {
+	case "pairs":
+		mgr.renderRacePairs(w, lockStatus, stats)
+	default:
+		mgr.renderRacePairOverview(w, stats)
+	}
+}
+
+// renderRacePairOverview shows the race pair coverage overview
+func (mgr *Manager) renderRacePairOverview(w http.ResponseWriter, stats map[string]interface{}) {
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Race Pair Coverage - %s</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .nav-tabs { margin-bottom: 20px; }
+        .nav-tabs a { 
+            display: inline-block; 
+            padding: 10px 20px; 
+            margin-right: 5px; 
+            background-color: #f1f1f1; 
+            text-decoration: none; 
+            border: 1px solid #ccc; 
+        }
+        .nav-tabs a.active { background-color: #007cba; color: white; }
+        .stats { background-color: #f9f9f9; padding: 15px; margin-bottom: 20px; }
+        .status-grid { display: grid; grid-template-columns: repeat(2, 1fr); gap: 15px; margin-top: 20px; }
+        .status-card { 
+            border: 1px solid #ddd; 
+            padding: 15px; 
+            background-color: white; 
+            border-radius: 5px; 
+        }
+        .status-card h3 { margin-top: 0; color: #007cba; }
+    </style>
+</head>
+<body>
+    <h1>Race Pair Coverage - %s</h1>
+    
+    <div class="nav-tabs">
+        <a href="/racePairCoverage" class="active">Overview</a>
+        <a href="/racePairCoverage?view=pairs">All Pairs</a>
+        <a href="/raceReports">Race Reports</a>
+        <a href="/fuzzScheduler">Fuzz Scheduler</a>
+    </div>
+    
+    <div class="stats">
+        <h3>总体统计</h3>
+        <p>启用状态: %v</p>
+        <p>总Race Pair数量: %v</p>
+        <p>总覆盖率信号: %v</p>
+    </div>
+    
+    <h3>按锁状态分类</h3>
+    <div class="status-grid">`, mgr.cfg.Name, mgr.cfg.Name,
+		stats["enabled"], stats["total_race_pairs"], stats["total_signal"])
+
+	if lockStats, ok := stats["lock_status_stats"].(map[string]int); ok {
+		statusColors := map[string]string{
+			"No Locks":                   "#ff6b6b",
+			"One-Sided Lock":             "#ffa726",
+			"Unsynchronized Locks":       "#ffcc02",
+			"Synchronized (Common Lock)": "#66bb6a",
+		}
+
+		for status, count := range lockStats {
+			color := statusColors[status]
+			if color == "" {
+				color = "#757575"
+			}
+
+			fmt.Fprintf(w, `
+        <div class="status-card" style="border-left: 4px solid %s;">
+            <h3>%s</h3>
+            <p>数量: %d</p>
+            <p><a href="/racePairCoverage?view=pairs&status=%s">查看详情</a></p>
+        </div>`, color, status, count, status)
+		}
+	}
+
+	fmt.Fprintf(w, `
+    </div>
+    
+    <a href="/">返回主页</a>
+</body>
+</html>`)
+}
+
+// renderRacePairs shows individual race pairs with optional filtering
+func (mgr *Manager) renderRacePairs(w http.ResponseWriter, statusFilter string, _ map[string]interface{}) {
+	var pairs []*RacePair
+
+	if statusFilter != "" {
+		// Parse status filter
+		var filterStatus LockStatus
+		switch statusFilter {
+		case "No Locks":
+			filterStatus = NoLocks
+		case "One-Sided Lock":
+			filterStatus = OneSidedLock
+		case "Unsynchronized Locks":
+			filterStatus = UnsyncLocks
+		case "Synchronized (Common Lock)":
+			filterStatus = SyncWithCommonLock
+		default:
+			pairs = mgr.racePairCoverageManager.GetAllRacePairs()
+		}
+
+		if statusFilter != "" {
+			pairs = mgr.racePairCoverageManager.GetRacePairsByLockStatus(filterStatus)
+		}
+	} else {
+		pairs = mgr.racePairCoverageManager.GetAllRacePairs()
+	}
+
+	fmt.Fprintf(w, `<!DOCTYPE html>
+<html>
+<head>
+    <title>Race Pairs - %s</title>
+    <style>
+        body { font-family: Arial, sans-serif; margin: 20px; }
+        .nav-tabs { margin-bottom: 20px; }
+        .nav-tabs a { 
+            display: inline-block; 
+            padding: 10px 20px; 
+            margin-right: 5px; 
+            background-color: #f1f1f1; 
+            text-decoration: none; 
+            border: 1px solid #ccc; 
+        }
+        .nav-tabs a.active { background-color: #007cba; color: white; }
+        table { border-collapse: collapse; width: 100%%; }
+        th, td { border: 1px solid #ddd; padding: 8px; text-align: left; }
+        th { background-color: #f2f2f2; }
+        .varname { font-family: monospace; background-color: #fffacd; }
+        .status-no-locks { background-color: #ffebee; }
+        .status-one-sided { background-color: #fff3e0; }
+        .status-unsync { background-color: #fffde7; }
+        .status-sync { background-color: #e8f5e8; }
+    </style>
+</head>
+<body>
+    <h1>Race Pairs - %s</h1>
+    
+    <div class="nav-tabs">
+        <a href="/racePairCoverage">Overview</a>
+        <a href="/racePairCoverage?view=pairs" class="active">All Pairs</a>
+        <a href="/raceReports">Race Reports</a>
+        <a href="/fuzzScheduler">Fuzz Scheduler</a>
+    </div>
+    
+    <h2>发现的Race Pairs (共%d个)</h2>
+    <p>过滤条件: %s</p>
+    
+    <table>
+        <tr>
+            <th>VarName1</th>
+            <th>VarName2</th>
+            <th>访问类型</th>
+            <th>锁状态</th>
+            <th>触发次数</th>
+            <th>时间差(ns)</th>
+            <th>首次发现</th>
+            <th>最后发现</th>
+        </tr>`, mgr.cfg.Name, mgr.cfg.Name, len(pairs), statusFilter)
+
+	for _, pair := range pairs {
+		var statusClass string
+		switch pair.LockStatus {
+		case NoLocks:
+			statusClass = "status-no-locks"
+		case OneSidedLock:
+			statusClass = "status-one-sided"
+		case UnsyncLocks:
+			statusClass = "status-unsync"
+		case SyncWithCommonLock:
+			statusClass = "status-sync"
+		}
+
+		fmt.Fprintf(w, `
+        <tr class="%s">
+            <td class="varname">%d</td>
+            <td class="varname">%d</td>
+            <td>%c ↔ %c</td>
+            <td>%s</td>
+            <td>%d</td>
+            <td>%d</td>
+            <td>%s</td>
+            <td>%s</td>
+        </tr>`, statusClass,
+			pair.First.VarName, pair.Second.VarName,
+			pair.First.AccessType, pair.Second.AccessType,
+			pair.LockStatus.String(),
+			pair.TriggerCounts,
+			pair.AccessTimeDiff,
+			pair.FirstSeen.Format("2006-01-02 15:04:05"),
+			pair.LastSeen.Format("2006-01-02 15:04:05"))
+	}
+
+	fmt.Fprintf(w, `
+    </table>
+    
+    <br>
+    <a href="/racePairCoverage">返回概览</a> | <a href="/">返回主页</a>
+</body>
+</html>`)
+}
