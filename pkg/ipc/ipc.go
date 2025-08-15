@@ -15,6 +15,7 @@ import (
 	"time"
 	"unsafe"
 
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
@@ -114,6 +115,11 @@ type CallInfo struct {
 type ProgInfo struct {
 	Calls []CallInfo
 	Extra CallInfo // stores Signal and Cover collected from background threads
+}
+
+type PairProgInfo struct {
+	pairCount    uint32             // number of pairs
+	mayRacePairs []ddrd.MayRacePair // store the detail information of each pair
 }
 
 type Env struct {
@@ -428,7 +434,7 @@ func (c *command) execPair(opts1, opts2 *ExecOpts, prog1Data, prog2Data []byte) 
 // Returns unified race coverage results after both programs complete
 func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	output []byte,
-	info *ProgInfo,
+	info *PairProgInfo,
 	hanged bool,
 	err0 error) {
 
@@ -501,7 +507,8 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 }
 
 // parsePairOutput parses the race detection output from pair execution
-func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*ProgInfo, error) {
+func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
+
 	out := env.out
 
 	// Pair execution output format:
@@ -521,64 +528,19 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*ProgInfo, error) {
 		return nil, fmt.Errorf("failed to read pair count")
 	}
 
-	info := &ProgInfo{
-		Calls: make([]CallInfo, len(p1.Calls)+len(p2.Calls)),
-		Extra: CallInfo{},
+	info := &PairProgInfo{
+		mayRacePairs: make([]ddrd.MayRacePair, pairCount),
+		pairCount:    pairCount,
 	}
 
-	const pairRecordSize = 76 // bytes per may_race_pair_t record
+	sz := int(unsafe.Sizeof(ddrd.MayRacePair{}))
 	for i := uint32(0); i < pairCount; i++ {
-		if len(out) < pairRecordSize {
+		if len(out) < sz {
 			return nil, fmt.Errorf("pair %v: truncated output", i)
 		}
-		record := out[:pairRecordSize]
-		out = out[pairRecordSize:]
-
-		tmp := record
-		// Skip metadata we don't currently use.
-		if _, ok = readUint32(&tmp); !ok { // syscall1_idx
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // syscall2_idx
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // syscall1_num
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // syscall2_num
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint64(&tmp); !ok { // varName1
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint64(&tmp); !ok { // varName2
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint64(&tmp); !ok { // call_stack1
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint64(&tmp); !ok { // call_stack2
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		signal, ok := readUint64(&tmp)
-		if !ok {
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // lock_type
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // access_type1
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint32(&tmp); !ok { // access_type2
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-		if _, ok = readUint64(&tmp); !ok { // time_diff
-			return nil, fmt.Errorf("pair %v: bad data", i)
-		}
-
-		info.Extra.RaceData.Signals = append(info.Extra.RaceData.Signals, signal)
-		info.Extra.RaceData.MappingData = append(info.Extra.RaceData.MappingData, record...)
+		mayRacePair := (*ddrd.MayRacePair)(unsafe.Pointer(&out[0]))
+		info.mayRacePairs[i] = *mayRacePair
+		out = out[sz:]
 	}
 
 	return info, nil
@@ -597,7 +559,7 @@ type ExecPairOpts struct {
 // ExecPairWithOpts executes a pair of programs with advanced options
 func (env *Env) ExecPairWithOpts(pairOpts *ExecPairOpts, p1, p2 *prog.Prog) (
 	output []byte,
-	info *ProgInfo,
+	info *PairProgInfo,
 	hanged bool,
 	err0 error) {
 
@@ -631,48 +593,6 @@ func (env *Env) ExecPairWithOpts(pairOpts *ExecPairOpts, p1, p2 *prog.Prog) (
 	// Use the unified ExecPair implementation
 	return env.ExecPair(opts1, opts2, p1, p2)
 }
-
-// ExecPairRaceDetection executes a pair of programs specifically for race detection
-func (env *Env) ExecPairRaceDetection(p1, p2 *prog.Prog) (
-	raceData []RaceData,
-	output []byte,
-	err0 error) {
-
-	// Configure options for race detection
-	opts := &ExecPairOpts{
-		Opts1: &ExecOpts{
-			Flags: FlagCollectRace | FlagTestPairSync,
-		},
-		Opts2: &ExecOpts{
-			Flags: FlagCollectRace | FlagTestPairSync,
-		},
-		EnableRaceCollection: true,
-		SyncTimeout:          15 * time.Second, // Longer timeout for race detection
-	}
-
-	output, info, _, err0 := env.ExecPairWithOpts(opts, p1, p2)
-	if err0 != nil {
-		return
-	}
-
-	// Extract race data from execution info
-	if info != nil {
-		// Collect race data from all calls
-		for _, call := range info.Calls {
-			if len(call.RaceData.Signals) > 0 || len(call.RaceData.MappingData) > 0 {
-				raceData = append(raceData, call.RaceData)
-			}
-		}
-		// Include extra race data (unified race result)
-		if len(info.Extra.RaceData.Signals) > 0 || len(info.Extra.RaceData.MappingData) > 0 {
-			raceData = append(raceData, info.Extra.RaceData)
-		}
-	}
-
-	return
-}
-
-// ================================DDRD================================
 
 func (env *Env) ForceRestart() {
 	if env.cmd != nil {

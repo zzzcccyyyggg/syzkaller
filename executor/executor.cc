@@ -1239,7 +1239,7 @@ void execute_pair()
 	// Collect and output race data once after pair execution completes
 	if (flag_collect_race) {
 		debug("[%llums] collecting race data after pair execution\n", current_time_ms() - start_time_ms);
-		
+
 		write_output(kOutPairMagic); // 魔数
 		uint32* pair_count_pos = write_output(0); // 占位：pair 数量
 
@@ -1267,7 +1267,6 @@ void execute_pair()
 			write_output((uint32)pr->access_type1); // 4
 			write_output((uint32)pr->access_type2); // 4
 			write_output_64((uint64)pr->time_diff); // 8
-
 		}
 
 		*pair_count_pos = (uint32)pair_count;
@@ -1339,7 +1338,8 @@ void execute_one()
 #if SYZ_EXECUTOR_USES_SHMEM
 	realloc_output_data();
 	output_pos = output_data;
-	write_output(0); // Number of executed syscalls (updated later).
+	if (!flag_collect_race)
+		write_output(0); // Number of executed syscalls (updated later).
 #endif // if SYZ_EXECUTOR_USES_SHMEM
 
 	// 在execute_one中已经保证了两个线程的并发控制
@@ -1747,54 +1747,54 @@ void write_call_output(thread_t* th, bool finished)
 			      (th->fault_injected ? call_flag_fault_injected : 0);
 	}
 #if SYZ_EXECUTOR_USES_SHMEM
-	write_output(kOutMagic);
-	write_output(th->call_index);
-	write_output(th->call_num);
-	write_output(reserrno);
-	write_output(call_flags);
+	if (!flag_collect_race) {
+		write_output(kOutMagic);
+		write_output(th->call_index);
+		write_output(th->call_num);
+		write_output(reserrno);
+		write_output(call_flags);
 
-	// ===============DDRD====================
-	// Output syscall timing information (in nanoseconds for precise race correlation)
-	write_output((uint32)th->call_start_time);
-	write_output((uint32)(th->call_start_time >> 32));
-	write_output((uint32)th->call_end_time);
-	write_output((uint32)(th->call_end_time >> 32));
-	// ===============DDRD====================
-
-	uint32* signal_count_pos = write_output(0); // filled in later
-	uint32* cover_count_pos = write_output(0); // filled in later
-	uint32* comps_count_pos = write_output(0); // filled in later
-
-	if (flag_comparisons) {
-		// Collect only the comparisons
-		uint32 ncomps = th->cov.size;
-		kcov_comparison_t* start = (kcov_comparison_t*)(th->cov.data + sizeof(uint64));
-		kcov_comparison_t* end = start + ncomps;
-		if ((char*)end > th->cov.data_end)
-			failmsg("too many comparisons", "ncomps=%u", ncomps);
-		cover_unprotect(&th->cov);
-		std::sort(start, end);
-		ncomps = std::unique(start, end) - start;
-		cover_protect(&th->cov);
-		uint32 comps_size = 0;
-		for (uint32 i = 0; i < ncomps; ++i) {
-			if (start[i].ignore())
-				continue;
-			comps_size++;
-			start[i].write();
+		// ===============DDRD====================
+		// Output syscall timing information (in nanoseconds for precise race correlation)
+		write_output((uint32)th->call_start_time);
+		write_output((uint32)(th->call_start_time >> 32));
+		write_output((uint32)th->call_end_time);
+		write_output((uint32)(th->call_end_time >> 32));
+		// ===============DDRD====================
+		uint32* signal_count_pos = write_output(0); // filled in later
+		uint32* cover_count_pos = write_output(0); // filled in later
+		uint32* comps_count_pos = write_output(0); // filled in later
+		if (flag_comparisons) {
+			// Collect only the comparisons
+			uint32 ncomps = th->cov.size;
+			kcov_comparison_t* start = (kcov_comparison_t*)(th->cov.data + sizeof(uint64));
+			kcov_comparison_t* end = start + ncomps;
+			if ((char*)end > th->cov.data_end)
+				failmsg("too many comparisons", "ncomps=%u", ncomps);
+			cover_unprotect(&th->cov);
+			std::sort(start, end);
+			ncomps = std::unique(start, end) - start;
+			cover_protect(&th->cov);
+			uint32 comps_size = 0;
+			for (uint32 i = 0; i < ncomps; ++i) {
+				if (start[i].ignore())
+					continue;
+				comps_size++;
+				start[i].write();
+			}
+			// Write out number of comparisons.
+			*comps_count_pos = comps_size;
+		} else if (flag_collect_signal || flag_collect_cover) {
+			if (is_kernel_64_bit)
+				write_coverage_signal<uint64>(&th->cov, signal_count_pos, cover_count_pos);
+			else
+				write_coverage_signal<uint32>(&th->cov, signal_count_pos, cover_count_pos);
 		}
-		// Write out number of comparisons.
-		*comps_count_pos = comps_size;
-	} else if (flag_collect_signal || flag_collect_cover) {
-		if (is_kernel_64_bit)
-			write_coverage_signal<uint64>(&th->cov, signal_count_pos, cover_count_pos);
-		else
-			write_coverage_signal<uint32>(&th->cov, signal_count_pos, cover_count_pos);
+		// ===============DDRD====================
+		debug_verbose("out #%u: index=%u num=%u errno=%d finished=%d blocked=%d sig=%u cover=%u comps=%u\n",
+			      completed, th->call_index, th->call_num, reserrno, finished, blocked,
+			      *signal_count_pos, *cover_count_pos, *comps_count_pos);
 	}
-	// ===============DDRD====================
-	debug_verbose("out #%u: index=%u num=%u errno=%d finished=%d blocked=%d sig=%u cover=%u comps=%u\n",
-		      completed, th->call_index, th->call_num, reserrno, finished, blocked,
-		      *signal_count_pos, *cover_count_pos, *comps_count_pos);
 	completed++;
 	write_completed(completed);
 #else

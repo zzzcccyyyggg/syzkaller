@@ -861,7 +861,8 @@ func (fuzzer *Fuzzer) executeTestPair(task rpctype.TestPairTask) rpctype.TestPai
 		return result
 	}
 
-	// 解析统一的执行结果
+	// TODO:需要增加对pair返回的info的处理的逻辑 或者先看看fuzzer 处理返回信息的逻辑是神恶魔 其实也不一定是在这里处理的
+	// 更新race coverage 是在这里做的吗
 	result.Info1 = &ipc.ProgInfo{
 		Calls: make([]ipc.CallInfo, len(prog1.Calls)),
 		Extra: ipc.CallInfo{},
@@ -872,23 +873,6 @@ func (fuzzer *Fuzzer) executeTestPair(task rpctype.TestPairTask) rpctype.TestPai
 	}
 
 	// 从统一的info中提取两个程序的信息
-	if info != nil {
-		// 前半部分是prog1的调用信息
-		prog1CallCount := len(prog1.Calls)
-		if len(info.Calls) >= prog1CallCount {
-			copy(result.Info1.Calls, info.Calls[:prog1CallCount])
-		}
-
-		// 后半部分是prog2的调用信息
-		prog2CallCount := len(prog2.Calls)
-		if len(info.Calls) >= prog1CallCount+prog2CallCount {
-			copy(result.Info2.Calls, info.Calls[prog1CallCount:prog1CallCount+prog2CallCount])
-		}
-
-		// Extra信息包含整体的race数据
-		result.Info1.Extra = info.Extra
-		result.Info2.Extra = info.Extra
-	}
 	result.Success = !hanged
 
 	// 详细解析race数据，提取May Race Pair列表和Syscall关联信息
@@ -896,7 +880,7 @@ func (fuzzer *Fuzzer) executeTestPair(task rpctype.TestPairTask) rpctype.TestPai
 		races := fuzzer.extractDetailedRaceInfo(prog1, prog2, info)
 		result.Races = races
 
-		// 更新race coverage
+		// ≈
 		if len(races) > 0 {
 			fuzzer.updateRaceCoverage(races)
 		}
@@ -912,83 +896,6 @@ func (fuzzer *Fuzzer) executeTestPair(task rpctype.TestPairTask) rpctype.TestPai
 	log.Logf(2, "executed test pair %s: success=%v, races=%d", task.ID, result.Success, len(result.Races))
 
 	return result
-}
-
-// extractDetailedRaceInfo 提取详细的race信息
-// 返回: 1. May Race Pair列表 2. Pair关联的Syscall名称信息
-func (fuzzer *Fuzzer) extractDetailedRaceInfo(prog1, prog2 *prog.Prog, info *ipc.ProgInfo) []rpctype.RaceInfo {
-	var races []rpctype.RaceInfo
-
-	// 1. 从整体的Extra RaceData中提取race pair信息
-	if len(info.Extra.RaceData.Signals) > 0 {
-		race := rpctype.RaceInfo{
-			Syscall1: "overall_execution",
-			Syscall2: "concurrent_context",
-			LockType: "may_race_pair_detected",
-			Signals:  info.Extra.RaceData.Signals,
-		}
-		races = append(races, race)
-
-		log.Logf(1, "检测到整体race信号: %d个signals", len(info.Extra.RaceData.Signals))
-	}
-
-	// 2. 从MappingData中解析具体的变量访问信息
-	if len(info.Extra.RaceData.MappingData) > 0 {
-		mappingInfo := fuzzer.parseMappingData(info.Extra.RaceData.MappingData)
-		log.Logf(1, "解析到mapping数据: %d bytes, 包含变量访问信息", len(info.Extra.RaceData.MappingData))
-
-		// 将mapping信息转换为race信息
-		for varName, accessInfo := range mappingInfo {
-			// ===============DDRD====================
-			race := rpctype.RaceInfo{
-				Syscall1:    accessInfo.Syscall1,
-				Syscall2:    accessInfo.Syscall2,
-				LockType:    fmt.Sprintf("variable_race_%s_%s", accessInfo.AccessType1, accessInfo.AccessType2),
-				AccessType1: accessInfo.AccessType1,
-				AccessType2: accessInfo.AccessType2,
-				Signals:     []uint64{}, // mapping data不是signal格式
-			}
-			// ===============DDRD====================
-			races = append(races, race)
-
-			log.Logf(2, "发现变量race: %s, 地址=0x%x, 类型=%s vs %s, syscall1=%s, syscall2=%s",
-				varName, accessInfo.Address, accessInfo.AccessType1, accessInfo.AccessType2,
-				accessInfo.Syscall1, accessInfo.Syscall2)
-		}
-	}
-
-	// 3. 逐个syscall分析race数据
-	prog1CallCount := len(prog1.Calls)
-	for i, callInfo := range info.Calls {
-		if len(callInfo.RaceData.Signals) > 0 {
-			var syscallName string
-			var programID string
-
-			if i < prog1CallCount {
-				syscallName = prog1.Calls[i].Meta.Name
-				programID = "prog1"
-			} else if i-prog1CallCount < len(prog2.Calls) {
-				syscallName = prog2.Calls[i-prog1CallCount].Meta.Name
-				programID = "prog2"
-			} else {
-				continue
-			}
-
-			race := rpctype.RaceInfo{
-				Syscall1: syscallName,
-				Syscall2: fmt.Sprintf("concurrent_execution_in_%s", programID),
-				LockType: "syscall_level_race",
-				Signals:  callInfo.RaceData.Signals,
-			}
-			races = append(races, race)
-
-			log.Logf(2, "发现syscall级别race: %s 在 %s 中, %d 个race signals, 执行时间: %d-%d ns",
-				syscallName, programID, len(callInfo.RaceData.Signals),
-				callInfo.StartTime, callInfo.EndTime)
-		}
-	}
-
-	return races
 }
 
 // AccessInfo 表示变量访问信息
