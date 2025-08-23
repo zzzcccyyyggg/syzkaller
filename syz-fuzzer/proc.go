@@ -14,6 +14,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/pkg/log"
@@ -73,10 +74,12 @@ func (proc *Proc) loop() {
 	for i := 0; ; i++ {
 		// 每5秒检查一次模式，避免频繁RPC调用
 		if time.Since(lastModeCheck) > 5*time.Second {
-			// Use the new concurrency fuzzer API
-			newMode := proc.fuzzer.concurrencyFuzzer.IsConcurrencyMode()
+			// ===============DDRD====================
+			// Use the new race pair manager API
+			newMode := proc.fuzzer.racePairManager.IsRacePairMode()
+			// ===============DDRD====================
 			if newMode != isTestPairMode {
-				log.Logf(0, "proc %d concurrency mode changed: %v -> %v", proc.pid, isTestPairMode, newMode)
+				log.Logf(0, "proc %d race pair mode changed: %v -> %v", proc.pid, isTestPairMode, newMode)
 				isTestPairMode = newMode
 			}
 			lastModeCheck = time.Now()
@@ -84,12 +87,16 @@ func (proc *Proc) loop() {
 
 		// Enhanced mode execution
 		if isTestPairMode {
-			// Concurrency mode: execute test pairs and concurrency-optimized programs
-			proc.handleConcurrencyMode()
+			// ===============DDRD====================
+			// Race pair mode: ONLY handle race pair work items from separate queue
+			proc.handleRacePairMode()
+			// ===============DDRD====================
 			continue
 		}
 
-		// Normal模式：正常处理工作队列
+		// ===============DDRD====================
+		// Normal mode: ONLY handle normal work items from normal queue
+		// ===============DDRD====================
 		item := proc.fuzzer.workQueue.dequeue()
 		if item != nil {
 			switch item := item.(type) {
@@ -100,7 +107,7 @@ func (proc *Proc) loop() {
 			case *WorkSmash:
 				proc.smashInput(item)
 			default:
-				log.SyzFatalf("unknown work type: %#v", item)
+				log.SyzFatalf("unknown work type in normal mode: %#v", item)
 			}
 			continue
 		}
@@ -122,44 +129,38 @@ func (proc *Proc) loop() {
 	}
 }
 
-// handleConcurrencyMode handles execution in concurrency testing mode
-func (proc *Proc) handleConcurrencyMode() {
-	// First, try to execute any test pairs
-	if pair := proc.fuzzer.concurrencyFuzzer.GetNextTestPair(); pair != nil {
-		result, err := proc.fuzzer.concurrencyFuzzer.ExecuteTestPair(pair, proc)
-		if err != nil {
-			log.Logf(1, "test pair execution failed: %v", err)
-		} else if result.RaceDetected {
-			log.Logf(0, "Race detected in test pair %s", pair.ID)
-			// TODO: Report race to manager
-		}
+// ===============DDRD====================
+// handleRacePairMode handles execution in race pair testing mode
+// ===============DDRD====================
+func (proc *Proc) handleRacePairMode() {
+	// First, ensure race pair queues are maintained
+	proc.fuzzer.maintainRacePairQueues()
+
+	// Process race pair work from queue
+	item := proc.fuzzer.racePairWorkQueue.dequeue()
+	if item == nil {
+		// No work available - add a small sleep to prevent busy-waiting
+		// This matches the pattern used in normal mode when no work is available
+		time.Sleep(10 * time.Millisecond)
 		return
 	}
 
-	// If no test pairs, process work queue with concurrency bias
-	item := proc.fuzzer.workQueue.dequeue()
-	if item != nil {
-		switch item := item.(type) {
-		case *WorkTriage:
-			proc.triageInput(item)
-		case *WorkCandidate:
-			proc.executeAndCollide(proc.execOpts, item.p, item.flags, StatCandidate)
-		case *WorkSmash:
-			proc.smashInput(item)
-		default:
-			log.SyzFatalf("unknown work type: %#v", item)
-		}
-		return
+	// Process the work item synchronously (like normal mode)
+	switch item := item.(type) {
+	case *ProgPair:
+		// Execute pair from corpus candidates
+		proc.executePairFromCandidate(item)
+	case *PairWorkTriage:
+		// Execute pair from triage queue
+		proc.executePairFromTriage(item)
+	case *PairWorkValuable:
+		// Execute pair from valuable queue
+		proc.executePairFromValuable(item)
+	default:
+		log.SyzFatalf("unknown race pair work type: %#v", item)
 	}
-
-	// Generate concurrency-optimized programs
-	if p := proc.fuzzer.concurrencyFuzzer.GenerateConcurrencyCandidate(); p != nil {
-		log.Logf(1, "proc %d: executing concurrency candidate", proc.pid)
-		proc.executeAndCollide(proc.execOpts, p, ProgNormal, StatGenerate)
-	} else {
-		// Fallback: short sleep
-		time.Sleep(100 * time.Millisecond)
-	}
+	// Note: Each execute function above is synchronous and will block
+	// until the ExecPair completes, preventing rapid successive calls
 }
 
 func (proc *Proc) triageInput(item *WorkTriage) {
@@ -239,12 +240,6 @@ func (proc *Proc) triageInput(item *WorkTriage) {
 		Signal:   inputSignal.Serialize(),
 		Cover:    inputCover.Serialize(),
 		RawCover: rawCover,
-		// ===============DDRD====================
-		RaceData: rpctype.RaceData{
-			Signals:     item.info.RaceData.Signals,
-			MappingData: item.info.RaceData.MappingData,
-		},
-		// ===============DDRD====================
 	})
 
 	proc.fuzzer.addInputToCorpus(item.p, inputSignal, sig)
@@ -470,4 +465,191 @@ func (proc *Proc) resetAccState() {
 		return
 	}
 	proc.env.ForceRestart()
+}
+
+// executeTestPair executes a single test pair and returns the result
+func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog, flags ProgTypes) *ipc.PairProgInfo {
+	// Validate inputs
+	if p1 == nil || p2 == nil {
+		log.Logf(0, "proc %d: executeTestPair called with nil programs", proc.pid)
+		return nil
+	}
+
+	// Ensure both programs have the same target
+	if p1.Target != p2.Target {
+		log.Logf(0, "proc %d: executeTestPair called with programs having different targets", proc.pid)
+		return nil
+	}
+
+	// Validate programs are well-formed
+	if len(p1.Calls) == 0 || len(p2.Calls) == 0 {
+		log.Logf(1, "proc %d: executeTestPair called with empty programs", proc.pid)
+		return nil
+	}
+
+	// Always use local options to ensure proper flags are set
+	if opts1 == nil {
+		opts1 = &ipc.ExecOpts{}
+	}
+	if opts2 == nil {
+		opts2 = &ipc.ExecOpts{}
+	}
+
+	// Force enable race collection and pair sync flags (critical for pair execution)
+	opts1.Flags |= ipc.FlagCollectRace | ipc.FlagTestPairSync
+	opts2.Flags |= ipc.FlagCollectRace | ipc.FlagTestPairSync
+
+	// Reset executor state if needed
+	proc.resetAccState()
+
+	// ===============DDRD====================
+	// Use the same concurrency control as normal execution to prevent
+	// shared memory conflicts between concurrent ExecPair calls
+	log.Logf(0, "proc %d: about to acquire gate ticket (env=%p)", proc.pid, proc.env)
+	ticket := proc.fuzzer.gate.Enter()
+	log.Logf(0, "proc %d: acquired gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
+	defer func() {
+		proc.fuzzer.gate.Leave(ticket)
+		log.Logf(0, "proc %d: released gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
+	}()
+	// ===============DDRD====================
+
+	// Execute the pair using the IPC layer
+	output, info, hanged, err := proc.env.ExecPair(opts1, opts2, p1, p2)
+	if err != nil {
+		log.Logf(0, "proc %d: pair execution failed: %v", proc.pid, err)
+		return nil
+	}
+
+	if hanged {
+		log.Logf(1, "proc %d: pair execution hanged", proc.pid)
+		return info // Return partial info even if hanged
+	}
+
+	log.Logf(2, "proc %d: pair execution completed, output length: %d", proc.pid, len(output))
+
+	// ===============DDRD====================
+	// Process race detection results from pair execution
+	if info != nil && len(info.MayRacePairs) > 0 {
+		// Update race coverage in fuzzer - use slice directly without copy
+		proc.fuzzer.updateRaceCoverage(info.MayRacePairs)
+
+		log.Logf(1, "proc %d: detected %d race pairs", proc.pid, len(info.MayRacePairs))
+	} else {
+		log.Logf(2, "proc %d: no race pairs detected", proc.pid)
+	}
+	// ===============DDRD====================
+
+	return info
+}
+
+// executePairFromCandidate executes a program pair from the candidates queue
+func (proc *Proc) executePairFromCandidate(item *ProgPair) {
+	if item == nil || item.p1 == nil || item.p2 == nil {
+		log.Logf(0, "proc %d: executePairFromCandidate called with invalid item", proc.pid)
+		return
+	}
+
+	// Use race collection options for candidates
+	opts1 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
+	}
+	opts2 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
+	}
+
+	info := proc.executeTestPair(opts1, opts2, item.p1, item.p2, ProgNormal)
+	if info == nil {
+		return
+	}
+
+	// If we found new race coverage, promote to valuable queue
+	if info != nil && len(info.MayRacePairs) > 0 {
+		// Create pointer slice for checkForNewRaceCoverage
+		races := make([]*ddrd.MayRacePair, len(info.MayRacePairs))
+		for i := range info.MayRacePairs {
+			races[i] = &info.MayRacePairs[i]
+		}
+
+		if proc.fuzzer.checkForNewRaceCoverage(item.p1, item.p2, races) {
+			// Add to valuable queue for further exploration
+			proc.fuzzer.racePairWorkQueue.enqueueValuable(&PairWorkValuable{
+				progPair: item,
+				info:     info,
+			})
+			log.Logf(1, "proc %d: promoted candidate pair to valuable (new race coverage)", proc.pid)
+		}
+	}
+}
+
+// executePairFromTriage executes a program pair from the triage queue
+func (proc *Proc) executePairFromTriage(item *PairWorkTriage) {
+	if item == nil || item.progPair == nil {
+		log.Logf(0, "proc %d: executePairFromTriage called with invalid item", proc.pid)
+		return
+	}
+
+	// Use full coverage options for triage
+	opts1 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync | ipc.FlagCollectCover,
+	}
+	opts2 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync | ipc.FlagCollectCover,
+	}
+
+	info := proc.executeTestPair(opts1, opts2, item.progPair.p1, item.progPair.p2, ProgNormal)
+	if info == nil {
+		return
+	}
+
+	// Process results and potentially add to valuable queue if still interesting
+	if info != nil && len(info.MayRacePairs) > 0 {
+		// Create pointer slice for race coverage functions
+		races := make([]*ddrd.MayRacePair, len(info.MayRacePairs))
+		for i := range info.MayRacePairs {
+			races[i] = &info.MayRacePairs[i]
+		}
+
+		// Check if this pair consistently produces new race coverage
+		if proc.fuzzer.checkForNewRaceCoverage(item.progPair.p1, item.progPair.p2, races) {
+			proc.fuzzer.addRacePairWithNewCoverage(item.progPair.p1, item.progPair.p2, races)
+			log.Logf(1, "proc %d: triage pair added to race corpus", proc.pid)
+		}
+	}
+}
+
+// executePairFromValuable executes a program pair from the valuable queue
+func (proc *Proc) executePairFromValuable(item *PairWorkValuable) {
+	if item == nil || item.progPair == nil {
+		log.Logf(0, "proc %d: executePairFromValuable called with invalid item", proc.pid)
+		return
+	}
+
+	// Use comprehensive options for valuable pairs
+	opts1 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync | ipc.FlagCollectCover | ipc.FlagCollectComps,
+	}
+	opts2 := &ipc.ExecOpts{
+		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync | ipc.FlagCollectCover | ipc.FlagCollectComps,
+	}
+
+	info := proc.executeTestPair(opts1, opts2, item.progPair.p1, item.progPair.p2, ProgNormal)
+	if info == nil {
+		return
+	}
+
+	// Valuable pairs are treated as confirmed race producers
+	// Continue exploring variations and mutations
+	if info != nil && len(info.MayRacePairs) > 0 {
+		// Create pointer slice for race processing functions
+		races := make([]*ddrd.MayRacePair, len(info.MayRacePairs))
+		for i := range info.MayRacePairs {
+			races[i] = &info.MayRacePairs[i]
+		}
+
+		proc.fuzzer.addRacePairWithNewCoverage(item.progPair.p1, item.progPair.p2, races)
+		log.Logf(1, "proc %d: valuable pair confirmed race detection", proc.pid)
+
+		// TODO: Consider mutating the valuable pair and re-queueing variants
+	}
 }

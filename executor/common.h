@@ -681,8 +681,6 @@ static void loop(void)
 		// Use dispatch function to handle both regular and pair execution requests
 		int need_fork = receive_execute_dispatch();
 		if (!need_fork) {
-			// 配对执行已完成，跳过后续 fork
-			reply_execute(0);
 			remove_dir(cwdbuf);
 			continue;  // 直接进入下一轮循环
 		}

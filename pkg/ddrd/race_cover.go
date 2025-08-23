@@ -14,6 +14,9 @@ import (
 // Uses the executor-generated signal as the primary identifier when available
 // And use the hash of all relevant fields if the signal is unavailable
 
+// RacePairID generates a unique identifier for a race pair
+// Uses the executor-generated signal as the primary identifier when available
+// And use the hash of all relevant fields if the signal is unavailable
 func (rp *MayRacePair) RacePairID() uint64 {
 	// If executor provided a signal (based on varname1+varname2+callstack hashes), use it
 	if rp.Signal != 0 {
@@ -21,16 +24,30 @@ func (rp *MayRacePair) RacePairID() uint64 {
 	}
 	// Fallback: generate hash from available fields
 	h := sha256.New()
-	h.Write([]byte(rp.Syscall1))
-	h.Write([]byte(rp.Syscall2))
-	h.Write([]byte(rp.LockType))
-	h.Write([]byte(rp.VarName1))
-	h.Write([]byte(rp.VarName2))
+	buf := make([]byte, 8)
+
+	// Include syscall indices and numbers
+	binary.LittleEndian.PutUint32(buf[:4], uint32(rp.Syscall1Idx))
+	h.Write(buf[:4])
+	binary.LittleEndian.PutUint32(buf[:4], uint32(rp.Syscall2Idx))
+	h.Write(buf[:4])
+	binary.LittleEndian.PutUint32(buf[:4], uint32(rp.Syscall1Num))
+	h.Write(buf[:4])
+	binary.LittleEndian.PutUint32(buf[:4], uint32(rp.Syscall2Num))
+	h.Write(buf[:4])
+
+	// Include variable name identifiers
+	binary.LittleEndian.PutUint64(buf, rp.VarName1)
+	h.Write(buf)
+	binary.LittleEndian.PutUint64(buf, rp.VarName2)
+	h.Write(buf)
+
+	// Include access types and lock type
 	h.Write([]byte{rp.AccessType1})
 	h.Write([]byte{rp.AccessType2})
+	h.Write([]byte{rp.LockType})
 
 	// Include callstack hashes
-	buf := make([]byte, 8)
 	binary.LittleEndian.PutUint64(buf, rp.CallStack1)
 	h.Write(buf)
 	binary.LittleEndian.PutUint64(buf, rp.CallStack2)
@@ -46,8 +63,8 @@ func (rp *MayRacePair) RacePairID() uint64 {
 
 // String returns a human-readable representation of the race pair
 func (rp *MayRacePair) String() string {
-	return fmt.Sprintf("RacePair{%s vs %s, %s, vars=%s,%s, access=%d,%d, signal=0x%x, stacks=0x%x,0x%x, timediff=%d}",
-		rp.Syscall1, rp.Syscall2, rp.LockType,
+	return fmt.Sprintf("RacePair{syscall_%d(%d) vs syscall_%d(%d), lock=%d, vars=0x%x,0x%x, access=%d,%d, signal=0x%x, stacks=0x%x,0x%x, timediff=%d}",
+		rp.Syscall1Num, rp.Syscall1Idx, rp.Syscall2Num, rp.Syscall2Idx, rp.LockType,
 		rp.VarName1, rp.VarName2, rp.AccessType1, rp.AccessType2,
 		rp.Signal, rp.CallStack1, rp.CallStack2, rp.TimeDiff)
 }
@@ -117,12 +134,12 @@ func (rc RaceCover) Contains(rp *MayRacePair) bool {
 	return exists
 }
 
-// GetBySyscalls returns all race pairs involving specific syscalls
-func (rc RaceCover) GetBySyscalls(syscall1, syscall2 string) []*MayRacePair {
+// GetBySyscalls returns all race pairs involving specific syscall numbers
+func (rc RaceCover) GetBySyscalls(syscall1Num, syscall2Num int32) []*MayRacePair {
 	var result []*MayRacePair
 	for _, rp := range rc {
-		if (rp.Syscall1 == syscall1 && rp.Syscall2 == syscall2) ||
-			(rp.Syscall1 == syscall2 && rp.Syscall2 == syscall1) {
+		if (rp.Syscall1Num == syscall1Num && rp.Syscall2Num == syscall2Num) ||
+			(rp.Syscall1Num == syscall2Num && rp.Syscall2Num == syscall1Num) {
 			result = append(result, rp)
 		}
 	}
@@ -130,7 +147,7 @@ func (rc RaceCover) GetBySyscalls(syscall1, syscall2 string) []*MayRacePair {
 }
 
 // GetByType returns all race pairs of a specific lock type
-func (rc RaceCover) GetByType(lockType string) []*MayRacePair {
+func (rc RaceCover) GetByType(lockType uint8) []*MayRacePair {
 	var result []*MayRacePair
 	for _, rp := range rc {
 		if rp.LockType == lockType {
@@ -140,34 +157,34 @@ func (rc RaceCover) GetByType(lockType string) []*MayRacePair {
 	return result
 }
 
-// Stats returns statistics about the race coverage
+// RaceCoverageStats returns statistics about the race coverage
 type RaceCoverageStats struct {
 	TotalRacePairs    int
 	UniqueSyscalls    int
 	UniqueVariables   int
-	LockTypeBreakdown map[string]int
+	LockTypeBreakdown map[uint8]int
 }
 
 // GetStats returns detailed statistics about the race coverage
 func (rc RaceCover) GetStats() RaceCoverageStats {
 	stats := RaceCoverageStats{
 		TotalRacePairs:    len(rc),
-		LockTypeBreakdown: make(map[string]int),
+		LockTypeBreakdown: make(map[uint8]int),
 	}
 
-	syscallSet := make(map[string]struct{})
-	variableSet := make(map[string]struct{})
+	syscallSet := make(map[int32]struct{})
+	variableSet := make(map[uint64]struct{})
 
 	for _, rp := range rc {
 		// Count unique syscalls
-		syscallSet[rp.Syscall1] = struct{}{}
-		syscallSet[rp.Syscall2] = struct{}{}
+		syscallSet[rp.Syscall1Num] = struct{}{}
+		syscallSet[rp.Syscall2Num] = struct{}{}
 
 		// Count unique variables
-		if rp.VarName1 != "" {
+		if rp.VarName1 != 0 {
 			variableSet[rp.VarName1] = struct{}{}
 		}
-		if rp.VarName2 != "" {
+		if rp.VarName2 != 0 {
 			variableSet[rp.VarName2] = struct{}{}
 		}
 
@@ -196,8 +213,10 @@ func (rc RaceCover) Copy() RaceCover {
 	for id, rp := range rc {
 		// Create a copy of the race pair
 		newRP := &MayRacePair{
-			Syscall1:    rp.Syscall1,
-			Syscall2:    rp.Syscall2,
+			Syscall1Idx: rp.Syscall1Idx,
+			Syscall2Idx: rp.Syscall2Idx,
+			Syscall1Num: rp.Syscall1Num,
+			Syscall2Num: rp.Syscall2Num,
 			VarName1:    rp.VarName1,
 			VarName2:    rp.VarName2,
 			CallStack1:  rp.CallStack1,

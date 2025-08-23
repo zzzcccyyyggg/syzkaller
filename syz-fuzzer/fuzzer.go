@@ -17,7 +17,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/hash"
@@ -45,6 +44,11 @@ type Fuzzer struct {
 	needPoll    chan struct{}
 	choiceTable *prog.ChoiceTable
 	noMutate    map[int]bool
+
+	// ===============DDRD====================
+	// Separate race pair work queue for race pair mode
+	racePairWorkQueue *RacePairWorkQueue
+	// ===============DDRD====================
 	// The stats field cannot unfortunately be just an uint64 array, because it
 	// results in "unaligned 64-bit atomic operation" errors on 32-bit platforms.
 	stats             []uint64
@@ -68,12 +72,13 @@ type Fuzzer struct {
 	maxSignal    signal.Signal // max signal ever observed including flakes
 	newSignal    signal.Signal // diff of maxSignal since last sync with master
 
+	// ===============DDRD====================
 	// Race coverage tracking
 	raceCoverMu     sync.RWMutex
 	corpusRaceCover ddrd.RaceCover // race coverage of inputs in corpus
 	maxRaceCover    ddrd.RaceCover // max race coverage ever observed
 	newRaceCover    ddrd.RaceCover // new race coverage since last sync
-
+	// ===============DDRD====================
 	checkResult *rpctype.CheckArgs
 	logMu       sync.Mutex
 
@@ -83,8 +88,10 @@ type Fuzzer struct {
 	// Experimental flags.
 	resetAccState bool
 
-	// Concurrency testing support
-	concurrencyFuzzer *ConcurrencyFuzzer
+	// ===============DDRD====================
+	// Race pair management
+	racePairManager *RacePairManager
+	// ===============DDRD====================
 }
 
 type FuzzerSnapshot struct {
@@ -317,6 +324,10 @@ func main() {
 		// Queue no more than ~3 new inputs / proc.
 		parallelNewInputs: make(chan struct{}, int64(3**flagProcs)),
 		resetAccState:     *flagResetAccState,
+		// ===============DDRD====================
+		// Initialize separate race pair work queue
+		racePairWorkQueue: NewRacePairWorkQueue(*flagProcs),
+		// ===============DDRD====================
 	}
 	gateCallback := fuzzer.useBugFrames(r, *flagProcs)
 	fuzzer.gate = ipc.NewGate(gateSize, gateCallback)
@@ -333,9 +344,10 @@ func main() {
 	}
 	fuzzer.choiceTable = target.BuildChoiceTable(fuzzer.corpus, calls)
 
-	// Initialize concurrency fuzzer
-	fuzzer.concurrencyFuzzer = NewConcurrencyFuzzer(fuzzer)
-	fuzzer.concurrencyFuzzer.UpdateCorpus(fuzzer.corpus)
+	// ===============DDRD====================
+	// Initialize race pair manager
+	fuzzer.racePairManager = NewRacePairManager(fuzzer)
+	// ===============DDRD====================
 
 	if r.CoverFilterBitmap != nil {
 		fuzzer.execOpts.Flags |= ipc.FlagEnableCoverageFilter
@@ -434,14 +446,6 @@ func (fuzzer *Fuzzer) checkTestPairMode() bool {
 	return res.IsTestPairMode
 }
 
-// executeTestPairMode 执行test pair模式
-func (fuzzer *Fuzzer) executeTestPairMode() {
-	// 在test pair模式下，重点执行test pairs
-	// proc.loop()会自动休眠，让出CPU给test pair执行
-	log.Logf(1, "执行Test Pair模式 - 开始轮询test pairs")
-	fuzzer.pollTestPairs()
-}
-
 func (fuzzer *Fuzzer) pollLoop() {
 	var execTotal uint64
 	var lastPoll time.Time
@@ -476,17 +480,6 @@ func (fuzzer *Fuzzer) pollLoop() {
 			}
 			if !fuzzer.poll(needCandidates, stats) {
 				lastPoll = time.Now()
-			}
-
-			// 检查执行模式：要么test pair模式，要么normal模式，不能同时
-			if fuzzer.checkTestPairMode() {
-				// Test Pair模式：专注执行test pairs
-				log.Logf(1, "当前处于Test Pair模式，开始执行test pairs")
-				fuzzer.executeTestPairMode()
-			} else {
-				// Normal模式：通过proc执行常规工作队列
-				// proc.loop()会自动处理workQueue，不需要在这里直接处理
-				log.Logf(2, "当前处于Normal模式，proc将处理工作队列")
 			}
 		}
 	}
@@ -738,376 +731,135 @@ func parseOutputType(str string) OutputType {
 	}
 }
 
-// pollTestPairs polls the manager for test pair tasks and executes them
-func (fuzzer *Fuzzer) pollTestPairs() {
-	args := &rpctype.PollTestPairsArgs{
-		FuzzerName: fuzzer.name,
-		MaxTasks:   2, // request up to 2 test pairs at a time
-	}
-	res := &rpctype.PollTestPairsRes{}
-
-	if err := fuzzer.manager.Call("Manager.PollTestPairs", args, res); err != nil {
-		log.Logf(1, "Manager.PollTestPairs call failed: %v", err)
-		return
-	}
-
-	if len(res.Tasks) == 0 {
-		log.Logf(2, "PollTestPairs: 没有可用的test pair任务")
-		return
-	}
-
-	log.Logf(0, "received %d test pair tasks", len(res.Tasks))
-
-	// Execute test pairs and collect results
-	results := make([]rpctype.TestPairResult, 0, len(res.Tasks))
-	for _, task := range res.Tasks {
-		result := fuzzer.executeTestPair(task)
-		results = append(results, result)
-	}
-
-	// Submit results back to manager
-	submitArgs := &rpctype.SubmitTestPairResultsArgs{
-		FuzzerName: fuzzer.name,
-		Results:    results,
-	}
-	var submitRes int
-	if err := fuzzer.manager.Call("Manager.SubmitTestPairResults", submitArgs, &submitRes); err != nil {
-		log.Logf(1, "Manager.SubmitTestPairResults call failed: %v", err)
-	}
-}
-
-// executeTestPair executes a single test pair and returns the result
-func (fuzzer *Fuzzer) executeTestPair(task rpctype.TestPairTask) rpctype.TestPairResult {
-	result := rpctype.TestPairResult{
-		ID:      task.ID,
-		Success: false,
-	}
-
-	startTime := time.Now()
-	defer func() {
-		result.ExecTime = time.Since(startTime).Nanoseconds()
-	}()
-
-	// Deserialize programs
-	prog1 := fuzzer.deserializeInput(task.Prog1)
-	if prog1 == nil {
-		result.Error = "failed to deserialize first program"
-		return result
-	}
-
-	prog2 := fuzzer.deserializeInput(task.Prog2)
-	if prog2 == nil {
-		result.Error = "failed to deserialize second program"
-		return result
-	}
-
-	// Ensure both programs have the same target
-	if prog1.Target != prog2.Target {
-		result.Error = "programs have different targets"
-		return result
-	}
-
-	// Validate programs are well-formed
-	if len(prog1.Calls) == 0 || len(prog2.Calls) == 0 {
-		result.Error = "one or both programs have no system calls"
-		return result
-	}
-
-	// Get an available executor
-	if len(fuzzer.procs) == 0 {
-		result.Error = "no executor processes available"
-		return result
-	}
-
-	// Find a free process or use a dedicated one for test pairs
-	var proc *Proc
-	var procIndex int = -1
-
-	// Try to find a less busy process (avoid proc[0] which is heavily used)
-	for i := len(fuzzer.procs) - 1; i >= 0; i-- {
-		proc = fuzzer.procs[i]
-		err := proc.env.RestartIfNeeded(prog1.Target)
-		if err == nil {
-			procIndex = i
-			break
-		}
-	}
-
-	if procIndex == -1 {
-		result.Error = "no available executor processes for test pair"
-		return result
-	}
-
-	log.Logf(2, "Using executor process %d for test pair %s", procIndex, task.ID)
-
-	// 使用新的ExecPair API进行并发执行
-	opts1 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync, // 启用race检测和同步
-	}
-	opts2 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync, // 启用race检测和同步
-	}
-
-	// 如果task有特殊选项，合并它们
-	if task.Opts != nil {
-		opts1.Flags |= task.Opts.Flags
-		opts2.Flags |= task.Opts.Flags
-	}
-
-	// 执行并发程序对
-	_, info, hanged, err := proc.env.ExecPair(opts1, opts2, prog1, prog2)
-	if err != nil {
-		result.Error = fmt.Sprintf("pair execution failed: %v", err)
-		return result
-	}
-
-	// TODO:需要增加对pair返回的info的处理的逻辑 或者先看看fuzzer 处理返回信息的逻辑是神恶魔 其实也不一定是在这里处理的
-	// 更新race coverage 是在这里做的吗
-	result.Info1 = &ipc.ProgInfo{
-		Calls: make([]ipc.CallInfo, len(prog1.Calls)),
-		Extra: ipc.CallInfo{},
-	}
-	result.Info2 = &ipc.ProgInfo{
-		Calls: make([]ipc.CallInfo, len(prog2.Calls)),
-		Extra: ipc.CallInfo{},
-	}
-
-	// 从统一的info中提取两个程序的信息
-	result.Success = !hanged
-
-	// 详细解析race数据，提取May Race Pair列表和Syscall关联信息
-	if info != nil {
-		races := fuzzer.extractDetailedRaceInfo(prog1, prog2, info)
-		result.Races = races
-
-		// ≈
-		if len(races) > 0 {
-			fuzzer.updateRaceCoverage(races)
-		}
-
-		// 记录详细的race信息到日志
-		fuzzer.logDetailedRaceInfo(task.ID, prog1, prog2, info, races)
-	}
-
-	if hanged {
-		result.Error = "program execution hanged"
-	}
-
-	log.Logf(2, "executed test pair %s: success=%v, races=%d", task.ID, result.Success, len(result.Races))
-
-	return result
-}
-
-// AccessInfo 表示变量访问信息
-type AccessInfo struct {
-	Address     uint64
-	AccessType1 string // 读/写类型
-	AccessType2 string
-	Syscall1    string // 关联的syscall
-	Syscall2    string
-}
-
-// parseMappingData 解析MappingData中的变量访问信息
-func (fuzzer *Fuzzer) parseMappingData(mappingData []byte) map[string]AccessInfo {
-	result := make(map[string]AccessInfo)
-
-	// 这里需要根据您的具体MappingData格式进行解析
-	// 假设的格式解析 (需要根据实际executor输出格式调整)
-	if len(mappingData) < 16 {
-		log.Logf(3, "MappingData太短，无法解析: %d bytes", len(mappingData))
-		return result
-	}
-
-	// 简单的解析示例 (需要根据实际格式调整)
-	// 假设格式: [地址8字节][访问类型1字节][访问类型1字节][syscall_name_len][syscall_name]...
-	offset := 0
-	entryCount := 0
-
-	for offset+16 <= len(mappingData) && entryCount < 10 { // 限制最多解析10个条目
-		// 解析地址 (8字节)
-		address := uint64(mappingData[offset]) |
-			uint64(mappingData[offset+1])<<8 |
-			uint64(mappingData[offset+2])<<16 |
-			uint64(mappingData[offset+3])<<24 |
-			uint64(mappingData[offset+4])<<32 |
-			uint64(mappingData[offset+5])<<40 |
-			uint64(mappingData[offset+6])<<48 |
-			uint64(mappingData[offset+7])<<56
-		offset += 8
-
-		// 解析访问类型 (2字节) - 使用统一的转换函数
-		accessType1 := getAccessTypeNameLocal(mappingData[offset])
-		accessType2 := getAccessTypeNameLocal(mappingData[offset+1])
-		offset += 2
-
-		// 跳过线程ID (8字节) - 我们不再使用这些字段
-		offset += 8
-
-		// 生成变量名
-		varName := fmt.Sprintf("var_0x%x", address)
-
-		result[varName] = AccessInfo{
-			Address:     address,
-			AccessType1: accessType1,
-			AccessType2: accessType2,
-			Syscall1:    "unknown_syscall_1", // 需要从mapping data中解析
-			Syscall2:    "unknown_syscall_2", // 需要从mapping data中解析
-		}
-
-		entryCount++
-
-		log.Logf(3, "解析mapping条目 %d: 地址=0x%x, 访问=%s vs %s",
-			entryCount, address, accessType1, accessType2)
-
-		// 检查是否还有更多数据
-		if offset >= len(mappingData) {
-			break
-		}
-	}
-
-	log.Logf(2, "总共解析了 %d 个mapping条目", entryCount)
-	return result
-}
-
-// 注意：getAccessTypeName 函数已移动到 pkg/cover/extract.go 中统一管理
-// 使用 cover.getAccessTypeName 替代本地实现
-
-// getAccessTypeNameLocal 本地辅助函数，用于解析mapping data
-// TODO: 统一到 pkg/cover 包中
-func getAccessTypeNameLocal(accessType byte) string {
-	switch accessType {
-	case 0:
-		return "read"
-	case 1:
-		return "write"
-	case 2:
-		return "read_write"
-	case 3:
-		return "modify"
-	default:
-		return fmt.Sprintf("unknown_%d", accessType)
-	}
-}
-
-// logDetailedRaceInfo 记录详细的race信息到日志
-func (fuzzer *Fuzzer) logDetailedRaceInfo(taskID string, prog1, prog2 *prog.Prog,
-	info *ipc.ProgInfo, races []rpctype.RaceInfo) {
-
-	log.Logf(1, "=== 详细Race信息 for Task %s ===", taskID)
-	log.Logf(1, "程序1: %d个syscalls", len(prog1.Calls))
-	log.Logf(1, "程序2: %d个syscalls", len(prog2.Calls))
-	log.Logf(1, "总执行信息: %d个calls", len(info.Calls))
-	log.Logf(1, "Extra race signals: %d", len(info.Extra.RaceData.Signals))
-	log.Logf(1, "Extra mapping data: %d bytes", len(info.Extra.RaceData.MappingData))
-
-	log.Logf(1, "=== May Race Pair列表 ===")
-	for i, race := range races {
-		log.Logf(1, "Race %d: %s vs %s, 锁类型=%s, signals=%d",
-			i+1, race.Syscall1, race.Syscall2, race.LockType, len(race.Signals))
-	}
-
-	log.Logf(1, "=== Syscall关联信息 ===")
-	for i, call := range prog1.Calls {
-		log.Logf(2, "Prog1[%d]: %s", i, call.Meta.Name)
-	}
-	for i, call := range prog2.Calls {
-		log.Logf(2, "Prog2[%d]: %s", i, call.Meta.Name)
-	}
-
-	log.Logf(1, "=== Race信息结束 ===")
-}
-
-// updateRaceCoverage 更新race coverage统计
-func (fuzzer *Fuzzer) updateRaceCoverage(races []rpctype.RaceInfo) {
+// TODO: updateRaceCoverage
+func (fuzzer *Fuzzer) updateRaceCoverage(races []ddrd.MayRacePair) {
 	if len(races) == 0 {
 		return
 	}
-
-	// 将RaceInfo转换为RacePair - 使用cover包中的函数
-	racePairs := cover.ExtractRacePairsFromRpcInfo(races)
 
 	fuzzer.raceCoverMu.Lock()
 	defer fuzzer.raceCoverMu.Unlock()
 
 	// 初始化race coverage如果需要
 	if fuzzer.corpusRaceCover == nil {
-		fuzzer.corpusRaceCover = make(cover.RaceCover)
+		fuzzer.corpusRaceCover = make(ddrd.RaceCover)
 	}
 	if fuzzer.maxRaceCover == nil {
-		fuzzer.maxRaceCover = make(cover.RaceCover)
+		fuzzer.maxRaceCover = make(ddrd.RaceCover)
 	}
 	if fuzzer.newRaceCover == nil {
-		fuzzer.newRaceCover = make(cover.RaceCover)
+		fuzzer.newRaceCover = make(ddrd.RaceCover)
 	}
 
-	// 获取新的race pairs
-	newRacePairs := fuzzer.maxRaceCover.MergeDiff(racePairs)
+	// ===============DDRD====================
+	// Convert to pointers for RaceCover processing
+	racePtrs := make([]*ddrd.MayRacePair, len(races))
+	for i := range races {
+		racePtrs[i] = &races[i]
+	}
 
-	if len(newRacePairs) > 0 {
-		// 添加到corpus race coverage
-		fuzzer.corpusRaceCover.Merge(racePairs)
+	// Update max race coverage and detect new races
+	newRaces := fuzzer.maxRaceCover.MergeDiff(racePtrs)
+	if len(newRaces) > 0 {
+		log.Logf(1, "discovered %d new race pairs", len(newRaces))
+		// Add to new race coverage for manager sync
+		fuzzer.newRaceCover.Merge(newRaces)
+	}
+	// ===============DDRD====================
+}
 
-		// 添加到新的race coverage (用于与manager同步)
-		fuzzer.newRaceCover.Merge(newRacePairs)
+// ===============DDRD====================
+// generateTestPairsFromCorpus creates race test pairs from corpus combinations
+func (fuzzer *Fuzzer) generateTestPairsFromCorpus(maxPairs int) {
+	fuzzer.corpusMu.RLock()
+	corpus := make([]*prog.Prog, len(fuzzer.corpus))
+	copy(corpus, fuzzer.corpus)
+	fuzzer.corpusMu.RUnlock()
 
-		log.Logf(1, "发现 %d 个新的race pairs (总计: %d)",
-			len(newRacePairs), fuzzer.maxRaceCover.Len())
+	var programs []*prog.Prog
 
-		// 记录详细的新race pairs
-		for _, rp := range newRacePairs {
-			log.Logf(2, "新Race Pair: %s", rp.String())
+	// If corpus is empty or insufficient, try to get candidates from work queue
+	if len(corpus) < 2 {
+		log.Logf(2, "corpus size (%d) insufficient for pair generation, trying candidates", len(corpus))
+
+		// Extract available candidates from work queue
+		candidates := fuzzer.workQueue.extractCandidates(maxPairs * 2) // Get more than needed
+		for _, candidate := range candidates {
+			if wc, ok := candidate.(*WorkCandidate); ok {
+				programs = append(programs, wc.p)
+			}
+		}
+
+		// Combine corpus and candidates
+		programs = append(corpus, programs...)
+
+		if len(programs) < 2 {
+			log.Logf(2, "still insufficient programs (%d) for pair generation", len(programs))
+			return
+		}
+
+		log.Logf(2, "using %d corpus + %d candidates = %d programs for pair generation",
+			len(corpus), len(programs)-len(corpus), len(programs))
+	} else {
+		programs = corpus
+	}
+
+	generated := 0
+	// Generate pairs from available programs
+	for i := 0; i < len(programs) && generated < maxPairs; i++ {
+		for j := i + 1; j < len(programs) && generated < maxPairs; j++ {
+			fuzzer.racePairWorkQueue.enqueueCorpusPair(programs[i], programs[j])
+			generated++
 		}
 	}
-}
 
-// getRaceCoverageStats 获取race coverage统计信息
-func (fuzzer *Fuzzer) getRaceCoverageStats() cover.RaceCoverageStats {
-	fuzzer.raceCoverMu.RLock()
-	defer fuzzer.raceCoverMu.RUnlock()
-
-	if fuzzer.maxRaceCover == nil {
-		return cover.RaceCoverageStats{}
+	if generated > 0 {
+		log.Logf(1, "generated %d race pairs from %d programs", generated, len(programs))
 	}
-
-	return fuzzer.maxRaceCover.GetStats()
 }
 
-// getNewRaceCoverage 获取并清空新的race coverage (用于与manager同步)
-func (fuzzer *Fuzzer) getNewRaceCoverage() []*cover.RacePair {
-	fuzzer.raceCoverMu.Lock()
-	defer fuzzer.raceCoverMu.Unlock()
-
-	if fuzzer.newRaceCover == nil || fuzzer.newRaceCover.Len() == 0 {
-		return nil
-	}
-
-	newRaces := fuzzer.newRaceCover.Serialize()
-	fuzzer.newRaceCover.Clear() // 清空已同步的race coverage
-
-	return newRaces
-}
-
-// hasInterestingRaceCoverage 检查是否有有趣的race coverage
-func (fuzzer *Fuzzer) hasInterestingRaceCoverage(races []rpctype.RaceInfo) bool {
+// checkForNewRaceCoverage checks if a pair potentially brings new race coverage
+func (fuzzer *Fuzzer) checkForNewRaceCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) bool {
 	if len(races) == 0 {
 		return false
 	}
 
-	racePairs := cover.ExtractRacePairsFromRpcInfo(races)
-
 	fuzzer.raceCoverMu.RLock()
 	defer fuzzer.raceCoverMu.RUnlock()
 
-	if fuzzer.maxRaceCover == nil {
-		return len(racePairs) > 0 // 如果没有之前的coverage，任何race都是新的
-	}
-
-	// 检查是否有新的race pairs
-	for _, rp := range racePairs {
-		if !fuzzer.maxRaceCover.Contains(rp) {
+	// Check if any of the races are new
+	for _, race := range races {
+		if !fuzzer.maxRaceCover.Contains(race) {
 			return true
 		}
 	}
 
 	return false
 }
+
+// maintainRacePairQueues ensures race pair queues have sufficient work
+func (fuzzer *Fuzzer) maintainRacePairQueues() {
+	// ===============DDRD====================
+	// Use race pair work queue instead of normal work queue
+	// corpusCount, newCoverCount := fuzzer.racePairWorkQueue.getQueueStats()
+	// ===============DDRD====================
+
+	// Maintain corpus-based pairs (lower priority)
+
+	fuzzer.generateTestPairsFromCorpus(520)
+
+	// Log queue status periodically
+	// if corpusCount > 0 || newCoverCount > 0 {
+	// log.Logf(2, "race pair queues: corpus=%d, new_cover=%d", corpusCount, newCoverCount)
+	// }
+} // addRacePairWithNewCoverage adds a program pair that brings new race coverage
+func (fuzzer *Fuzzer) addRacePairWithNewCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) {
+	pairID := fmt.Sprintf("newcover_%d_%d", time.Now().UnixNano(), len(races))
+	// ===============DDRD====================
+	// Use race pair work queue instead of normal work queue
+	fuzzer.racePairWorkQueue.enqueueNewCoverPair(p1, p2, pairID, races)
+	// ===============DDRD====================
+	log.Logf(1, "added race pair with %d new races to queue", len(races))
+}
+
+// ===============DDRD====================

@@ -68,15 +68,8 @@ type Manager struct {
 	numReproducing uint32
 
 	// ===============DDRD====================
-	// 并发测试协调器 - 统一管理所有并发测试组件
-	concurrencyCoordinator *ConcurrencyCoordinator
-
-	// 保持原有组件的引用以支持现有API（由协调器管理）
-	fuzzScheduler           *FuzzScheduler
-	racePairCoverageManager *RacePairCoverageManager
-	testPairDispatcher      *TestPairDispatcher
-	raceReportManager       *RaceReportManager
-	raceReproductionManager *RaceReproductionManager
+	// Fuzz scheduler for managing normal and race pair modes
+	fuzzScheduler *FuzzScheduler
 	// ===============DDRD====================
 
 	dash *dashapi.Dashboard
@@ -218,19 +211,10 @@ func RunManager(cfg *mgrconfig.Config) {
 		usedFiles:          make(map[string]time.Time),
 		saturatedCalls:     make(map[string]bool),
 		// ===============DDRD====================
-		// 先初始化基础组件
-		fuzzScheduler:           NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
-		racePairCoverageManager: NewRacePairCoverageManager(),
-		raceReportManager:       NewRaceReportManager(),
-		raceReproductionManager: NewRaceReproductionManager(cfg.Experimental.RaceReproduction, cfg.Workdir),
+		// Initialize fuzz scheduler for mode management
+		fuzzScheduler: NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
 		// ===============DDRD====================
 	}
-
-	// 在manager创建后初始化需要Manager引用的组件
-	mgr.testPairDispatcher = NewTestPairDispatcher(mgr)
-
-	// 在manager创建后初始化ConcurrencyCoordinator
-	mgr.concurrencyCoordinator = NewConcurrencyCoordinator(mgr)
 
 	mgr.preloadCorpus()
 	mgr.initStats() // Initializes prometheus variables.
@@ -914,20 +898,11 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 		mgr.dataRaceFrames[crash.Frame] = true
 		mgr.mu.Unlock()
 
-		// 处理自定义datarace报告
+		// Handle custom datarace reports - simplified for queue-based system
 		if crash.Report.IsDataRaceReport() {
-			titleLen := len(crash.Title)
-			if titleLen > 20 {
-				titleLen = 20
-			}
-			reportID := fmt.Sprintf("crash-%d-%s", time.Now().Unix(), crash.Title[:titleLen])
-			mgr.raceReportManager.AddReport(crash.Report, reportID)
+			log.Logf(0, "vm-%v: datarace report detected and logged", crash.vmIndex)
 
-			// 记录race报告的统计信息
-			raceStats := mgr.raceReportManager.GetRaceStats()
-			log.Logf(0, "vm-%v: datarace report processed: %+v", crash.vmIndex, raceStats)
-
-			// 输出race摘要
+			// Output race summary if available
 			if len(crash.Report.GetReportedRaces()) > 0 {
 				raceSummary := crash.Report.FormatRacesSummary()
 				log.Logf(0, "vm-%v: race details: %s", crash.vmIndex, raceSummary)
@@ -1434,29 +1409,15 @@ func (mgr *Manager) newInput(inp rpctype.Input, sign signal.Signal) bool {
 		return false
 	}
 
-	// 处理race信号
-	progHash := hash.String(inp.Prog)
-
 	// ===============DDRD====================
 	// Process unified race data structure
-	var raceSignal signal.Signal
 	if len(inp.RaceData.Signals) > 0 {
-		// Convert uint64 signals to uint32 for signal processing
-		uint32Signals := make([]uint32, len(inp.RaceData.Signals))
-		for i, sig := range inp.RaceData.Signals {
-			uint32Signals[i] = uint32(sig)
+		// Simplified race signal processing for queue-based system
+		newSignalCount := len(inp.RaceData.Signals)
+		if newSignalCount > 0 {
+			mgr.stats.newRaceSignals.add(newSignalCount)
+			log.Logf(1, "manager: added %d new race signals", newSignalCount)
 		}
-		raceSignal = signal.FromRaw(uint32Signals, 0)
-		// 将race signals转换为coverage统计，简化处理逻辑
-		newRaceSignals := mgr.processRaceSignalsForCoverage(raceSignal, inp.Call, progHash)
-		if newRaceSignals > 0 {
-			mgr.stats.newRaceSignals.add(int(newRaceSignals))
-		}
-	}
-
-	// Process race-to-syscall mapping data
-	if len(inp.RaceData.MappingData) > 0 {
-		mgr.processRaceMappingData(inp.RaceData.MappingData, inp.Call)
 	}
 	// ===============DDRD====================
 

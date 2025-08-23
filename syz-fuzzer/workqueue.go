@@ -10,10 +10,6 @@ import (
 	"github.com/google/syzkaller/prog"
 )
 
-// WorkQueue holds global non-fuzzing work items (see the Work* structs below).
-// WorkQueue also does prioritization among work items, for example, we want
-// to triage and send to manager new inputs before we smash programs
-// in order to not permanently lose interesting programs in case of VM crash.
 type WorkQueue struct {
 	mu              sync.RWMutex
 	triageCandidate []*WorkTriage
@@ -83,19 +79,27 @@ func (wq *WorkQueue) enqueue(item interface{}) {
 	case *WorkSmash:
 		wq.smash = append(wq.smash, item)
 	default:
-		panic("unknown work type")
+		panic("unknown work type for normal WorkQueue")
 	}
 }
 
 func (wq *WorkQueue) dequeue() (item interface{}) {
 	wq.mu.RLock()
-	if len(wq.triageCandidate)+len(wq.candidate)+len(wq.triage)+len(wq.smash) == 0 {
+	// ===============DDRD====================
+	// Only check normal work items, no race pairs
+	totalWork := len(wq.triageCandidate) + len(wq.candidate) + len(wq.triage) + len(wq.smash)
+	if totalWork == 0 {
 		wq.mu.RUnlock()
 		return nil
 	}
+	// ===============DDRD====================
 	wq.mu.RUnlock()
 	wq.mu.Lock()
 	wantCandidates := false
+
+	// ===============DDRD====================
+	// Normal priority processing (no race pairs)
+	// ===============DDRD====================
 	if len(wq.triageCandidate) != 0 {
 		last := len(wq.triageCandidate) - 1
 		item = wq.triageCandidate[last]
@@ -128,4 +132,32 @@ func (wq *WorkQueue) wantCandidates() bool {
 	wq.mu.RLock()
 	defer wq.mu.RUnlock()
 	return len(wq.candidate) < wq.procs
+}
+
+// extractCandidates extracts up to maxCount candidates from the queue
+// This is used when corpus is insufficient for race pair generation
+func (wq *WorkQueue) extractCandidates(maxCount int) []interface{} {
+	wq.mu.Lock()
+	defer wq.mu.Unlock()
+
+	var candidates []interface{}
+
+	// Extract from candidate queue first (highest priority for race pairs)
+	for len(wq.candidate) > 0 && len(candidates) < maxCount {
+		last := len(wq.candidate) - 1
+		candidates = append(candidates, wq.candidate[last])
+		wq.candidate = wq.candidate[:last]
+	}
+
+	// If we still need more, extract from triage queue
+	for len(wq.triage) > 0 && len(candidates) < maxCount {
+		last := len(wq.triage) - 1
+		// Convert WorkTriage to WorkCandidate for race pair usage
+		triage := wq.triage[last]
+		candidate := &WorkCandidate{p: triage.p, flags: triage.flags}
+		candidates = append(candidates, candidate)
+		wq.triage = wq.triage[:last]
+	}
+
+	return candidates
 }

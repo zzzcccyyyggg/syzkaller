@@ -16,6 +16,7 @@
 #include <time.h>
 
 #if !GOOS_windows
+#include <sys/stat.h>
 #include <sys/wait.h>
 #include <unistd.h>
 #endif
@@ -106,12 +107,9 @@ void sync_with_test_pair();
 #define debug_verbose(...) (void)0
 #endif
 
-static void receive_execute();
 static void reply_execute(int status);
 
 // ===============DDRD====================
-static void receive_execute_pair();
-static void execute_pair();
 static int receive_execute_dispatch();
 // ===============DDRD====================
 
@@ -141,6 +139,7 @@ const int kMaxOutputCoverage = 6 << 20; // coverage is needed in ~ up to 1/3 of 
 const int kMaxOutputSignal = 4 << 20;
 const int kMinOutput = 256 << 10; // if we don't need to send signal, the output is rather short.
 const int kInitialOutput = kMinOutput; // the minimal size to be allocated in the parent process
+const int kMaxOutputMayRacePair = 80 << 21;
 #else
 // We don't fork and allocate the memory only once, so prepare for the worst case.
 const int kInitialOutput = 14 << 20;
@@ -155,6 +154,7 @@ static uint32* output_data;
 static uint32* output_pos;
 static int output_size;
 static void mmap_output(int size);
+static void realloc_output_data();
 static uint32* write_output(uint32 v);
 static uint32* write_output_64(uint64 v);
 static void write_completed(uint32 completed);
@@ -519,6 +519,10 @@ struct execute_pair_req {
 	uint64 prog1_size; // size of first program
 	uint64 prog2_size; // size of second program
 };
+
+// Function declarations that depend on execute_pair_req
+static void execute_pair(const execute_pair_req& req);
+void receive_execute_pair_internal(const execute_pair_req& req);
 // ===============DDRD====================
 
 struct execute_reply {
@@ -814,10 +818,18 @@ static void mmap_output(int size)
 		// There exists a mremap call that could have helped, but it's purely Linux-specific.
 		mmap_at = (uint32*)((char*)(output_data) + output_size);
 	}
-	void* result = mmap(mmap_at, size - output_size,
-			    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, kOutFd, output_size);
-	if (result != mmap_at)
-		failmsg("mmap of output file failed", "want %p, got %p", mmap_at, result);
+	// Detailed logging for mmap debugging
+	size_t mmap_size = size - output_size;
+	off_t mmap_offset = output_size;
+
+	void* result = mmap(mmap_at, mmap_size,
+			    PROT_READ | PROT_WRITE, MAP_SHARED | MAP_FIXED, kOutFd, mmap_offset);
+
+	if (result != mmap_at) {
+		int mmap_errno = errno;
+		failmsg("mmap of output file failed", "want %p, got %p, errno=%d (%s)",
+			mmap_at, result, mmap_errno, strerror(mmap_errno));
+	}
 	output_size = size;
 }
 #endif
@@ -888,30 +900,49 @@ void reply_handshake()
 #endif
 
 static execute_req last_execute_req;
+// ===============DDRD====================
+// Note: last_execute_pair_req removed to fix race condition - now passing req directly
+// static execute_pair_req last_execute_pair_req;
 
 // ===============DDRD====================
+// Forward declarations for internal functions
+void receive_execute_internal(const execute_req& req);
+void receive_execute_pair_internal(const execute_pair_req& req);
+
 // Dispatch function to handle both regular and pair execution requests
 int receive_execute_dispatch()
 {
-	// Read the first 8 bytes to check the magic number
 	uint64 magic;
+
+	// Both in SHMEM and PIPE modes, the request (including magic) comes through the pipe
+	// Only the program data uses shared memory in SHMEM mode
 	if (read(kInPipeFd, &magic, sizeof(magic)) != sizeof(magic))
 		fail("control pipe read failed");
 
 	// Check magic number and dispatch to appropriate handler
 	if (magic == kInMagic) {
-		// Regular execution request - rewind and call original receive_execute
-		if (lseek(kInPipeFd, -sizeof(magic), SEEK_CUR) < 0)
-			fail("seek failed");
-		receive_execute();
-		execute_one();
-		return 1;
+		// We already read the magic, now read the rest of the execute_req structure
+		execute_req req;
+		req.magic = magic; // Set the magic we already read
+		char* req_ptr = (char*)&req + sizeof(magic); // Point to after magic field
+		size_t remaining_size = sizeof(req) - sizeof(magic);
+		if (read(kInPipeFd, req_ptr, remaining_size) != (ssize_t)remaining_size)
+			fail("failed to read execute request");
+		last_execute_req = req;
+		receive_execute_internal(req);
+		return 1; // Need to fork for child process to call execute_one()
 	} else if (magic == kInPairMagic) {
-		// Pair execution request - rewind and call receive_execute_pair
-		if (lseek(kInPipeFd, -sizeof(magic), SEEK_CUR) < 0)
-			fail("seek failed");
-		receive_execute_pair();
-		execute_pair();
+		// We already read the magic, now read the rest of the execute_pair_req structure
+		execute_pair_req req;
+		req.magic = magic; // Set the magic we already read
+		char* req_ptr = (char*)&req + sizeof(magic); // Point to after magic field
+		size_t remaining_size = sizeof(req) - sizeof(magic);
+		if (read(kInPipeFd, req_ptr, remaining_size) != (ssize_t)remaining_size)
+			fail("failed to read execute pair request");
+
+		// Process the request using the existing logic, passing req directly
+		receive_execute_pair_internal(req);
+		execute_pair(req); // Pass req directly instead of using global variable
 		return 0;
 	} else {
 		failmsg("unknown request magic", "magic=0x%llx", magic);
@@ -919,11 +950,8 @@ int receive_execute_dispatch()
 }
 // ===============DDRD====================
 
-void receive_execute()
+void receive_execute_internal(const execute_req& req)
 {
-	execute_req& req = last_execute_req;
-	if (read(kInPipeFd, &req, sizeof(req)) != (ssize_t)sizeof(req))
-		fail("control pipe read failed");
 	if (req.magic != kInMagic)
 		failmsg("bad execute request magic", "magic=0x%llx", req.magic);
 	if (req.prog_size > kMaxInput)
@@ -941,8 +969,8 @@ void receive_execute()
 	flag_coverage_filter = req.exec_flags & (1 << 5);
 
 	// ===============DDRD====================
-	flag_collect_race = req.exec_flags & (1 << 6);
-	flag_test_pair_sync = req.exec_flags & (1 << 7);
+	flag_collect_race = false;
+	flag_test_pair_sync = false;
 	// ===============DDRD====================
 
 	debug("[%llums] exec opts: procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d"
@@ -953,11 +981,14 @@ void receive_execute()
 	if (syscall_timeout_ms == 0 || program_timeout_ms <= syscall_timeout_ms || slowdown_scale == 0)
 		failmsg("bad timeouts", "syscall=%llu, program=%llu, scale=%llu",
 			syscall_timeout_ms, program_timeout_ms, slowdown_scale);
-	if (SYZ_EXECUTOR_USES_SHMEM) {
-		if (req.prog_size)
-			fail("need_prog: no program");
-		return;
-	}
+
+#if SYZ_EXECUTOR_USES_SHMEM
+	// In shared memory mode, program data is already in input_data (shared memory)
+	// The program data is at the beginning of input_data
+	debug("SHMEM mode: program data already available in input_data, size=%llu\n", req.prog_size);
+	return;
+#else
+	// In pipe mode, read program data from pipe into input_data
 	if (req.prog_size == 0)
 		fail("need_prog: no program");
 	uint64 pos = 0;
@@ -971,17 +1002,26 @@ void receive_execute()
 	}
 	if (pos != req.prog_size)
 		failmsg("bad input size", "size=%lld, want=%lld", pos, req.prog_size);
+#endif
 }
 
 // ===============DDRD====================
-// Static storage for pair execution request
-static execute_pair_req last_execute_pair_req;
 
-void receive_execute_pair()
+void receive_execute_pair_internal(const execute_pair_req& req)
 {
-	execute_pair_req& req = last_execute_pair_req;
-	if (read(kInPipeFd, &req, sizeof(req)) != (ssize_t)sizeof(req))
-		fail("control pipe read failed");
+	// Debug: Print all fields of the received structure
+	// debug("DEBUG execute_pair_req received:\n");
+	// debug("  magic=0x%llx\n", req.magic);
+	// debug("  env_flags=0x%llx\n", req.env_flags);
+	// debug("  exec_flags1=0x%llx\n", req.exec_flags1);
+	// debug("  exec_flags2=0x%llx\n", req.exec_flags2);
+	// debug("  pid=0x%llx\n", req.pid);
+	// debug("  syscall_timeout_ms=0x%llx\n", req.syscall_timeout_ms);
+	// debug("  program_timeout_ms=0x%llx\n", req.program_timeout_ms);
+	// debug("  slowdown_scale=0x%llx\n", req.slowdown_scale);
+	// debug("  prog1_size=0x%llx (%llu)\n", req.prog1_size, req.prog1_size);
+	// debug("  prog2_size=0x%llx (%llu)\n", req.prog2_size, req.prog2_size);
+
 	if (req.magic != kInPairMagic)
 		failmsg("bad execute pair request magic", "magic=0x%llx", req.magic);
 	if (req.prog1_size > kMaxInput || req.prog2_size > kMaxInput)
@@ -1017,25 +1057,21 @@ void receive_execute_pair()
 	if (req.prog1_size == 0 || req.prog2_size == 0)
 		fail("pair exec: empty program");
 
-	if (SYZ_EXECUTOR_USES_SHMEM) {
-		// 共享内存模式：程序数据已经在 input_data 中
-		// 布局：[prog1_data][prog2_data]
-		// input_data[0...prog1_size-1] = 程序1
-		// input_data[prog1_size...prog1_size+prog2_size-1] = 程序2
-		debug("[%llums] pair exec: using shared memory, prog1=%llu bytes, prog2=%llu bytes\n",
-		      current_time_ms() - start_time_ms, req.prog1_size, req.prog2_size);
+#if SYZ_EXECUTOR_USES_SHMEM
+	// 共享内存模式：程序数据已经在 input_data 中
+	// 布局：[prog1_data][prog2_data]
+	// input_data[0...prog1_size-1] = 程序1
+	// input_data[prog1_size...prog1_size+prog2_size-1] = 程序2
 
-		// 验证共享内存中的数据大小
-		if (req.prog1_size + req.prog2_size > kMaxInput) {
-			failmsg("pair exec: combined program size too large",
-				"total=%llu, max=%d", req.prog1_size + req.prog2_size, kMaxInput);
-		}
-
-		return;
+	// 验证共享内存中的数据大小
+	if (req.prog1_size + req.prog2_size > kMaxInput) {
+		failmsg("pair exec: combined program size too large",
+			"total=%llu, max=%d", req.prog1_size + req.prog2_size, kMaxInput);
 	}
 
-	// 管道模式：需要从管道读取程序数据
-	debug("[%llums] pair exec: reading programs from pipe\n", current_time_ms() - start_time_ms);
+	// Program data is already available in input_data
+	return;
+#else
 
 	// Read first program
 	uint64 pos = 0;
@@ -1064,19 +1100,16 @@ void receive_execute_pair()
 	if (pos != req.prog2_size)
 		failmsg("prog2 size mismatch", "want=%lld, got=%lld", req.prog2_size, pos);
 
-	debug("[%llums] pair exec: successfully read prog1=%llu bytes, prog2=%llu bytes from pipe\n",
-	      current_time_ms() - start_time_ms, req.prog1_size, req.prog2_size);
+#endif
 }
 
-void execute_pair()
+void execute_pair(const execute_pair_req& req)
 {
-	execute_pair_req& req = last_execute_pair_req;
-
-	debug("[%llums] ============ EXECUTE_PAIR START ============\n", current_time_ms() - start_time_ms);
-	debug("[%llums] Program 1 size: %llu bytes\n", current_time_ms() - start_time_ms, req.prog1_size);
-	debug("[%llums] Program 2 size: %llu bytes\n", current_time_ms() - start_time_ms, req.prog2_size);
-	debug("[%llums] Sync mode: %s\n", current_time_ms() - start_time_ms, flag_test_pair_sync ? "ENABLED" : "DISABLED");
-	debug("[%llums] Race detection: %s\n", current_time_ms() - start_time_ms, flag_collect_race ? "ENABLED" : "DISABLED");
+#if SYZ_EXECUTOR_USES_SHMEM
+	// Initialize output data buffer - this was missing and caused "output overflow"!
+	realloc_output_data();
+	output_pos = output_data;
+#endif
 
 	// ===============DDRD====================
 	// Initialize shared memory only once (lazy initialization to avoid performance loss)
@@ -1090,18 +1123,15 @@ void execute_pair()
 
 	static int pair_execution_count = 0;
 	pair_execution_count++;
-	debug("[%llums] Pair execution #%d starting\n", current_time_ms() - start_time_ms, pair_execution_count);
 
 	// For true race detection, we need concurrent execution using fork()
 	// This allows both programs to run simultaneously and potentially interact
-
 	// Create individual synchronization pipes for each child if needed
 	int sync_pipe1[2], sync_pipe2[2];
 	if (flag_test_pair_sync) {
 		if (pipe(sync_pipe1) < 0 || pipe(sync_pipe2) < 0) {
 			fail("failed to create sync pipes");
 		}
-		debug("[%llums] created synchronization pipes for precise timing\n", current_time_ms() - start_time_ms);
 	}
 
 	pid_t pid1 = fork();
@@ -1110,33 +1140,18 @@ void execute_pair()
 	}
 
 	if (pid1 == 0) {
-		// Child process 1 - Execute Program 1
-		debug("[%llums] child 1 (pid=%d) executing program 1 (size=%llu)\n",
-		      current_time_ms() - start_time_ms, getpid(), req.prog1_size);
-
-		// ===============DDRD====================
 		// Set flag to identify this as program 1 execution
 		is_pair_prog1 = true;
 		is_pair_prog2 = false;
-		debug("[%llums] child 1: set pair program 1 flag\n", current_time_ms() - start_time_ms);
-		// ===============DDRD====================
-
 		if (flag_test_pair_sync) {
 			close(sync_pipe1[1]); // Close write end of own pipe
 			close(sync_pipe2[0]); // Close unused pipes
 			close(sync_pipe2[1]);
-
 			char sync_byte;
-			debug("[%llums] child 1 (pid=%d) waiting for sync signal...\n",
-			      current_time_ms() - start_time_ms, getpid());
 			ssize_t read_result = read(sync_pipe1[0], &sync_byte, 1); // Wait for sync signal
 			(void)read_result; // Suppress unused warning
 			close(sync_pipe1[0]);
-			debug("[%llums] child 1 (pid=%d) received sync signal, starting execution\n",
-			      current_time_ms() - start_time_ms, getpid());
 		}
-
-		// Setup input data for program 1 (already at correct position)
 		execute_one();
 		doexit(0); // Child exits after execution
 	}
@@ -1156,35 +1171,26 @@ void execute_pair()
 	}
 
 	if (pid2 == 0) {
-		// Child process 2 - Execute Program 2
-		debug("[%llums] child 2 (pid=%d) executing program 2 (size=%llu)\n",
-		      current_time_ms() - start_time_ms, getpid(), req.prog2_size);
-
-		// ===============DDRD====================
-		// Set flag to identify this as program 2 execution
 		is_pair_prog1 = false;
 		is_pair_prog2 = true;
-		debug("[%llums] child 2: set pair program 2 flag\n", current_time_ms() - start_time_ms);
-		// ===============DDRD====================
-
+		
 		if (flag_test_pair_sync) {
 			close(sync_pipe2[1]); // Close write end of own pipe
 			close(sync_pipe1[0]); // Close unused pipes
 			close(sync_pipe1[1]);
 
 			char sync_byte;
-			debug("[%llums] child 2 (pid=%d) waiting for sync signal...\n",
-			      current_time_ms() - start_time_ms, getpid());
-			ssize_t read_result2 = read(sync_pipe2[0], &sync_byte, 1); // Wait for sync signal
-			(void)read_result2; // Suppress unused warning
+			ssize_t read_result = read(sync_pipe1[0], &sync_byte, 1); 
+			(void)read_result; // Wait for sync signal
 			close(sync_pipe2[0]);
-			debug("[%llums] child 2 (pid=%d) received sync signal, starting execution\n",
-			      current_time_ms() - start_time_ms, getpid());
 		}
-
 		// Switch to second program data
-		input_data = input_data + req.prog1_size;
+		// Go side ensures program 2 starts at aligned boundary
+		uint64 aligned_offset = (req.prog1_size + 7) & ~7ULL; // Same alignment calculation as Go
+		input_data = input_data + aligned_offset;
+
 		execute_one();
+
 		doexit(0); // Child exits after execution
 	}
 
@@ -1192,8 +1198,6 @@ void execute_pair()
 	if (flag_test_pair_sync) {
 		close(sync_pipe1[0]); // Close read ends
 		close(sync_pipe2[0]);
-
-		debug("[%llums] parent ready to send synchronized start signal...\n", current_time_ms() - start_time_ms);
 
 		// Send sync signals simultaneously to both children
 		char sync_byte = 1;
@@ -1206,49 +1210,72 @@ void execute_pair()
 
 		close(sync_pipe1[1]);
 		close(sync_pipe2[1]);
-
-		debug("[%llums] synchronized start signals sent to both programs\n", current_time_ms() - start_time_ms);
 	}
 
-	// Parent process waits for both children to complete
-	debug("[%llums] parent waiting for both programs to complete...\n", current_time_ms() - start_time_ms);
+	int status1 = 0, status2 = 0;
+	bool got1 = false, got2 = false;
+	for (int completed = 0; completed < 2; completed++) {
+		int status;
+		pid_t finished = waitpid(-1, &status, 0);
+		if (finished == pid1) {
+			status1 = status;
+			got1 = true;
+		} else if (finished == pid2) {
+			status2 = status;
+			got2 = true;
+		} else {
+			fail("unexpected child");
+		}
 
-	int status1, status2;
-	pid_t finished1 = waitpid(pid1, &status1, 0);
-	pid_t finished2 = waitpid(pid2, &status2, 0);
-
-	if (finished1 != pid1 || finished2 != pid2) {
-		fail("waitpid failed for pair execution");
+		// 可打印“某子进程已结束”的即时日志，但不要收集/清理/回复
+		if (got1) {
+			if (WIFEXITED(status1))
+				debug("prog1 exited code=%d\n", WEXITSTATUS(status1));
+			else if (WIFSIGNALED(status1))
+				debug("prog1 signaled sig=%d\n", WTERMSIG(status1));
+		}
+		if (got2) {
+			if (WIFEXITED(status2))
+				debug("prog2 exited code=%d\n", WEXITSTATUS(status2));
+			else if (WIFSIGNALED(status2))
+				debug("prog2 signaled sig=%d\n", WTERMSIG(status2));
+		}
 	}
-
-	debug("[%llums] pair execution completed - prog1 status=%d, prog2 status=%d\n",
-	      current_time_ms() - start_time_ms, WEXITSTATUS(status1), WEXITSTATUS(status2));
-
-	// Check if either program failed
 	int final_status = 0;
-	if (WEXITSTATUS(status1) != 0) {
-		debug("program 1 failed with status %d\n", WEXITSTATUS(status1));
-		final_status = WEXITSTATUS(status1);
-	}
-	if (WEXITSTATUS(status2) != 0) {
-		debug("program 2 failed with status %d\n", WEXITSTATUS(status2));
-		if (final_status == 0)
-			final_status = WEXITSTATUS(status2);
-	}
-
+	auto to_exit_code = [](int st) {
+		if (WIFEXITED(st))
+			return WEXITSTATUS(st);
+		if (WIFSIGNALED(st))
+			return 128 + WTERMSIG(st);
+		return 255; // 不应到达
+	};
+	int code1 = to_exit_code(status1);
+	int code2 = to_exit_code(status2);
+	final_status = (code1 != 0) ? code1 : code2;
 	// Collect and output race data once after pair execution completes
 	if (flag_collect_race) {
-		debug("[%llums] collecting race data after pair execution\n", current_time_ms() - start_time_ms);
+
+		// 生成 may_race_pair 信息 - using static allocation to avoid large stack frame
+		enum { MAX_MAY_RACE_PAIRS_OUT = 0x200 }; // 与 analyze 一致：最多 512
+
+		// Check output buffer space before writing race data
+		char* current_pos = (char*)output_pos;
+		char* buffer_end = (char*)output_data + output_size;
+		size_t remaining_space = buffer_end - current_pos;
+
+		// Estimate space needed: magic(4) + count(4) + max_pairs * pair_size
+		size_t estimated_needed = 8 + (MAX_MAY_RACE_PAIRS_OUT * 84);
+		if (remaining_space < estimated_needed) { 
+			debug("[%llums] WARNING: insufficient buffer space for race data (%zu < %zu)\n",
+			      current_time_ms() - start_time_ms, remaining_space, estimated_needed);
+		}
 
 		write_output(kOutPairMagic); // 魔数
 		uint32* pair_count_pos = write_output(0); // 占位：pair 数量
 
-		// 生成 may_race_pair 信息
-		enum { MAX_MAY_RACE_PAIRS_OUT = 0x200 }; // 与 analyze 一致：最多 512
-		may_race_pair_t pairs_out[MAX_MAY_RACE_PAIRS_OUT];
+		static may_race_pair_t pairs_out[MAX_MAY_RACE_PAIRS_OUT];
 		int pair_count = analyze_and_generate_may_race_infos(
 		    pairs_out, MAX_MAY_RACE_PAIRS_OUT);
-
 		// 逐个写出
 		for (int i = 0; i < pair_count; i++) {
 			const may_race_pair_t* pr = &pairs_out[i];
@@ -1262,6 +1289,8 @@ void execute_pair()
 			write_output_64((uint64)pr->varName2); // 8
 			write_output_64((uint64)pr->call_stack1); // 8
 			write_output_64((uint64)pr->call_stack2); // 8
+			write_output((uint32)pr->sn1); // 4
+			write_output((uint32)pr->sn2); // 4
 			write_output_64((uint64)pr->signal); // 8
 			write_output((uint32)pr->lock_type); // 4
 			write_output((uint32)pr->access_type1); // 4
@@ -1274,21 +1303,14 @@ void execute_pair()
 		debug("[%llums] race data collection completed: %d signals\n",
 		      current_time_ms() - start_time_ms, pair_count);
 	}
-
-	// ===============DDRD====================
-	// Print pair syscall timing statistics and clean up
 	if (flag_collect_race || flag_debug) {
 		print_pair_syscall_statistics();
 	}
 	cleanup_pair_syscall_shared_memory();
-	debug("[%llums] ============ EXECUTE_PAIR COMPLETED ============\n", current_time_ms() - start_time_ms);
-	// ===============DDRD====================
-
 	// Send completion signal with unified race results
 	reply_execute(final_status);
 }
 // ===============DDRD====================
-
 bool cover_collection_required()
 {
 	return flag_coverage && (flag_collect_signal || flag_collect_cover || flag_comparisons);
@@ -1319,14 +1341,21 @@ void reply_execute(int status)
 void realloc_output_data()
 {
 #if SYZ_EXECUTOR_USES_FORK_SERVER
+	if (flag_collect_race) {
+		mmap_output(kMaxOutputMayRacePair);
+	}
 	if (flag_comparisons)
 		mmap_output(kMaxOutputComparisons);
 	else if (flag_collect_cover)
 		mmap_output(kMaxOutputCoverage);
 	else if (flag_collect_signal)
 		mmap_output(kMaxOutputSignal);
-	if (close(kOutFd) < 0)
-		fail("failed to close kOutFd");
+	// Only close kOutFd if it's still valid (not already closed)
+	// In some cases, it might already be closed in the setup phase
+	if (fcntl(kOutFd, F_GETFD) != -1) {
+		if (close(kOutFd) < 0)
+			fail("failed to close kOutFd");
+	}
 #endif
 }
 #endif // if SYZ_EXECUTOR_USES_SHMEM
@@ -1336,10 +1365,12 @@ void execute_one()
 {
 	in_execute_one = true;
 #if SYZ_EXECUTOR_USES_SHMEM
-	realloc_output_data();
-	output_pos = output_data;
 	if (!flag_collect_race)
+		realloc_output_data();
+	output_pos = output_data;
+	if (!flag_collect_race) {
 		write_output(0); // Number of executed syscalls (updated later).
+	}
 #endif // if SYZ_EXECUTOR_USES_SHMEM
 
 	// 在execute_one中已经保证了两个线程的并发控制
@@ -1351,13 +1382,14 @@ void execute_one()
 		if (flag_collect_race && current_test_pair_id != last_test_pair_id) {
 			reset_race_detector();
 			last_test_pair_id = current_test_pair_id;
-			debug("Race detector reset for new test pair %lld (procid=%lld)\n",
-			      current_test_pair_id, procid);
 		}
 	}
 	// ===============DDRD====================
 	uint64 start = current_time_ms();
 	uint64* input_pos = (uint64*)input_data;
+	if (!input_pos) {
+		failmsg("execute_one called with NULL input_data", "input_data=%p", input_data);
+	}
 
 	if (cover_collection_required()) {
 		if (!flag_threaded)
@@ -1748,7 +1780,9 @@ void write_call_output(thread_t* th, bool finished)
 	}
 #if SYZ_EXECUTOR_USES_SHMEM
 	if (!flag_collect_race) {
+		debug("write_call_output: writing magic 0x%x at output_pos=%p\n", kOutMagic, output_pos);
 		write_output(kOutMagic);
+		debug("write_call_output: after writing magic, output_pos=%p\n", output_pos);
 		write_output(th->call_index);
 		write_output(th->call_num);
 		write_output(reserrno);

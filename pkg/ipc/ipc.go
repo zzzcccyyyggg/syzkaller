@@ -87,15 +87,6 @@ const (
 	CallFaultInjected                       // fault was injected into this call
 )
 
-// ===============DDRD====================
-// RaceData contains all race-related information in a unified structure
-type RaceData struct {
-	Signals     []uint64 // race detection signals (64-bit to match executor output)
-	MappingData []byte   // serialized race-to-syscall mapping data
-}
-
-// ===============DDRD====================
-
 type CallInfo struct {
 	Flags  CallFlags
 	Signal []uint32 // feedback signal (coverage), filled if FlagSignal is set
@@ -107,9 +98,6 @@ type CallInfo struct {
 	// ===============DDRD====================
 	StartTime uint64 // syscall start time (in nanoseconds)
 	EndTime   uint64 // syscall end time (in nanoseconds)
-	// Unified race data structure containing both signals and mapping data
-	RaceData RaceData // contains race signals and mapping data in one structure
-	// ===============DDRD====================
 }
 
 type ProgInfo struct {
@@ -118,8 +106,8 @@ type ProgInfo struct {
 }
 
 type PairProgInfo struct {
-	pairCount    uint32             // number of pairs
-	mayRacePairs []ddrd.MayRacePair // store the detail information of each pair
+	PairCount    uint32             // number of pairs
+	MayRacePairs []ddrd.MayRacePair // store the detail information of each pair
 }
 
 type Env struct {
@@ -139,8 +127,8 @@ type Env struct {
 }
 
 const (
-	outputSize = 16 << 20
-
+	// outputSize = 16 << 20
+	outputSize = 80 << 25
 	statusFail = 67
 
 	// Comparison types masks taken from KCOV headers.
@@ -318,7 +306,11 @@ func (env *Env) Exec(opts *ExecOpts, p *prog.Prog) (output []byte, info *ProgInf
 
 // execPair executes two programs concurrently in a single executor for race detection
 // Returns unified race coverage results after both programs complete
-func (c *command) execPair(opts1, opts2 *ExecOpts, prog1Data, prog2Data []byte) (output []byte, hanged bool, err0 error) {
+func (c *command) execPair(opts1, opts2 *ExecOpts, prog1Data, prog2Data []byte, prog1Size, prog2Size int) (output []byte, hanged bool, err0 error) {
+	// Debug: Log the values being sent to executor
+	// log.Printf("DEBUG execPair: about to send to executor - prog1Size=%d (0x%x), prog2Size=%d (0x%x)",
+	// 	prog1Size, prog1Size, prog2Size, prog2Size)
+
 	req := &executePairReq{
 		magic:            inPairMagic,
 		envFlags:         uint64(c.config.Flags),
@@ -328,8 +320,8 @@ func (c *command) execPair(opts1, opts2 *ExecOpts, prog1Data, prog2Data []byte) 
 		syscallTimeoutMS: uint64(c.config.Timeouts.Syscall / time.Millisecond),
 		programTimeoutMS: uint64(c.config.Timeouts.Program / time.Millisecond),
 		slowdownScale:    uint64(c.config.Timeouts.Scale),
-		prog1Size:        uint64(len(prog1Data)),
-		prog2Size:        uint64(len(prog2Data)),
+		prog1Size:        uint64(prog1Size), // Use actual program sizes
+		prog2Size:        uint64(prog2Size),
 	}
 
 	reqData := (*[unsafe.Sizeof(*req)]byte)(unsafe.Pointer(req))[:]
@@ -456,6 +448,16 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	opts1.Flags |= FlagTestPairSync | FlagCollectRace
 	opts2.Flags |= FlagTestPairSync | FlagCollectRace
 
+	// Debug: Print syscall numbers for each program before serialization
+	// log.Printf("DEBUG ExecPair: Program 1 syscalls:")
+	// for i, call := range p1.Calls {
+	// 	log.Printf("  [%d] %s (ID=%d)", i, call.Meta.Name, call.Meta.ID)
+	// }
+	// log.Printf("DEBUG ExecPair: Program 2 syscalls:")
+	// for i, call := range p2.Calls {
+	// 	log.Printf("  [%d] %s (ID=%d)", i, call.Meta.Name, call.Meta.ID)
+	// }
+
 	// Serialize both programs
 	prog1Size, err := p1.SerializeForExec(env.in)
 	if err != nil {
@@ -463,7 +465,7 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 		return
 	}
 
-	// Use a separate buffer for the second program
+	// Use a separate buffer for the second program to avoid overwriting env.in
 	prog2Buffer := make([]byte, prog.ExecBufferSize)
 	prog2Size, err := p2.SerializeForExec(prog2Buffer)
 	if err != nil {
@@ -473,8 +475,32 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 
 	var prog1Data, prog2Data []byte
 	if !env.config.UseShmem {
+		// Pipe mode: send program data through pipes
 		prog1Data = env.in[:prog1Size]
 		prog2Data = prog2Buffer[:prog2Size]
+	} else {
+		// Shared memory mode: programs are already in shared memory
+		// For shmem mode with two programs, we need to handle this carefully
+
+		// Ensure program 2 starts at 8-byte aligned boundary
+		alignedProg1Size := (prog1Size + 7) &^ 7 // Round up to next 8-byte boundary
+
+		if alignedProg1Size+prog2Size > len(env.in) {
+			err0 = fmt.Errorf("programs too large for shared memory buffer (aligned size: %d)", alignedProg1Size+prog2Size)
+			return
+		}
+
+		// Clear any padding between prog1 and prog2
+		for i := prog1Size; i < alignedProg1Size; i++ {
+			env.in[i] = 0
+		}
+
+		// Copy second program data starting at aligned position
+		copy(env.in[alignedProg1Size:], prog2Buffer[:prog2Size])
+
+		// In shmem mode, progData should be nil since data is already in shared memory
+		prog1Data = nil
+		prog2Data = nil
 	}
 
 	// Clear output buffer for race data
@@ -489,7 +515,7 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	}
 
 	// Execute pair using the new execPair method
-	output, hanged, err0 = env.cmd.execPair(opts1, opts2, prog1Data, prog2Data)
+	output, hanged, err0 = env.cmd.execPair(opts1, opts2, prog1Data, prog2Data, int(prog1Size), int(prog2Size))
 	if err0 != nil {
 		env.cmd.close()
 		env.cmd = nil
@@ -529,8 +555,8 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 	}
 
 	info := &PairProgInfo{
-		mayRacePairs: make([]ddrd.MayRacePair, pairCount),
-		pairCount:    pairCount,
+		MayRacePairs: make([]ddrd.MayRacePair, pairCount),
+		PairCount:    pairCount,
 	}
 
 	sz := int(unsafe.Sizeof(ddrd.MayRacePair{}))
@@ -539,7 +565,7 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 			return nil, fmt.Errorf("pair %v: truncated output", i)
 		}
 		mayRacePair := (*ddrd.MayRacePair)(unsafe.Pointer(&out[0]))
-		info.mayRacePairs[i] = *mayRacePair
+		info.MayRacePairs[i] = *mayRacePair
 		out = out[sz:]
 	}
 
@@ -738,25 +764,6 @@ func convertExtra(extraParts []CallInfo, dedupCover bool) CallInfo {
 		extra.Signal[i] = uint32(s)
 		i++
 	}
-
-	// ===============DDRD====================
-	// Process race signals separately
-	extraRaceSignal := make(signal.Signal)
-	for _, part := range extraParts {
-		// Convert uint64 signals to uint32 for signal processing
-		uint32Signals := make([]uint32, len(part.RaceData.Signals))
-		for i, sig := range part.RaceData.Signals {
-			uint32Signals[i] = uint32(sig)
-		}
-		extraRaceSignal.Merge(signal.FromRaw(uint32Signals, 0))
-	}
-	extra.RaceData.Signals = make([]uint64, len(extraRaceSignal))
-	i = 0
-	for s := range extraRaceSignal {
-		extra.RaceData.Signals[i] = uint64(s)
-		i++
-	}
-	// ===============DDRD====================
 
 	return extra
 }

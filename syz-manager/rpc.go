@@ -381,13 +381,6 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 		inp.Cover, inp.Signal = f.instModules.Decanonicalize(inp.Cover, inp.Signal)
 	}
 
-	// ===============DDRD====================
-	// 使用ConcurrencyCoordinator处理并发测试逻辑
-	if mgr := serv.mgr.(*Manager); mgr.concurrencyCoordinator != nil {
-		mgr.concurrencyCoordinator.HandlePoll(a, r)
-	}
-	// ===============DDRD====================
-
 	log.Logf(4, "poll from %v: candidates=%v inputs=%v maxsignal=%v",
 		a.Name, len(r.Candidates), len(r.NewInputs), len(r.MaxSignal.Elems))
 	return nil
@@ -410,32 +403,38 @@ func (serv *RPCServer) LogMessage(m *rpctype.LogMessageReq, r *int) error {
 	return nil
 }
 
-// PollTestPairs 供 fuzzer 轮询获取test pair任务
-func (serv *RPCServer) PollTestPairs(a *rpctype.PollTestPairsArgs, r *rpctype.PollTestPairsRes) error {
+// CheckTestPairMode checks if fuzzer should run in race pair mode
+func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.CheckModeRes) error {
 	mgr := serv.mgr.(*Manager)
-	if mgr.testPairDispatcher == nil || !mgr.testPairDispatcher.IsEnabled() {
-		r.Tasks = nil
+	if mgr.fuzzScheduler == nil {
+		r.IsTestPairMode = false
 		return nil
 	}
-
-	tasks := mgr.testPairDispatcher.GetTasksForFuzzer(a.FuzzerName, a.MaxTasks)
-	r.Tasks = tasks
+	
+	// Check current phase from fuzz scheduler
+	currentPhase := mgr.fuzzScheduler.GetCurrentPhase()
+	r.IsTestPairMode = (currentPhase == PhaseRaceFuzz)
+	
+	log.Logf(2, "CheckTestPairMode: fuzzer=%v, phase=%v, isTestPairMode=%v", 
+		a.Name, currentPhase, r.IsTestPairMode)
 	return nil
 }
 
-// CheckTestPairMode 检查是否处于test pair模式
-func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.CheckModeRes) error {
+// NewRacePair handles race pair data from fuzzer
+func (serv *RPCServer) NewRacePair(a *rpctype.NewRacePairArgs, r *rpctype.NewRacePairRes) error {
 	mgr := serv.mgr.(*Manager)
-	return mgr.CheckTestPairMode(a, r)
-}
-
-// SubmitTestPairResults 供 fuzzer 提交test pair执行结果
-func (serv *RPCServer) SubmitTestPairResults(a *rpctype.SubmitTestPairResultsArgs, r *int) error {
-	mgr := serv.mgr.(*Manager)
-	if mgr.testPairDispatcher == nil {
-		return nil
+	
+	log.Logf(1, "NewRacePair from %v: pairID=%v, races=%d", 
+		a.Name, a.PairID, len(a.Races))
+	
+	// Process race pair data - simplified for queue-based system
+	if len(a.Races) > 0 {
+		log.Logf(2, "Processing race pair: %s with %d race detections", 
+			a.PairID, len(a.Races))
+		
+		// Update statistics for race signals
+		mgr.stats.newRaceSignals.add(len(a.Races))
 	}
-
-	mgr.testPairDispatcher.HandleTestPairResults(a.FuzzerName, a.Results)
+	
 	return nil
 }

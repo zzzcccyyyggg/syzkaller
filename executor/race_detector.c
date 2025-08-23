@@ -31,11 +31,6 @@ void debug(const char* msg, ...);
 #define debug(...)
 #endif
 
-// ===============DDRD====================
-// Forward declaration for time precision validation
-static void validate_time_precision();
-// ===============DDRD====================
-
 // Shared memory structures for pair syscall timing (from executor.cc)
 #define MAX_PAIR_SYSCALLS 1024
 
@@ -772,6 +767,8 @@ int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, i
 		may_race_pair_buffer[i].varName2 = pair->second.var_name;
 		may_race_pair_buffer[i].call_stack1 = pair->first.call_stack_hash;
 		may_race_pair_buffer[i].call_stack2 = pair->second.call_stack_hash;
+		may_race_pair_buffer[i].sn1 = pair->first.sn;
+		may_race_pair_buffer[i].sn2 = pair->second.sn;
         may_race_pair_buffer[i].lock_type = pair->lock_status;
 		may_race_pair_buffer[i].signal = hash_race_signal(
 		    (char*)&pair->first.var_name,

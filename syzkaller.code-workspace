@@ -1,0 +1,19 @@
+{
+	"folders": [
+		{
+			"name": "syzkaller",
+			"path": "."
+		}
+	],
+	"settings": {
+		"go.toolsManagement.checkForUpdates": "local",
+		"go.useLanguageServer": true,
+		"terminal.integrated.cwd": "${workspaceFolder}"
+	},
+	"extensions": {
+		"recommendations": [
+			"golang.go",
+			"ms-vscode.cpptools"
+		]
+	}
+}
