@@ -23,6 +23,12 @@
 
 #include "defs.h"
 
+#if GOOS_linux
+#include <sys/syscall.h>
+#include "ukc_ctl.h"
+static ukc_ctl_t* ukc_controller = NULL;
+#endif
+
 #if defined(__GNUC__)
 #define SYSCALLAPI
 #define NORETURN __attribute__((noreturn))
@@ -738,15 +744,25 @@ int main(int argc, char** argv)
 	}
 
 	// ===============DDRD====================
-	if (flag_collect_race) {
-		init_race_detector();
-		if (!is_race_detector_available()) {
-			// Race检测初始化失败，禁用race收集
-			flag_collect_race = false;
-		}
+	init_race_detector();
+	if (!is_race_detector_available()) {
+		fail("race detector init fail\n");
 	}
-	// ===============DDRD====================
 
+	// ===============DDRD====================
+#if GOOS_linux
+	// Initialize UKC controller
+	ukc_controller = ukc_ctl_init("/dev/" DEVICE_NAME);
+	if (ukc_controller) {
+		if (ukc_ctl_start_monitor(ukc_controller) == 0) {
+			debug("UKC controller initialized successfully\n");
+		} else {
+			debug("UKC controller initialized but failed to start monitor\n");
+		}
+	} else {
+		debug("UKC controller initialization failed\n");
+	}
+#endif
 	int status = 0;
 	if (flag_sandbox_none)
 		status = do_sandbox_none();
@@ -764,6 +780,13 @@ int main(int argc, char** argv)
 #endif
 	else
 		fail("unknown sandbox type");
+#if GOOS_linux
+	// Clean up UKC controller before exit
+	if (ukc_controller) {
+		ukc_ctl_cleanup(ukc_controller);
+		ukc_controller = NULL;
+	}
+#endif
 
 #if SYZ_EXECUTOR_USES_FORK_SERVER
 	fprintf(stderr, "loop exited with status %d\n", status);
@@ -779,9 +802,8 @@ int main(int argc, char** argv)
 
 	// ===============DDRD====================
 	// 清理race检测器
-	if (flag_collect_race) {
-		cleanup_race_detector();
-	}
+
+	cleanup_race_detector();
 	// ===============DDRD====================
 	doexit(status);
 
@@ -791,9 +813,7 @@ int main(int argc, char** argv)
 	reply_execute(status);
 
 	// ===============DDRD====================
-	if (flag_collect_race) {
-		cleanup_race_detector();
-	}
+	cleanup_race_detector();
 	// ===============DDRD====================
 	return status;
 #endif
@@ -1105,6 +1125,17 @@ void receive_execute_pair_internal(const execute_pair_req& req)
 
 void execute_pair(const execute_pair_req& req)
 {
+#if GOOS_linux
+	// Switch to LOG mode before execution
+	if (ukc_controller) {
+		if (ukc_ctl_start_log_phase(ukc_controller) == 0) {
+			debug("UKC switched to LOG mode\n");
+		} else {
+			debug("Failed to switch UKC to LOG mode\n");
+		}
+	}
+#endif
+
 #if SYZ_EXECUTOR_USES_SHMEM
 	// Initialize output data buffer - this was missing and caused "output overflow"!
 	realloc_output_data();
@@ -1173,14 +1204,14 @@ void execute_pair(const execute_pair_req& req)
 	if (pid2 == 0) {
 		is_pair_prog1 = false;
 		is_pair_prog2 = true;
-		
+
 		if (flag_test_pair_sync) {
 			close(sync_pipe2[1]); // Close write end of own pipe
 			close(sync_pipe1[0]); // Close unused pipes
 			close(sync_pipe1[1]);
 
 			char sync_byte;
-			ssize_t read_result = read(sync_pipe1[0], &sync_byte, 1); 
+			ssize_t read_result = read(sync_pipe1[0], &sync_byte, 1);
 			(void)read_result; // Wait for sync signal
 			close(sync_pipe2[0]);
 		}
@@ -1265,7 +1296,7 @@ void execute_pair(const execute_pair_req& req)
 
 		// Estimate space needed: magic(4) + count(4) + max_pairs * pair_size
 		size_t estimated_needed = 8 + (MAX_MAY_RACE_PAIRS_OUT * 84);
-		if (remaining_space < estimated_needed) { 
+		if (remaining_space < estimated_needed) {
 			debug("[%llums] WARNING: insufficient buffer space for race data (%zu < %zu)\n",
 			      current_time_ms() - start_time_ms, remaining_space, estimated_needed);
 		}
@@ -1273,13 +1304,29 @@ void execute_pair(const execute_pair_req& req)
 		write_output(kOutPairMagic); // 魔数
 		uint32* pair_count_pos = write_output(0); // 占位：pair 数量
 
+		debug("[%llums] DEBUG: Writing race data with kOutPairMagic=0x%x\n",
+		      current_time_ms() - start_time_ms, kOutPairMagic);
+
 		static may_race_pair_t pairs_out[MAX_MAY_RACE_PAIRS_OUT];
 		int pair_count = analyze_and_generate_may_race_infos(
 		    pairs_out, MAX_MAY_RACE_PAIRS_OUT);
+		    
+		debug("[%llums] DEBUG: Generated %d race pairs, sizeof(may_race_pair_t)=%zu\n",
+		      current_time_ms() - start_time_ms, pair_count, sizeof(may_race_pair_t));
 		// 逐个写出
 		for (int i = 0; i < pair_count; i++) {
 			const may_race_pair_t* pr = &pairs_out[i];
 
+			debug("[%llums] DEBUG: Writing pair %d: syscall1_idx=%d, syscall2_idx=%d, syscall1_num=%d, syscall2_num=%d\n",
+			      current_time_ms() - start_time_ms, i, pr->syscall1_idx, pr->syscall2_idx, pr->syscall1_num, pr->syscall2_num);
+			debug("[%llums] DEBUG: Writing pair %d: varName1=0x%lx, varName2=0x%lx, signal=0x%lx\n",
+			      current_time_ms() - start_time_ms, i, pr->varName1, pr->varName2, pr->signal);
+			debug("[%llums] DEBUG: Writing pair %d: lock_type=%u, access_type1=%u, access_type2=%u, time_diff=%lu\n",
+			      current_time_ms() - start_time_ms, i, pr->lock_type, pr->access_type1, pr->access_type2, pr->time_diff);
+
+			// Record start position of this pair in output buffer
+			char* pair_start_pos = (char*)output_pos;
+			
 			// 固定头部（全部用 32/64 位字段，易于解析）
 			write_output((uint32)pr->syscall1_idx); // 4
 			write_output((uint32)pr->syscall2_idx); // 4
@@ -1296,9 +1343,39 @@ void execute_pair(const execute_pair_req& req)
 			write_output((uint32)pr->access_type1); // 4
 			write_output((uint32)pr->access_type2); // 4
 			write_output_64((uint64)pr->time_diff); // 8
+			
+			// Output the raw bytes we just wrote for this pair
+			char* pair_end_pos = (char*)output_pos;
+			int pair_size = pair_end_pos - pair_start_pos;
+			debug("[%llums] DEBUG: Pair %d raw bytes written (size=%d): ", 
+			      current_time_ms() - start_time_ms, i, pair_size);
+			for (int j = 0; j < pair_size; j++) {
+				debug("%02x ", (unsigned char)pair_start_pos[j]);
+				if ((j + 1) % 16 == 0) debug("\n[%llums] DEBUG: ", current_time_ms() - start_time_ms);
+			}
+			debug("\n");
 		}
 
 		*pair_count_pos = (uint32)pair_count;
+
+		// Output complete buffer for debugging
+		char* buffer_start = (char*)output_data;
+		char* buffer_current = (char*)output_pos;
+		int total_written = buffer_current - buffer_start;
+		debug("[%llums] DEBUG: Complete race buffer written (total_size=%d):\n", 
+		      current_time_ms() - start_time_ms, total_written);
+		debug("[%llums] DEBUG: Magic + Count: ", current_time_ms() - start_time_ms);
+		for (int i = 0; i < 8; i++) {
+			debug("%02x ", (unsigned char)buffer_start[i]);
+		}
+		debug("\n");
+		
+		// Show first 32 bytes for comparison with Go side
+		debug("[%llums] DEBUG: First 32 bytes of complete buffer: ", current_time_ms() - start_time_ms);
+		for (int i = 0; i < 32 && i < total_written; i++) {
+			debug("%02x ", (unsigned char)buffer_start[i]);
+		}
+		debug("\n");
 
 		debug("[%llums] race data collection completed: %d signals\n",
 		      current_time_ms() - start_time_ms, pair_count);
@@ -1308,6 +1385,17 @@ void execute_pair(const execute_pair_req& req)
 	}
 	cleanup_pair_syscall_shared_memory();
 	// Send completion signal with unified race results
+
+#if GOOS_linux
+	// Switch back to MONITOR mode after execution
+	if (ukc_controller) {
+		if (ukc_ctl_start_monitor(ukc_controller) == 0) {
+			debug("UKC switched back to MONITOR mode\n");
+		} else {
+			debug("Failed to switch UKC back to MONITOR mode\n");
+		}
+	}
+#endif
 	reply_execute(final_status);
 }
 // ===============DDRD====================
@@ -1975,8 +2063,9 @@ void execute_call(thread_t* th)
 
 	// 暂时不确定这里和上面execute syscall 中相关信息会不会一样
 	if (is_pair_prog1 || is_pair_prog2) {
+		// 使用gettid()获取真正的线程ID，与内核log中的TID一致
 		record_pair_syscall_timing(th->call_index, th->call_num,
-					   th->call_start_time, th->call_end_time, getpid());
+					   th->call_start_time, th->call_end_time, gettid());
 	}
 	// ===============DDRD====================
 

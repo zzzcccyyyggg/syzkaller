@@ -532,10 +532,64 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	return
 }
 
+// parseMayRacePair manually parses a MayRacePair from byte array
+// This avoids unsafe pointer conversion and memory alignment issues
+func parseMayRacePair(data []byte) (*ddrd.MayRacePair, error) {
+	if len(data) < 84 { // C端发送84字节
+		return nil, fmt.Errorf("insufficient data for MayRacePair: need 84 bytes, got %d", len(data))
+	}
+
+	pair := &ddrd.MayRacePair{}
+	offset := 0
+
+	// Parse fields according to C send order (84 bytes total)
+	pair.Syscall1Idx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall2Idx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall1Num = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall2Num = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.VarName1 = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.VarName2 = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.CallStack1 = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.CallStack2 = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.Sn1 = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Sn2 = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Signal = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.LockType = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	pair.AccessType1 = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	pair.AccessType2 = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	pair.TimeDiff = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	// Total: 84 bytes
+
+	return pair, nil
+}
+
 // parsePairOutput parses the race detection output from pair execution
 func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 
 	out := env.out
+
+	// Debug: Show initial buffer state
+	debugLen := 32
+	if len(out) < debugLen {
+		debugLen = len(out)
+	}
+	// fmt.Printf("DEBUG parsePairOutput: initial buffer length=%d, first %d bytes: %v\n",
+	// 	len(out), debugLen, out[:debugLen])
 
 	// Pair execution output format:
 	// [kOutPairMagic][pair_count][pair1][pair2]...
@@ -545,6 +599,7 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("failed to read pair magic")
 	}
+	// fmt.Printf("DEBUG parsePairOutput: read magic=0x%x, expected=0x%x\n", magic, outPairMagic)
 	if magic != outPairMagic {
 		return nil, fmt.Errorf("bad pair magic 0x%x", magic)
 	}
@@ -553,22 +608,49 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 	if !ok {
 		return nil, fmt.Errorf("failed to read pair count")
 	}
+	// fmt.Printf("DEBUG parsePairOutput: read pairCount=%d\n", pairCount)
 
 	info := &PairProgInfo{
 		MayRacePairs: make([]ddrd.MayRacePair, pairCount),
 		PairCount:    pairCount,
 	}
 
-	sz := int(unsafe.Sizeof(ddrd.MayRacePair{}))
+	// C端发送84字节每个pair
+	const pairDataSize = 84
+	// fmt.Printf("DEBUG parsePairOutput: expected pair data size=%d bytes\n", pairDataSize)
+
 	for i := uint32(0); i < pairCount; i++ {
-		if len(out) < sz {
-			return nil, fmt.Errorf("pair %v: truncated output", i)
+		// fmt.Printf("DEBUG parsePairOutput: parsing pair %d, remaining buffer=%d bytes\n", i, len(out))
+		if len(out) < pairDataSize {
+			return nil, fmt.Errorf("pair %v: truncated output, need %d bytes but only %d available", i, pairDataSize, len(out))
 		}
-		mayRacePair := (*ddrd.MayRacePair)(unsafe.Pointer(&out[0]))
+
+		// Debug: Show raw bytes for this pair
+		debugPairLen := pairDataSize
+		if len(out) < debugPairLen {
+			debugPairLen = len(out)
+		}
+		// fmt.Printf("DEBUG parsePairOutput: pair %d raw bytes (all %d): %v\n", i, debugPairLen, out[:debugPairLen])
+
+		// 使用手动解析而不是unsafe指针
+		mayRacePair, err := parseMayRacePair(out[:pairDataSize])
+		if err != nil {
+			return nil, fmt.Errorf("failed to parse pair %d: %w", i, err)
+		}
+
+		// Debug: Show parsed fields
+		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: Syscall1Idx=%d, Syscall2Idx=%d, Syscall1Num=%d, Syscall2Num=%d\n",
+		// 	i, mayRacePair.Syscall1Idx, mayRacePair.Syscall2Idx, mayRacePair.Syscall1Num, mayRacePair.Syscall2Num)
+		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: VarName1=0x%x, VarName2=0x%x, Signal=0x%x\n",
+		// 	i, mayRacePair.VarName1, mayRacePair.VarName2, mayRacePair.Signal)
+		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: LockType=%d, AccessType1=%d, AccessType2=%d, TimeDiff=%d\n",
+		// 	i, mayRacePair.LockType, mayRacePair.AccessType1, mayRacePair.AccessType2, mayRacePair.TimeDiff)
+
 		info.MayRacePairs[i] = *mayRacePair
-		out = out[sz:]
+		out = out[pairDataSize:] // 每次前进84字节
 	}
 
+	fmt.Printf("DEBUG parsePairOutput: successfully parsed %d pairs\n", pairCount)
 	return info, nil
 }
 

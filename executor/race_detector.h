@@ -116,9 +116,6 @@ int export_race_pairs_to_buffer(char* buffer, int buffer_size);
 // Function to access pair syscall shared memory data
 struct PairSyscallSharedData* get_pair_shared_data();
 
-
-// ===============DDRD====================
-
 #ifdef __cplusplus
 }
 #endif

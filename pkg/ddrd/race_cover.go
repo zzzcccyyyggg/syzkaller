@@ -42,10 +42,13 @@ func (rp *MayRacePair) RacePairID() uint64 {
 	binary.LittleEndian.PutUint64(buf, rp.VarName2)
 	h.Write(buf)
 
-	// Include access types and lock type
-	h.Write([]byte{rp.AccessType1})
-	h.Write([]byte{rp.AccessType2})
-	h.Write([]byte{rp.LockType})
+	// Include access types and lock type (convert uint32 to bytes)
+	binary.LittleEndian.PutUint32(buf[:4], rp.AccessType1)
+	h.Write(buf[:4])
+	binary.LittleEndian.PutUint32(buf[:4], rp.AccessType2)
+	h.Write(buf[:4])
+	binary.LittleEndian.PutUint32(buf[:4], rp.LockType)
+	h.Write(buf[:4])
 
 	// Include callstack hashes
 	binary.LittleEndian.PutUint64(buf, rp.CallStack1)
@@ -147,7 +150,7 @@ func (rc RaceCover) GetBySyscalls(syscall1Num, syscall2Num int32) []*MayRacePair
 }
 
 // GetByType returns all race pairs of a specific lock type
-func (rc RaceCover) GetByType(lockType uint8) []*MayRacePair {
+func (rc RaceCover) GetByType(lockType uint32) []*MayRacePair {
 	var result []*MayRacePair
 	for _, rp := range rc {
 		if rp.LockType == lockType {
@@ -162,14 +165,14 @@ type RaceCoverageStats struct {
 	TotalRacePairs    int
 	UniqueSyscalls    int
 	UniqueVariables   int
-	LockTypeBreakdown map[uint8]int
+	LockTypeBreakdown map[uint32]int
 }
 
 // GetStats returns detailed statistics about the race coverage
 func (rc RaceCover) GetStats() RaceCoverageStats {
 	stats := RaceCoverageStats{
 		TotalRacePairs:    len(rc),
-		LockTypeBreakdown: make(map[uint8]int),
+		LockTypeBreakdown: make(map[uint32]int),
 	}
 
 	syscallSet := make(map[int32]struct{})

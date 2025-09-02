@@ -5,11 +5,27 @@
 #include "race_detector.h"
 #include <errno.h>
 #include <fcntl.h>
+#include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
 #include <unistd.h>
+
+#include <limits.h>
+#include <stddef.h>
+#include <stdint.h>
+
+__attribute__((format(printf, 1, 2))) static void debug(const char* msg, ...)
+{
+	int err = errno;
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fflush(stderr);
+	errno = err;
+}
 
 // 简单的strdup实现（防止某些系统没有）
 static char* my_strdup(const char* str)
@@ -24,12 +40,38 @@ static char* my_strdup(const char* str)
 	return dup;
 }
 
-// debug函数声明 (从executor.cc引入)
-#if defined(SYZ_EXECUTOR) || defined(SYZ_THREADED)
-void debug(const char* msg, ...);
-#else
-#define debug(...)
-#endif
+static void clear_trace_buffer(void)
+{
+	int on = open("/sys/kernel/debug/tracing/tracing_on", O_WRONLY);
+	if (on >= 0) {
+		if (write(on, "0", 1) < 0) {
+			debug("Failed to write to tracing_on: %s\n", strerror(errno));
+		}
+		close(on);
+	}
+
+	int fd = open("/sys/kernel/debug/tracing/trace", O_WRONLY | O_TRUNC);
+	if (fd >= 0) {
+		close(fd); // O_TRUNC 即可清空
+	} else {
+		// 某些内核不支持 O_TRUNC；用覆盖方式兜底
+		fd = open("/sys/kernel/debug/tracing/trace", O_WRONLY);
+		if (fd >= 0) {
+			if (ftruncate(fd, 0)) {
+				debug("Failed to truncate trace buffer: %s\n", strerror(errno));
+			}
+			close(fd);
+		}
+	}
+
+	on = open("/sys/kernel/debug/tracing/tracing_on", O_WRONLY);
+	if (on >= 0) {
+		if (write(on, "1", 1) < 0) {
+			debug("Failed to write to tracing_on: %s\n", strerror(errno));
+		}
+		close(on);
+	}
+}
 
 // Shared memory structures for pair syscall timing (from executor.cc)
 #define MAX_PAIR_SYSCALLS 1024
@@ -64,6 +106,73 @@ static uint64_t hash_string(const char* str)
 	return hash;
 }
 
+#include <errno.h>
+#include <fcntl.h>
+#include <stdio.h>
+#include <string.h>
+#include <unistd.h>
+
+// 读取 trace buffer 到用户传入的 buffer，返回实际读取的字节数
+static ssize_t read_trace_buffer(char* buffer, size_t size)
+{
+	if (!buffer || size == 0)
+		return -1;
+
+	// 暂停 tracing，防止读的过程中有新数据进来
+	// int on = open("/sys/kernel/debug/tracing/tracing_on", O_WRONLY);
+	// if (on >= 0) {
+	// 	if (write(on, "0", 1) < 0) {
+	// 		debug("Failed to write to tracing_on: %s\n", strerror(errno));
+	// 	}
+	// 	close(on);
+	// }
+
+	size_t total = 0;
+	// 打开 trace 文件
+	int fd = open("/sys/kernel/debug/tracing/trace", O_RDONLY);
+	if (fd < 0) {
+		buffer[0] = '\0';
+		goto out_on;
+	}
+
+	// 从头读
+	if (lseek(fd, 0, SEEK_SET) == (off_t)-1) {
+		// 有些 pseudo 文件不支持 lseek，不算致命
+	}
+
+	for (;;) {
+		if (total >= size - 1) // 预留 1 字节放 '\0'
+			break;
+		size_t want = size - 1 - total;
+		ssize_t n = read(fd, buffer + total, want);
+		if (n > 0) {
+			total += (size_t)n;
+			continue;
+		}
+		if (n == 0) { // EOF
+			break;
+		}
+		if (errno == EINTR)
+			continue;
+		// 其他错误
+		break;
+	}
+	buffer[total] = '\0'; // 保证以 null 结尾
+	close(fd);
+
+out_on:
+	// 恢复 tracing
+	// on = open("/sys/kernel/debug/tracing/tracing_on", O_WRONLY);
+	// if (on >= 0) {
+	// 	if (write(on, "1", 1)) {
+	// 		debug("Failed to write to tracing_on: %s\n", strerror(errno));
+	// 	}
+	// 	close(on);
+	// }
+	debug("read_trace_buffer read %zu\n",total);
+	return (ssize_t)total;
+}
+
 // 生成race信号的哈希
 static uint64_t hash_race_signal(const char* var1, const char* stack1,
 				 const char* var2, const char* stack2)
@@ -92,7 +201,7 @@ static uint64_t hash_race_signal(const char* var1, const char* stack1,
 static AccessRecord parse_access_line(const char* line)
 {
 	AccessRecord record = {0};
-
+	// debug("%s\n", line);
 	if (!line || strlen(line) < 20) {
 		return record;
 	}
@@ -409,8 +518,8 @@ int analyze_race_pairs_from_set(AccessRecordSet* record_set, RacePair* pairs, in
 			}
 
 			if (time_diff > threshold) {
-				debug("Time diff %lluus exceeds threshold %lluus for TID %d->%d\n",
-				      time_diff, threshold, a->tid, b->tid);
+				debug("Time diff %luus exceeds threshold %luus for TID %d->%d\n",
+				      (unsigned long)time_diff, (unsigned long)threshold, a->tid, b->tid);
 				continue;
 			}
 			// ===============DDRD====================
@@ -439,10 +548,10 @@ int analyze_race_pairs_from_set(AccessRecordSet* record_set, RacePair* pairs, in
 
 			// ===============DDRD====================
 			// Debug information for race pair detection
-			debug("Race pair detected (optimized): TID %d(%c) <-> TID %d(%c), time_diff=%lluus, lock_status=%d\n",
-			      a->tid, a->access_type, b->tid, b->access_type, time_diff, lock_status);
-			debug("  Addresses: 0x%llx(size %llu) <-> 0x%llx(size %llu)\n",
-			      a->address, a->size, b->address, b->size);
+			debug("Race pair detected (optimized): TID %d(%c) <-> TID %d(%c), time_diff=%luus, lock_status=%d\n",
+			      a->tid, a->access_type, b->tid, b->access_type, (unsigned long)time_diff, lock_status);
+			debug("  Addresses: 0x%lx(size %lu) <-> 0x%lx(size %lu)\n",
+			      (unsigned long)a->address, (unsigned long)a->size, (unsigned long)b->address, (unsigned long)b->size);
 			// ===============DDRD====================
 
 			pair_count++;
@@ -486,9 +595,9 @@ bool check_uaf_validity(const AccessRecord* use_access, const FreeRecord* free_o
 			uint64_t other_end = other_addr + other_free->size;
 
 			if ((other_addr < use_end) && (use_addr < other_end)) {
-				debug("UAF invalidated by later free: TID %d at time %llu (between %llu and %llu)\n",
-				      other_free->tid, (unsigned long long)other_free->access_time,
-				      (unsigned long long)free_time, (unsigned long long)use_time);
+				debug("UAF invalidated by later free: TID %d at time %lu (between %lu and %lu)\n",
+				      other_free->tid, (unsigned long)other_free->access_time,
+				      (unsigned long)free_time, (unsigned long)use_time);
 				return false; // 有后续的free操作使这个UAF无效
 			}
 		}
@@ -610,13 +719,13 @@ int analyze_uaf_pairs_from_set(AccessRecordSet* record_set, UAFPair* uaf_pairs, 
 
 			// ===============DDRD====================
 			// Debug information for UAF detection
-			debug("UAF detected: TID %d(%c) uses memory freed by TID %d at time %llu, use_time=%llu, time_diff=%lluus\n",
+			debug("UAF detected: TID %d(%c) uses memory freed by TID %d at time %lu, use_time=%lu, time_diff=%luus\n",
 			      use_access->tid, use_access->access_type, closest_free->tid,
-			      (unsigned long long)closest_free->access_time, (unsigned long long)use_access->access_time,
-			      (unsigned long long)closest_time_diff);
-			debug("  Use address: 0x%llx(size %llu), Free address: 0x%llx(size %llu)\n",
-			      (unsigned long long)use_access->address, (unsigned long long)use_access->size,
-			      (unsigned long long)closest_free->address, (unsigned long long)closest_free->size);
+			      (unsigned long)closest_free->access_time, (unsigned long)use_access->access_time,
+			      (unsigned long)closest_time_diff);
+			debug("  Use address: 0x%lx(size %lu), Free address: 0x%lx(size %lu)\n",
+			      (unsigned long)use_access->address, (unsigned long)use_access->size,
+			      (unsigned long)closest_free->address, (unsigned long)closest_free->size);
 			// ===============DDRD====================
 
 			pair_count++;
@@ -660,16 +769,13 @@ void cleanup_race_detector()
 	race_signals_count = 0;
 }
 
-
 // 重置race检测状态
 void reset_race_detector()
 {
 	if (!race_collection_enabled || race_trace_fd < 0) {
 		return;
 	}
-
-	// 重新定位到文件开始
-	lseek(race_trace_fd, 0, SEEK_SET);
+	clear_trace_buffer();
 	race_signals_count = 0;
 }
 
@@ -684,35 +790,65 @@ bool is_race_detector_available()
 SyscallTimeRecord* find_matching_syscall(uint64_t access_time, int tid)
 {
 	struct PairSyscallSharedData* pair_shared_data = get_pair_shared_data();
+	
+	debug("find_matching_syscall: searching for TID=%d, access_time=%llu\n", tid, (unsigned long long)access_time);
+	debug("  prog1_syscall_count=%d, prog2_syscall_count=%d\n", 
+	      pair_shared_data->prog1_syscall_count, pair_shared_data->prog2_syscall_count);
+	
 	if (pair_shared_data->prog1_syscall_count > 0) {
+		debug("  checking prog1 syscalls, first TID=%d\n", pair_shared_data->prog1_syscalls[0].thread_id);
 		if (tid == pair_shared_data->prog1_syscalls[0].thread_id) {
 			for (int i = 0; i < pair_shared_data->prog1_syscall_count; i++) {
+				debug("  prog1[%d]: valid=%d, start_time=%llu, end_time=%llu\n", 
+				      i, pair_shared_data->prog1_syscalls[i].valid,
+				      (unsigned long long)pair_shared_data->prog1_syscalls[i].start_time,
+				      (unsigned long long)pair_shared_data->prog1_syscalls[i].end_time);
+				      
 				if (pair_shared_data->prog1_syscalls[i].valid &&
 				    pair_shared_data->prog1_syscalls[i].start_time <= access_time &&
 				    pair_shared_data->prog1_syscalls[i].end_time >= access_time) {
+				    debug("  found matching syscall in prog1[%d]: call_index=%d, call_num=%d\n",
+				          i, pair_shared_data->prog1_syscalls[i].call_index,
+				          pair_shared_data->prog1_syscalls[i].call_num);
 					return &pair_shared_data->prog1_syscalls[i];
 				}
 			}
 		}
 	}
 	if (pair_shared_data->prog2_syscall_count > 0) {
+		debug("  checking prog2 syscalls, first TID=%d\n", pair_shared_data->prog2_syscalls[0].thread_id);
 		if (tid == pair_shared_data->prog2_syscalls[0].thread_id) {
 			for (int i = 0; i < pair_shared_data->prog2_syscall_count; i++) {
+				debug("  prog2[%d]: valid=%d, start_time=%llu, end_time=%llu\n", 
+				      i, pair_shared_data->prog2_syscalls[i].valid,
+				      (unsigned long long)pair_shared_data->prog2_syscalls[i].start_time,
+				      (unsigned long long)pair_shared_data->prog2_syscalls[i].end_time);
+				      
 				if (pair_shared_data->prog2_syscalls[i].valid &&
 				    pair_shared_data->prog2_syscalls[i].start_time <= access_time &&
 				    pair_shared_data->prog2_syscalls[i].end_time >= access_time) {
+				    debug("  found matching syscall in prog2[%d]: call_index=%d, call_num=%d\n",
+				          i, pair_shared_data->prog2_syscalls[i].call_index,
+				          pair_shared_data->prog2_syscalls[i].call_num);
 					return &pair_shared_data->prog2_syscalls[i];
 				}
 			}
 		}
 	}
-    return NULL; // No matching syscall found
+	debug("  no matching syscall found for TID=%d, access_time=%llu\n", tid, (unsigned long long)access_time);
+	return NULL; // No matching syscall found
 }
 
 // 分析并生成race信号
 int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, int max_race_pairs)
 {
 	if (!race_collection_enabled || race_trace_fd < 0 || !may_race_pair_buffer || max_race_pairs <= 0) {
+		debug("Invalid parameters for race analysis\n");
+		// 输出具体是哪个条件不满足
+		debug("  race_collection_enabled: %d\n", race_collection_enabled);
+		debug("  race_trace_fd: %d\n", race_trace_fd);
+		debug("  may_race_pair_buffer: %p\n", may_race_pair_buffer);
+		debug("  max_race_pairs: %d\n", max_race_pairs);
 		return 0;
 	}
 
@@ -725,18 +861,19 @@ int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, i
 	if (!buffer) {
 		return 0;
 	}
+	if (lseek(race_trace_fd, 0, SEEK_SET) == (off_t)-1) {
+		debug("read_trace_buffer: lseek failed (errno=%d)\n", errno);
+		return -1;
+	}
+	ssize_t bytes_read = read_trace_buffer(buffer, buffer_size);
 
-	ssize_t bytes_read = read(race_trace_fd, buffer, buffer_size - 1);
 	if (bytes_read <= 0) {
-		debug("Failed to read trace data: %zd bytes\n", bytes_read);
+		debug("Failed to read trace buffer or buffer is empty (bytes_read=%zd, errno=%d)\n", bytes_read, errno);
 		free(buffer);
 		return 0;
 	}
-
-	buffer[bytes_read] = '\0';
-
-	debug("Read %zd bytes from trace (buffer size: %zu)\n", bytes_read, buffer_size);
-
+	
+	debug("Successfully read %zd bytes from trace buffer\n", bytes_read);
 	// 使用动态分配减少栈空间使用
 	AccessRecord* records = malloc(sizeof(AccessRecord) * MAX_RECORDS);
 	FreeRecord* free_records = malloc(sizeof(FreeRecord) * (MAX_RECORDS / 4)); // 假设free操作不超过总操作的25%
@@ -757,7 +894,7 @@ int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, i
 	    .free_count = 0};
 
 	parse_access_records_to_set(buffer, &record_set, MAX_RECORDS, MAX_RECORDS / 4);
-
+	debug("Successfully parsed %d access records\n", record_set.record_count);
 	int pair_count = analyze_race_pairs_from_set(&record_set, pairs, MAX_RACE_PAIRS);
 
 	int i = 0;
@@ -769,7 +906,7 @@ int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, i
 		may_race_pair_buffer[i].call_stack2 = pair->second.call_stack_hash;
 		may_race_pair_buffer[i].sn1 = pair->first.sn;
 		may_race_pair_buffer[i].sn2 = pair->second.sn;
-        may_race_pair_buffer[i].lock_type = pair->lock_status;
+		may_race_pair_buffer[i].lock_type = pair->lock_status;
 		may_race_pair_buffer[i].signal = hash_race_signal(
 		    (char*)&pair->first.var_name,
 		    (char*)&pair->first.call_stack_hash,
@@ -780,10 +917,21 @@ int analyze_and_generate_may_race_infos(may_race_pair_t* may_race_pair_buffer, i
 		may_race_pair_buffer[i].time_diff = pair->access_time_diff;
 		SyscallTimeRecord* matching_syscall1 = find_matching_syscall(pair->first.access_time, pair->first.tid);
 		SyscallTimeRecord* matching_syscall2 = find_matching_syscall(pair->second.access_time, pair->second.tid);
-        may_race_pair_buffer[i].syscall1_idx = matching_syscall1->call_index;
-        may_race_pair_buffer[i].syscall1_num = matching_syscall1->call_num;
-        may_race_pair_buffer[i].syscall2_idx = matching_syscall2->call_index;
-        may_race_pair_buffer[i].syscall2_num = matching_syscall2->call_num;
+		if (matching_syscall1){
+			may_race_pair_buffer[i].syscall1_idx = matching_syscall1->call_index;
+			may_race_pair_buffer[i].syscall1_num = matching_syscall1->call_num;
+		}else {
+			may_race_pair_buffer[i].syscall1_idx = 0;
+			may_race_pair_buffer[i].syscall1_num = 0;
+		}
+		if(matching_syscall2){
+			may_race_pair_buffer[i].syscall2_idx = matching_syscall2->call_index;
+			may_race_pair_buffer[i].syscall2_num = matching_syscall2->call_num;
+		}else{
+			may_race_pair_buffer[i].syscall2_idx = 0;
+			may_race_pair_buffer[i].syscall2_num = 0;
+		}
+
 	}
 
 	// 更新全局计数器
