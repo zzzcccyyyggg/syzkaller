@@ -216,6 +216,11 @@ func RunManager(cfg *mgrconfig.Config) {
 		// ===============DDRD====================
 	}
 
+	// ===============DDRD====================
+	// Initialize mode transition synchronization
+	mgr.initModeTransitionSync()
+	// ===============DDRD====================
+
 	mgr.preloadCorpus()
 	mgr.initStats() // Initializes prometheus variables.
 
@@ -260,13 +265,23 @@ func RunManager(cfg *mgrconfig.Config) {
 			corpusSignal := mgr.stats.corpusSignal.get()
 			maxSignal := mgr.stats.maxSignal.get()
 			raceSignals := mgr.stats.raceSignals.get()
+			newRaceSignals := mgr.stats.newRaceSignals.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
+
+			// ===============DDRD====================
+			// 更新scheduler的信号计数
+			if mgr.fuzzScheduler != nil {
+				mgr.fuzzScheduler.UpdateSignalCount(int(corpusSignal))
+				mgr.fuzzScheduler.UpdateRaceSignalCount(int(raceSignals))
+			}
+			// ===============DDRD====================
+
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v, cover %v, signal %v/%v, races %v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, corpusCover, corpusSignal, maxSignal, raceSignals, crashes, numReproducing, triageQLen)
+			log.Logf(0, "VMs %v, executed %v, cover %v, signal %v/%v, races %v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, corpusCover, corpusSignal, maxSignal, raceSignals, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
 
 		}
 	}()
@@ -322,6 +337,25 @@ func (mgr *Manager) initBench() {
 		}
 	}()
 }
+
+// ===============DDRD====================
+// initModeTransitionSync 初始化模式切换同步机制
+// ===============DDRD====================
+func (mgr *Manager) initModeTransitionSync() {
+	if mgr.fuzzScheduler == nil {
+		return
+	}
+
+	// 设置同步管理器
+	mgr.fuzzScheduler.SetupTransitionManager()
+
+	// 启动周期性阶段切换检查
+	mgr.fuzzScheduler.StartPeriodicCheck()
+
+	log.Logf(1, "Mode transition synchronization initialized and periodic check started")
+}
+
+// ===============DDRD====================
 
 type RunResult struct {
 	idx   int
@@ -1409,18 +1443,6 @@ func (mgr *Manager) newInput(inp rpctype.Input, sign signal.Signal) bool {
 		return false
 	}
 
-	// ===============DDRD====================
-	// Process unified race data structure
-	if len(inp.RaceData.Signals) > 0 {
-		// Simplified race signal processing for queue-based system
-		newSignalCount := len(inp.RaceData.Signals)
-		if newSignalCount > 0 {
-			mgr.stats.newRaceSignals.add(newSignalCount)
-			log.Logf(1, "manager: added %d new race signals", newSignalCount)
-		}
-	}
-	// ===============DDRD====================
-
 	update := CorpusItemUpdate{
 		CallID:   inp.CallID,
 		RawCover: inp.RawCover,
@@ -1708,3 +1730,56 @@ func (mgr *Manager) parseRaceMappingData(data []byte) ([]RaceMappingEntry, error
 
 	return mappings, nil
 }
+
+// ===============DDRD====================
+// newRacePair processes new race pair discoveries with full Manager integration
+func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	log.Logf(1, "Manager processing race pair from %v: pairID=%v", args.Name, args.PairID)
+
+	// Here we can implement complex logic that integrates with Manager's state:
+
+	// 1. Race signal processing and propagation
+	if len(args.Races) > 0 {
+		// Process race signals and add to global race coverage
+		for i, race := range args.Races {
+			// Convert race data to internal format and merge with global coverage
+			log.Logf(2, "Processing race %d: syscalls %d vs %d", i,
+				race.Syscall1Num, race.Syscall2Num)
+		}
+
+		// Update statistics through Manager's stats system
+		mgr.stats.newRaceSignals.add(len(args.Races))
+
+		// 2. Integration with corpus: could add race-triggering programs to corpus
+		if len(args.Prog1Data) > 0 && len(args.Prog2Data) > 0 {
+			// Analyze programs that triggered races
+			// Could prioritize these programs in future fuzzing
+			log.Logf(2, "Race-triggering programs: prog1=%d bytes, prog2=%d bytes",
+				len(args.Prog1Data), len(args.Prog2Data))
+
+			// Example: Add race-triggering programs to corpus with higher priority
+			// This demonstrates deeper Manager integration
+			// mgr.addRaceTriggeringPrograms(args.Prog1Data, args.Prog2Data)
+		}
+
+		// 3. Integration with scheduler: adjust fuzzing strategy based on races
+		if mgr.fuzzScheduler != nil {
+			// Could notify scheduler about race discoveries
+			// This might influence the fuzzing phase transitions
+			log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
+		}
+
+		// 4. Persistent storage: save race data for later analysis
+		// Could integrate with mgr.corpusDB or create dedicated race DB
+		// mgr.saveRaceData(args)
+
+		return true
+	}
+
+	return false
+}
+
+// ===============DDRD====================

@@ -48,6 +48,11 @@ type Fuzzer struct {
 	// ===============DDRD====================
 	// Separate race pair work queue for race pair mode
 	racePairWorkQueue *RacePairWorkQueue
+
+	// 模式切换同步
+	currentTransition string
+	preparingSwitch   atomic.Bool
+	// ===============DDRD====================
 	// ===============DDRD====================
 	// The stats field cannot unfortunately be just an uint64 array, because it
 	// results in "unaligned 64-bit atomic operation" errors on 32-bit platforms.
@@ -78,6 +83,12 @@ type Fuzzer struct {
 	corpusRaceCover ddrd.RaceCover // race coverage of inputs in corpus
 	maxRaceCover    ddrd.RaceCover // max race coverage ever observed
 	newRaceCover    ddrd.RaceCover // new race coverage since last sync
+
+	// Race signal tracking (similar to coverage signals)
+	raceSignalMu     sync.RWMutex
+	corpusRaceSignal signal.Signal // race signals from corpus pairs
+	maxRaceSignal    signal.Signal // max race signal ever observed
+	newRaceSignal    signal.Signal // new race signals since last sync
 	// ===============DDRD====================
 	checkResult *rpctype.CheckArgs
 	logMu       sync.Mutex
@@ -87,11 +98,6 @@ type Fuzzer struct {
 
 	// Experimental flags.
 	resetAccState bool
-
-	// ===============DDRD====================
-	// Race pair management
-	racePairManager *RacePairManager
-	// ===============DDRD====================
 }
 
 type FuzzerSnapshot struct {
@@ -344,11 +350,6 @@ func main() {
 	}
 	fuzzer.choiceTable = target.BuildChoiceTable(fuzzer.corpus, calls)
 
-	// ===============DDRD====================
-	// Initialize race pair manager
-	fuzzer.racePairManager = NewRacePairManager(fuzzer)
-	// ===============DDRD====================
-
 	if r.CoverFilterBitmap != nil {
 		fuzzer.execOpts.Flags |= ipc.FlagEnableCoverageFilter
 	}
@@ -446,10 +447,99 @@ func (fuzzer *Fuzzer) checkTestPairMode() bool {
 	return res.IsTestPairMode
 }
 
+// ===============DDRD====================
+// 模式切换同步相关方法
+// ===============DDRD====================
+func (fuzzer *Fuzzer) checkModeTransition() {
+	args := &rpctype.ModeTransitionArgs{Name: fuzzer.name}
+	res := &rpctype.ModeTransitionRes{}
+
+	if err := fuzzer.manager.Call("Manager.CheckModeTransition", args, res); err != nil {
+		log.Logf(2, "CheckModeTransition RPC failed: %v", err)
+		return
+	}
+
+	if res.ShouldPrepare && res.TransitionID != fuzzer.currentTransition {
+		log.Logf(0, "Fuzzer %s received transition request %s to phase %v",
+			fuzzer.name, res.TransitionID, res.TargetPhase)
+
+		fuzzer.currentTransition = res.TransitionID
+		fuzzer.preparingSwitch.Store(true)
+
+		// 异步准备切换
+		go fuzzer.prepareForModeSwitch(res.TransitionID, res.TargetPhase,
+			time.Duration(res.MaxWaitTime)*time.Second)
+	}
+}
+
+func (fuzzer *Fuzzer) prepareForModeSwitch(transitionID string, targetPhase int, maxWait time.Duration) {
+	startTime := time.Now()
+
+	log.Logf(0, "Fuzzer %s preparing for mode switch to phase %v (transition %s)",
+		fuzzer.name, targetPhase, transitionID)
+
+	// 等待所有proc完成当前工作
+	fuzzer.waitForProcsIdle(maxWait - time.Since(startTime))
+
+	// 清理工作队列状态
+	fuzzer.prepareQueuesForSwitch(targetPhase)
+
+	// 报告准备就绪
+	args := &rpctype.ModeReadyArgs{
+		Name:         fuzzer.name,
+		TransitionID: transitionID,
+	}
+	res := &rpctype.ModeReadyRes{}
+
+	if err := fuzzer.manager.Call("Manager.ReportModeReady", args, res); err != nil {
+		log.Logf(0, "ReportModeReady RPC failed: %v", err)
+	} else if res.Acknowledged {
+		log.Logf(0, "Fuzzer %s successfully reported ready for transition %s",
+			fuzzer.name, transitionID)
+	}
+
+	fuzzer.preparingSwitch.Store(false)
+}
+
+func (fuzzer *Fuzzer) waitForProcsIdle(maxWait time.Duration) {
+	startTime := time.Now()
+
+	for time.Since(startTime) < maxWait {
+		// 检查所有proc是否空闲（简化实现，实际可以更精确）
+		allIdle := true
+		// 这里可以添加更复杂的proc状态检查逻辑
+
+		if allIdle {
+			log.Logf(1, "All processors idle for fuzzer %s", fuzzer.name)
+			return
+		}
+
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	log.Logf(0, "Timeout waiting for processors to become idle in fuzzer %s", fuzzer.name)
+}
+
+func (fuzzer *Fuzzer) prepareQueuesForSwitch(targetPhase int) {
+	// 清理队列状态，为模式切换做准备
+	if targetPhase == 0 { // Normal mode
+		// 准备普通模式队列
+		log.Logf(1, "Preparing normal mode queues for fuzzer %s", fuzzer.name)
+	} else { // Race mode
+		// 准备race模式队列
+		log.Logf(1, "Preparing race mode queues for fuzzer %s", fuzzer.name)
+	}
+}
+
+// ===============DDRD====================
+
 func (fuzzer *Fuzzer) pollLoop() {
 	var execTotal uint64
 	var lastPoll time.Time
 	var lastPrint time.Time
+	// ===============DDRD====================
+	var lastTransitionCheck time.Time
+	// ===============DDRD====================
 	ticker := time.NewTicker(3 * time.Second * fuzzer.timeouts.Scale).C
 	for {
 		poll := false
@@ -458,6 +548,15 @@ func (fuzzer *Fuzzer) pollLoop() {
 		case <-fuzzer.needPoll:
 			poll = true
 		}
+
+		// ===============DDRD====================
+		// 定期检查模式切换请求
+		if time.Since(lastTransitionCheck) > 2*time.Second {
+			fuzzer.checkModeTransition()
+			lastTransitionCheck = time.Now()
+		}
+		// ===============DDRD====================
+
 		if fuzzer.outputType != OutputStdout && time.Since(lastPrint) > 10*time.Second*fuzzer.timeouts.Scale {
 			// Keep-alive for manager.
 			log.Logf(0, "alive, executed %v", execTotal)
@@ -500,6 +599,7 @@ func (fuzzer *Fuzzer) poll(needCandidates bool, stats map[string]uint64) bool {
 	log.Logf(1, "poll: candidates=%v inputs=%v signal=%v",
 		len(r.Candidates), len(r.NewInputs), maxSignal.Len())
 	fuzzer.addMaxSignal(maxSignal)
+
 	for _, inp := range r.NewInputs {
 		fuzzer.addInputFromAnotherFuzzer(inp)
 	}
@@ -644,6 +744,49 @@ func (fuzzer *Fuzzer) grabNewSignal() signal.Signal {
 	fuzzer.newSignal = nil
 	return sign
 }
+
+// ===============DDRD====================
+// grabNewRaceSignal returns new race signals since last poll and clears them
+func (fuzzer *Fuzzer) grabNewRaceSignal() signal.Signal {
+	fuzzer.raceSignalMu.Lock()
+	defer fuzzer.raceSignalMu.Unlock()
+	sign := fuzzer.newRaceSignal
+	if sign.Empty() {
+		return nil
+	}
+	fuzzer.newRaceSignal = nil
+	return sign
+}
+
+// addRaceSignal adds race signal to fuzzer's tracking
+func (fuzzer *Fuzzer) addRaceSignal(sign signal.Signal) {
+	if sign.Empty() {
+		return
+	}
+	fuzzer.raceSignalMu.Lock()
+	defer fuzzer.raceSignalMu.Unlock()
+	fuzzer.maxRaceSignal.Merge(sign)
+	fuzzer.newRaceSignal.Merge(sign)
+}
+
+// corpusRaceSignalDiff returns diff between race signal and corpus race signals
+func (fuzzer *Fuzzer) corpusRaceSignalDiff(sign signal.Signal) signal.Signal {
+	fuzzer.raceSignalMu.RLock()
+	defer fuzzer.raceSignalMu.RUnlock()
+	return fuzzer.corpusRaceSignal.Diff(sign)
+}
+
+// addMaxRaceSignal merges new race signals from manager
+func (fuzzer *Fuzzer) addMaxRaceSignal(sign signal.Signal) {
+	if sign.Empty() {
+		return
+	}
+	fuzzer.raceSignalMu.Lock()
+	defer fuzzer.raceSignalMu.Unlock()
+	fuzzer.maxRaceSignal.Merge(sign)
+}
+
+// ===============DDRD====================
 
 func (fuzzer *Fuzzer) corpusSignalDiff(sign signal.Signal) signal.Signal {
 	fuzzer.signalMu.RLock()

@@ -70,13 +70,22 @@ func (proc *Proc) loop() {
 
 	var lastModeCheck time.Time
 	var isTestPairMode bool
-
+	// [!todo] finish the test mode manager (提供或使用manager的API)
 	for i := 0; ; i++ {
+		// ===============DDRD====================
+		// 检查是否正在准备模式切换
+		if proc.fuzzer.preparingSwitch.Load() {
+			// 快速完成当前工作，不接受新工作
+			time.Sleep(100 * time.Millisecond) // 短暂等待
+			continue
+		}
+		// ===============DDRD====================
+
 		// 每5秒检查一次模式，避免频繁RPC调用
 		if time.Since(lastModeCheck) > 5*time.Second {
 			// ===============DDRD====================
-			// Use the new race pair manager API
-			newMode := proc.fuzzer.racePairManager.IsRacePairMode()
+			// Use the race pair manager API
+			newMode := proc.fuzzer.checkTestPairMode()
 			// ===============DDRD====================
 			if newMode != isTestPairMode {
 				log.Logf(0, "proc %d race pair mode changed: %v -> %v", proc.pid, isTestPairMode, newMode)
@@ -534,7 +543,30 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 		// Update race coverage in fuzzer - use slice directly without copy
 		proc.fuzzer.updateRaceCoverage(info.MayRacePairs)
 
-		log.Logf(1, "proc %d: detected %d race pairs", proc.pid, len(info.MayRacePairs))
+		// Generate race signals from detected pairs
+		raceSignalData := make([]uint32, 0, len(info.MayRacePairs))
+		for _, pair := range info.MayRacePairs {
+			// Use the race signal from executor (truncate to uint32)
+			raceSignalData = append(raceSignalData, uint32(pair.Signal))
+		}
+
+		// [!todo] 不应该直接的使用syzkaller的signal 使用race cover 中的signal替代即可
+		if len(raceSignalData) > 0 {
+			// Create signal from race data
+			raceSignal := signal.FromRaw(raceSignalData, 0)
+
+			// Check if this is new race coverage
+			if !proc.fuzzer.corpusRaceSignalDiff(raceSignal).Empty() {
+				// Add to fuzzer's race signals
+				proc.fuzzer.addRaceSignal(raceSignal)
+
+				log.Logf(1, "proc %d: detected %d new race pairs with %d signals",
+					proc.pid, len(info.MayRacePairs), len(raceSignalData))
+
+				// Send race pair results to manager
+				proc.sendRacePairsToManager(p1, p2, info.MayRacePairs, output)
+			}
+		}
 	} else {
 		log.Logf(2, "proc %d: no race pairs detected", proc.pid)
 	}
@@ -542,6 +574,50 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 
 	return info
 }
+
+// ===============DDRD====================
+// sendRacePairsToManager sends discovered race pairs to the manager
+// [!todo]: 补充完整
+func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.MayRacePair, output []byte) {
+	if len(racePairs) == 0 {
+		return
+	}
+
+	// Serialize programs
+	prog1Data := make([]byte, prog.ExecBufferSize)
+	prog2Data := make([]byte, prog.ExecBufferSize)
+
+	prog1Size, err1 := p1.SerializeForExec(prog1Data)
+	prog2Size, err2 := p2.SerializeForExec(prog2Data)
+
+	if err1 != nil || err2 != nil {
+		log.Logf(0, "proc %d: failed to serialize programs for race pair reporting", proc.pid)
+		return
+	}
+
+	// Generate unique pair ID
+	pairID := fmt.Sprintf("%x_%x_%d",
+		hash.Hash(prog1Data[:prog1Size]),
+		hash.Hash(prog2Data[:prog2Size]),
+		len(racePairs))
+
+	// Send to manager
+	args := &rpctype.NewRacePairArgs{
+		Name:      proc.fuzzer.name,
+		PairID:    pairID,
+		Prog1Data: prog1Data[:prog1Size],
+		Prog2Data: prog2Data[:prog2Size],
+		Output:    output,
+	}
+
+	go func() {
+		if err := proc.fuzzer.manager.Call("Manager.NewRacePair", args, &rpctype.NewRacePairRes{}); err != nil {
+			log.Logf(0, "Manager.NewRacePair call failed: %v", err)
+		}
+	}()
+}
+
+// ===============DDRD====================
 
 // executePairFromCandidate executes a program pair from the candidates queue
 func (proc *Proc) executePairFromCandidate(item *ProgPair) {

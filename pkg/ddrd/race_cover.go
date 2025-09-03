@@ -6,13 +6,19 @@ package ddrd
 import (
 	"crypto/sha256"
 	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
+	"os"
+	"path/filepath"
 	"sort"
+	"sync"
+	"time"
 )
 
-// RacePairID generates a unique identifier for a race pair
-// Uses the executor-generated signal as the primary identifier when available
-// And use the hash of all relevant fields if the signal is unavailable
+// ============================================================================
+// Core Race Coverage Data Structures
+// ============================================================================
 
 // RacePairID generates a unique identifier for a race pair
 // Uses the executor-generated signal as the primary identifier when available
@@ -160,6 +166,47 @@ func (rc RaceCover) GetByType(lockType uint32) []*MayRacePair {
 	return result
 }
 
+// Clear removes all race pairs from coverage
+func (rc *RaceCover) Clear() {
+	*rc = make(RaceCover)
+}
+
+// Copy creates a deep copy of the race coverage
+func (rc RaceCover) Copy() RaceCover {
+	if rc == nil {
+		return nil
+	}
+
+	result := make(RaceCover, len(rc))
+	for id, rp := range rc {
+		// Create a copy of the race pair
+		newRP := &MayRacePair{
+			Syscall1Idx: rp.Syscall1Idx,
+			Syscall2Idx: rp.Syscall2Idx,
+			Syscall1Num: rp.Syscall1Num,
+			Syscall2Num: rp.Syscall2Num,
+			VarName1:    rp.VarName1,
+			VarName2:    rp.VarName2,
+			CallStack1:  rp.CallStack1,
+			CallStack2:  rp.CallStack2,
+			Sn1:         rp.Sn1,
+			Sn2:         rp.Sn2,
+			Signal:      rp.Signal,
+			LockType:    rp.LockType,
+			AccessType1: rp.AccessType1,
+			AccessType2: rp.AccessType2,
+			TimeDiff:    rp.TimeDiff,
+		}
+		result[id] = newRP
+	}
+
+	return result
+}
+
+// ============================================================================
+// Race Coverage Statistics
+// ============================================================================
+
 // RaceCoverageStats returns statistics about the race coverage
 type RaceCoverageStats struct {
 	TotalRacePairs    int
@@ -201,37 +248,426 @@ func (rc RaceCover) GetStats() RaceCoverageStats {
 	return stats
 }
 
-// Clear removes all race pairs from coverage
-func (rc *RaceCover) Clear() {
-	*rc = make(RaceCover)
+// ============================================================================
+// Race Coverage Persistence
+// ============================================================================
+
+// RaceCoverageRecord represents a serializable race coverage record
+type RaceCoverageRecord struct {
+	Version    string                  `json:"version"`
+	Timestamp  time.Time               `json:"timestamp"`
+	TotalPairs int                     `json:"total_pairs"`
+	Pairs      map[string]*MayRacePair `json:"pairs"`
+	Stats      RaceCoverageStats       `json:"stats"`
 }
 
-// Copy creates a deep copy of the race coverage
-func (rc RaceCover) Copy() RaceCover {
-	if rc == nil {
-		return nil
+// SaveToFile persists the race coverage to a file
+func (rc RaceCover) SaveToFile(filePath string) error {
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
 	}
 
-	result := make(RaceCover, len(rc))
+	// Create the record
+	record := RaceCoverageRecord{
+		Version:    "1.0",
+		Timestamp:  time.Now(),
+		TotalPairs: len(rc),
+		Pairs:      make(map[string]*MayRacePair),
+		Stats:      rc.GetStats(),
+	}
+
+	// Convert race pairs to string keys for JSON serialization
 	for id, rp := range rc {
-		// Create a copy of the race pair
-		newRP := &MayRacePair{
-			Syscall1Idx: rp.Syscall1Idx,
-			Syscall2Idx: rp.Syscall2Idx,
-			Syscall1Num: rp.Syscall1Num,
-			Syscall2Num: rp.Syscall2Num,
-			VarName1:    rp.VarName1,
-			VarName2:    rp.VarName2,
-			CallStack1:  rp.CallStack1,
-			CallStack2:  rp.CallStack2,
-			Signal:      rp.Signal,
-			LockType:    rp.LockType,
-			AccessType1: rp.AccessType1,
-			AccessType2: rp.AccessType2,
-			TimeDiff:    rp.TimeDiff,
-		}
-		result[id] = newRP
+		key := fmt.Sprintf("%016x", id)
+		record.Pairs[key] = rp
 	}
 
-	return result
+	// Write to temporary file first
+	tempPath := filePath + ".tmp"
+	file, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file %s: %w", tempPath, err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(record); err != nil {
+		return fmt.Errorf("failed to encode race coverage: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempPath, filePath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	return nil
+}
+
+// LoadRaceCoverFromFile loads race coverage from a file
+func LoadRaceCoverFromFile(filePath string) (RaceCover, error) {
+	file, err := os.Open(filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return make(RaceCover), nil // Return empty coverage if file doesn't exist
+		}
+		return nil, fmt.Errorf("failed to open file %s: %w", filePath, err)
+	}
+	defer file.Close()
+
+	var record RaceCoverageRecord
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&record); err != nil {
+		return nil, fmt.Errorf("failed to decode race coverage: %w", err)
+	}
+
+	// Convert string keys back to uint64 IDs
+	coverage := make(RaceCover)
+	for key, rp := range record.Pairs {
+		var id uint64
+		if _, err := fmt.Sscanf(key, "%016x", &id); err != nil {
+			return nil, fmt.Errorf("failed to parse race pair ID %s: %w", key, err)
+		}
+		coverage[id] = rp
+	}
+
+	return coverage, nil
+}
+
+// Export exports race coverage to a writer in the specified format
+func (rc RaceCover) Export(writer io.Writer, format string) error {
+	switch format {
+	case "json":
+		return rc.exportJSON(writer)
+	case "csv":
+		return rc.exportCSV(writer)
+	case "text":
+		return rc.exportText(writer)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+}
+
+// exportJSON exports coverage in JSON format
+func (rc RaceCover) exportJSON(writer io.Writer) error {
+	record := RaceCoverageRecord{
+		Version:    "1.0",
+		Timestamp:  time.Now(),
+		TotalPairs: len(rc),
+		Pairs:      make(map[string]*MayRacePair),
+		Stats:      rc.GetStats(),
+	}
+
+	for id, rp := range rc {
+		key := fmt.Sprintf("%016x", id)
+		record.Pairs[key] = rp
+	}
+
+	encoder := json.NewEncoder(writer)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(record)
+}
+
+// exportCSV exports coverage in CSV format
+func (rc RaceCover) exportCSV(writer io.Writer) error {
+	// CSV header
+	fmt.Fprintln(writer, "ID,Syscall1Idx,Syscall2Idx,Syscall1Num,Syscall2Num,VarName1,VarName2,CallStack1,CallStack2,Sn1,Sn2,Signal,LockType,AccessType1,AccessType2,TimeDiff")
+
+	// Sort pairs by ID for consistent output
+	pairs := rc.Serialize()
+	for _, rp := range pairs {
+		fmt.Fprintf(writer, "%016x,%d,%d,%d,%d,%016x,%016x,%016x,%016x,%d,%d,%016x,%d,%d,%d,%d\n",
+			rp.RacePairID(), rp.Syscall1Idx, rp.Syscall2Idx, rp.Syscall1Num, rp.Syscall2Num,
+			rp.VarName1, rp.VarName2, rp.CallStack1, rp.CallStack2,
+			rp.Sn1, rp.Sn2, rp.Signal, rp.LockType, rp.AccessType1, rp.AccessType2, rp.TimeDiff)
+	}
+
+	return nil
+}
+
+// exportText exports coverage in human-readable text format
+func (rc RaceCover) exportText(writer io.Writer) error {
+	stats := rc.GetStats()
+
+	fmt.Fprintf(writer, "Race Coverage Report\n")
+	fmt.Fprintf(writer, "===================\n")
+	fmt.Fprintf(writer, "Total Race Pairs: %d\n", stats.TotalRacePairs)
+	fmt.Fprintf(writer, "Unique Syscalls: %d\n", stats.UniqueSyscalls)
+	fmt.Fprintf(writer, "Unique Variables: %d\n", stats.UniqueVariables)
+	fmt.Fprintf(writer, "\nLock Type Breakdown:\n")
+
+	for lockType, count := range stats.LockTypeBreakdown {
+		fmt.Fprintf(writer, "  Type %d: %d pairs\n", lockType, count)
+	}
+
+	fmt.Fprintf(writer, "\nRace Pairs:\n")
+	fmt.Fprintf(writer, "===========\n")
+
+	pairs := rc.Serialize()
+	for i, rp := range pairs {
+		fmt.Fprintf(writer, "%d. %s\n", i+1, rp.String())
+	}
+
+	return nil
+}
+
+// ============================================================================
+// Persistent Storage
+// ============================================================================
+
+// RaceCoverageDB manages persistent storage of race coverage
+type RaceCoverageDB struct {
+	mu       sync.RWMutex
+	coverage RaceCover
+	filePath string
+	dirty    bool
+	lastSave time.Time
+}
+
+// NewRaceCoverageDB creates a new race coverage database
+func NewRaceCoverageDB(filePath string) *RaceCoverageDB {
+	db := &RaceCoverageDB{
+		coverage: make(RaceCover),
+		filePath: filePath,
+		lastSave: time.Now(),
+	}
+
+	// Try to load existing data
+	if err := db.Load(); err != nil {
+		// Log error but continue with empty coverage
+		fmt.Printf("Warning: Failed to load race coverage from %s: %v\n", filePath, err)
+	}
+
+	return db
+}
+
+// Save persists the race coverage to disk
+func (db *RaceCoverageDB) Save() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	if !db.dirty {
+		return nil // No changes to save
+	}
+
+	// Create directory if it doesn't exist
+	dir := filepath.Dir(db.filePath)
+	if err := os.MkdirAll(dir, 0755); err != nil {
+		return fmt.Errorf("failed to create directory %s: %w", dir, err)
+	}
+
+	// Create the record
+	record := RaceCoverageRecord{
+		Version:    "1.0",
+		Timestamp:  time.Now(),
+		TotalPairs: len(db.coverage),
+		Pairs:      make(map[string]*MayRacePair),
+		Stats:      db.coverage.GetStats(),
+	}
+
+	// Convert race pairs to string keys for JSON serialization
+	for id, rp := range db.coverage {
+		key := fmt.Sprintf("%016x", id)
+		record.Pairs[key] = rp
+	}
+
+	// Write to temporary file first
+	tempPath := db.filePath + ".tmp"
+	file, err := os.Create(tempPath)
+	if err != nil {
+		return fmt.Errorf("failed to create temp file %s: %w", tempPath, err)
+	}
+	defer file.Close()
+
+	encoder := json.NewEncoder(file)
+	encoder.SetIndent("", "  ")
+	if err := encoder.Encode(record); err != nil {
+		return fmt.Errorf("failed to encode race coverage: %w", err)
+	}
+
+	// Atomic rename
+	if err := os.Rename(tempPath, db.filePath); err != nil {
+		return fmt.Errorf("failed to rename temp file: %w", err)
+	}
+
+	db.dirty = false
+	db.lastSave = time.Now()
+	return nil
+}
+
+// Load reads the race coverage from disk
+func (db *RaceCoverageDB) Load() error {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	file, err := os.Open(db.filePath)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return nil // File doesn't exist yet, start with empty coverage
+		}
+		return fmt.Errorf("failed to open file %s: %w", db.filePath, err)
+	}
+	defer file.Close()
+
+	var record RaceCoverageRecord
+	decoder := json.NewDecoder(file)
+	if err := decoder.Decode(&record); err != nil {
+		return fmt.Errorf("failed to decode race coverage: %w", err)
+	}
+
+	// Convert string keys back to uint64 IDs
+	db.coverage = make(RaceCover)
+	for key, rp := range record.Pairs {
+		var id uint64
+		if _, err := fmt.Sscanf(key, "%016x", &id); err != nil {
+			return fmt.Errorf("failed to parse race pair ID %s: %w", key, err)
+		}
+		db.coverage[id] = rp
+	}
+
+	db.dirty = false
+	return nil
+}
+
+// AddRacePairs adds new race pairs and returns newly discovered ones
+func (db *RaceCoverageDB) AddRacePairs(pairs []*MayRacePair) []*MayRacePair {
+	db.mu.Lock()
+	defer db.mu.Unlock()
+
+	var newPairs []*MayRacePair
+	for _, rp := range pairs {
+		id := rp.RacePairID()
+		if _, exists := db.coverage[id]; !exists {
+			db.coverage[id] = rp
+			newPairs = append(newPairs, rp)
+			db.dirty = true
+		}
+	}
+
+	return newPairs
+}
+
+// GetCoverage returns a copy of the current coverage
+func (db *RaceCoverageDB) GetCoverage() RaceCover {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	return db.coverage.Copy()
+}
+
+// GetStats returns current coverage statistics
+func (db *RaceCoverageDB) GetStats() RaceCoverageStats {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	return db.coverage.GetStats()
+}
+
+// Len returns the number of unique race pairs
+func (db *RaceCoverageDB) Len() int {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	return len(db.coverage)
+}
+
+// AutoSave starts a goroutine that periodically saves the coverage
+func (db *RaceCoverageDB) AutoSave(interval time.Duration) {
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+
+		for range ticker.C {
+			if err := db.Save(); err != nil {
+				fmt.Printf("Error auto-saving race coverage: %v\n", err)
+			}
+		}
+	}()
+}
+
+// Export exports race coverage to a different format
+func (db *RaceCoverageDB) Export(writer io.Writer, format string) error {
+	db.mu.RLock()
+	defer db.mu.RUnlock()
+
+	switch format {
+	case "json":
+		return db.exportJSON(writer)
+	case "csv":
+		return db.exportCSV(writer)
+	case "text":
+		return db.exportText(writer)
+	default:
+		return fmt.Errorf("unsupported export format: %s", format)
+	}
+}
+
+// exportJSON exports coverage in JSON format
+func (db *RaceCoverageDB) exportJSON(writer io.Writer) error {
+	record := RaceCoverageRecord{
+		Version:    "1.0",
+		Timestamp:  time.Now(),
+		TotalPairs: len(db.coverage),
+		Pairs:      make(map[string]*MayRacePair),
+		Stats:      db.coverage.GetStats(),
+	}
+
+	for id, rp := range db.coverage {
+		key := fmt.Sprintf("%016x", id)
+		record.Pairs[key] = rp
+	}
+
+	encoder := json.NewEncoder(writer)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(record)
+}
+
+// exportCSV exports coverage in CSV format
+func (db *RaceCoverageDB) exportCSV(writer io.Writer) error {
+	// CSV header
+	fmt.Fprintln(writer, "ID,Syscall1Idx,Syscall2Idx,Syscall1Num,Syscall2Num,VarName1,VarName2,CallStack1,CallStack2,Sn1,Sn2,Signal,LockType,AccessType1,AccessType2,TimeDiff")
+
+	// Sort pairs by ID for consistent output
+	pairs := db.coverage.Serialize()
+	for _, rp := range pairs {
+		fmt.Fprintf(writer, "%016x,%d,%d,%d,%d,%016x,%016x,%016x,%016x,%d,%d,%016x,%d,%d,%d,%d\n",
+			rp.RacePairID(), rp.Syscall1Idx, rp.Syscall2Idx, rp.Syscall1Num, rp.Syscall2Num,
+			rp.VarName1, rp.VarName2, rp.CallStack1, rp.CallStack2,
+			rp.Sn1, rp.Sn2, rp.Signal, rp.LockType, rp.AccessType1, rp.AccessType2, rp.TimeDiff)
+	}
+
+	return nil
+}
+
+// exportText exports coverage in human-readable text format
+func (db *RaceCoverageDB) exportText(writer io.Writer) error {
+	stats := db.coverage.GetStats()
+
+	fmt.Fprintf(writer, "Race Coverage Report\n")
+	fmt.Fprintf(writer, "===================\n")
+	fmt.Fprintf(writer, "Total Race Pairs: %d\n", stats.TotalRacePairs)
+	fmt.Fprintf(writer, "Unique Syscalls: %d\n", stats.UniqueSyscalls)
+	fmt.Fprintf(writer, "Unique Variables: %d\n", stats.UniqueVariables)
+	fmt.Fprintf(writer, "\nLock Type Breakdown:\n")
+
+	for lockType, count := range stats.LockTypeBreakdown {
+		fmt.Fprintf(writer, "  Type %d: %d pairs\n", lockType, count)
+	}
+
+	fmt.Fprintf(writer, "\nRace Pairs:\n")
+	fmt.Fprintf(writer, "===========\n")
+
+	pairs := db.coverage.Serialize()
+	for i, rp := range pairs {
+		fmt.Fprintf(writer, "%d. %s\n", i+1, rp.String())
+	}
+
+	return nil
+}
+
+// Close saves the coverage and releases resources
+func (db *RaceCoverageDB) Close() error {
+	return db.Save()
 }

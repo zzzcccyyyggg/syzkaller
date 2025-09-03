@@ -30,12 +30,17 @@ type RPCServer struct {
 	batchSize             int
 	canonicalModules      *cover.Canonicalizer
 
-	mu            sync.Mutex
-	fuzzers       map[string]*Fuzzer
-	checkResult   *rpctype.CheckArgs
-	maxSignal     signal.Signal
-	corpusSignal  signal.Signal
-	corpusCover   cover.Cover
+	mu           sync.Mutex
+	fuzzers      map[string]*Fuzzer
+	checkResult  *rpctype.CheckArgs
+	maxSignal    signal.Signal
+	corpusSignal signal.Signal
+	corpusCover  cover.Cover
+	// ===============DDRD====================
+	// Race signal management
+	maxRaceSignal    signal.Signal
+	corpusRaceSignal signal.Signal
+	// ===============DDRD====================
 	rotator       *prog.Rotator
 	rnd           *rand.Rand
 	checkFailures int
@@ -47,8 +52,13 @@ type Fuzzer struct {
 	inputs        []rpctype.Input
 	newMaxSignal  signal.Signal
 	rotatedSignal signal.Signal
-	machineInfo   []byte
-	instModules   *cover.CanonicalizerInstance
+	// ===============DDRD====================
+	// Race signal tracking per fuzzer
+	newMaxRaceSignal  signal.Signal
+	rotatedRaceSignal signal.Signal
+	// ===============DDRD====================
+	machineInfo []byte
+	instModules *cover.CanonicalizerInstance
 }
 
 type BugFrames struct {
@@ -64,6 +74,10 @@ type RPCManagerView interface {
 	newInput(inp rpctype.Input, sign signal.Signal) bool
 	candidateBatch(size int) []rpctype.Candidate
 	rotateCorpus() bool
+	// ===============DDRD====================
+	// Process new race pair discoveries with full Manager integration
+	newRacePair(args *rpctype.NewRacePairArgs) bool
+	// ===============DDRD====================
 }
 
 func startRPCServer(mgr *Manager) (*RPCServer, error) {
@@ -131,6 +145,15 @@ func (serv *RPCServer) Connect(a *rpctype.ConnectArgs, r *rpctype.ConnectRes) er
 		f.inputs = corpus
 		f.newMaxSignal = serv.maxSignal.Copy()
 	}
+
+	// ===============DDRD====================
+	// Register fuzzer for mode transition synchronization
+	mgr := serv.mgr.(*Manager)
+	if mgr.fuzzScheduler != nil && mgr.fuzzScheduler.transitionMgr != nil {
+		mgr.fuzzScheduler.transitionMgr.RegisterFuzzer(a.Name)
+	}
+	// ===============DDRD====================
+
 	return nil
 }
 
@@ -349,6 +372,7 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 			f1.newMaxSignal.Merge(newMaxSignal)
 		}
 	}
+
 	if f.rotated {
 		// Let rotated VMs run in isolation, don't send them anything.
 		return nil
@@ -410,31 +434,75 @@ func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.Ch
 		r.IsTestPairMode = false
 		return nil
 	}
-	
+
 	// Check current phase from fuzz scheduler
 	currentPhase := mgr.fuzzScheduler.GetCurrentPhase()
 	r.IsTestPairMode = (currentPhase == PhaseRaceFuzz)
-	
-	log.Logf(2, "CheckTestPairMode: fuzzer=%v, phase=%v, isTestPairMode=%v", 
+
+	log.Logf(2, "CheckTestPairMode: fuzzer=%v, phase=%v, isTestPairMode=%v",
 		a.Name, currentPhase, r.IsTestPairMode)
 	return nil
 }
 
 // NewRacePair handles race pair data from fuzzer
 func (serv *RPCServer) NewRacePair(a *rpctype.NewRacePairArgs, r *rpctype.NewRacePairRes) error {
-	mgr := serv.mgr.(*Manager)
-	
-	log.Logf(1, "NewRacePair from %v: pairID=%v, races=%d", 
+	log.Logf(1, "NewRacePair from %v: pairID=%v, races=%d",
 		a.Name, a.PairID, len(a.Races))
-	
-	// Process race pair data - simplified for queue-based system
-	if len(a.Races) > 0 {
-		log.Logf(2, "Processing race pair: %s with %d race detections", 
-			a.PairID, len(a.Races))
-		
-		// Update statistics for race signals
-		mgr.stats.newRaceSignals.add(len(a.Races))
+
+	// Now using Manager interface for complex processing
+	accepted := serv.mgr.newRacePair(a)
+
+	// Could set response fields based on processing results
+	if accepted {
+		log.Logf(2, "Race pair %s was accepted by Manager", a.PairID)
 	}
-	
+
 	return nil
 }
+
+// ===============DDRD====================
+// 模式切换同步 RPC 方法
+// ===============DDRD====================
+
+// CheckModeTransition 检查是否有pending的模式切换
+func (serv *RPCServer) CheckModeTransition(a *rpctype.ModeTransitionArgs, r *rpctype.ModeTransitionRes) error {
+	mgr := serv.mgr.(*Manager)
+	if mgr.fuzzScheduler == nil || mgr.fuzzScheduler.transitionMgr == nil {
+		r.ShouldPrepare = false
+		return nil
+	}
+
+	isTransitioning, transitionID, targetPhase := mgr.fuzzScheduler.transitionMgr.GetTransitionInfo()
+
+	if isTransitioning {
+		r.ShouldPrepare = true
+		r.TransitionID = transitionID
+		r.TargetPhase = int(targetPhase)
+		r.MaxWaitTime = 30 // 30秒
+
+		log.Logf(2, "Fuzzer %s notified of pending transition %s to phase %v",
+			a.Name, r.TransitionID, targetPhase)
+	} else {
+		r.ShouldPrepare = false
+	}
+
+	return nil
+}
+
+// ReportModeReady Fuzzer报告准备就绪
+func (serv *RPCServer) ReportModeReady(a *rpctype.ModeReadyArgs, r *rpctype.ModeReadyRes) error {
+	mgr := serv.mgr.(*Manager)
+	if mgr.fuzzScheduler == nil || mgr.fuzzScheduler.transitionMgr == nil {
+		r.Acknowledged = false
+		return nil
+	}
+
+	r.Acknowledged = mgr.fuzzScheduler.transitionMgr.MarkFuzzerReady(a.Name, a.TransitionID)
+
+	log.Logf(1, "Fuzzer %s reported ready for transition %s: acknowledged=%v",
+		a.Name, a.TransitionID, r.Acknowledged)
+
+	return nil
+}
+
+// ===============DDRD====================
