@@ -1,8 +1,9 @@
 package ddrd
 
+// Race signal types - using uint64 to match MayRacePair.Signal
 type (
-	elemType uint64
-	prioType int8
+	elemType uint64 // Use uint64 for race signals (vs uint32 for normal signals)
+	prioType int8   // Same priority type as normal signals
 )
 
 // Signal represents a mapping from elemType to prioType, used for feedback signal.
@@ -200,4 +201,52 @@ func Minimize(corpus []Context) []interface{} {
 		result = append(result, corpus[idx].Context)
 	}
 	return result
+}
+
+// ===============DDRD Race Signal Extensions====================
+
+// FromRacePairs creates a race signal from MayRacePair slice
+func FromRacePairs(pairs []MayRacePair, prio uint8) Signal {
+	if len(pairs) == 0 {
+		return nil
+	}
+	s := make(Signal)
+	for _, pair := range pairs {
+		if pair.Signal != 0 {
+			s[elemType(pair.Signal)] = prioType(prio)
+		}
+	}
+	return s
+}
+
+// ToRawUint64 converts signal elements to []uint64 for race processing
+func (s Signal) ToRawUint64() []uint64 {
+	if s.Empty() {
+		return nil
+	}
+	raw := make([]uint64, 0, len(s))
+	for e := range s {
+		raw = append(raw, uint64(e))
+	}
+	return raw
+}
+
+// MergeRacePairs merges race pairs into existing signal
+func (s *Signal) MergeRacePairs(pairs []MayRacePair, prio uint8) {
+	if len(pairs) == 0 {
+		return
+	}
+	s0 := *s
+	if s0 == nil {
+		s0 = make(Signal)
+		*s = s0
+	}
+	for _, pair := range pairs {
+		if pair.Signal != 0 {
+			elem := elemType(pair.Signal)
+			if p, ok := s0[elem]; !ok || p < prioType(prio) {
+				s0[elem] = prioType(prio)
+			}
+		}
+	}
 }

@@ -164,3 +164,13 @@ func (rpwq *RacePairWorkQueue) enqueueNewCoverPair(p1, p2 *prog.Prog, pairID str
 }
 
 // ===============DDRD====================
+
+// hasActiveWork checks if the race pair work queue has any pending work
+func (rpwq *RacePairWorkQueue) hasActiveWork() bool {
+	rpwq.mu.RLock()
+	defer rpwq.mu.RUnlock()
+
+	return len(rpwq.candidates) > 0 ||
+		len(rpwq.triage) > 0 ||
+		len(rpwq.valuable) > 0
+}

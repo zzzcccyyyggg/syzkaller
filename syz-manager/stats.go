@@ -14,13 +14,16 @@ import (
 type Stat uint64
 
 type Stats struct {
-	crashes             Stat
-	crashTypes          Stat
-	crashSuppressed     Stat
-	vmRestarts          Stat
-	newInputs           Stat
-	rotatedInputs       Stat
-	execTotal           Stat
+	crashes         Stat
+	crashTypes      Stat
+	crashSuppressed Stat
+	vmRestarts      Stat
+	newInputs       Stat
+	rotatedInputs   Stat
+	execTotal       Stat
+	// DDRD模式分离统计
+	execNormal          Stat // 普通模式执行数
+	execRace            Stat // 竞争模式执行数
 	hubSendProgAdd      Stat
 	hubSendProgDel      Stat
 	hubSendRepro        Stat
@@ -73,6 +76,8 @@ func (stats *Stats) all() map[string]uint64 {
 		"new inputs":        stats.newInputs.get(),
 		"rotated inputs":    stats.rotatedInputs.get(),
 		"exec total":        stats.execTotal.get(),
+		"exec normal":       stats.execNormal.get(),
+		"exec race":         stats.execRace.get(),
 		"coverage":          stats.corpusCover.get(),
 		"filtered coverage": stats.corpusCoverFiltered.get(),
 		"signal":            stats.corpusSignal.get(),
@@ -108,6 +113,10 @@ func (stats *Stats) mergeNamed(named map[string]uint64) {
 		switch k {
 		case "exec total":
 			stats.execTotal.add(int(v))
+		case "exec normal":
+			stats.execNormal.add(int(v))
+		case "exec race":
+			stats.execRace.add(int(v))
 		default:
 			stats.namedStats[k] += v
 		}

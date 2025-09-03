@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"net"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -38,8 +40,8 @@ type RPCServer struct {
 	corpusCover  cover.Cover
 	// ===============DDRD====================
 	// Race signal management
-	maxRaceSignal    signal.Signal
-	corpusRaceSignal signal.Signal
+	maxRaceSignal    ddrd.Signal
+	corpusRaceSignal ddrd.Signal
 	// ===============DDRD====================
 	rotator       *prog.Rotator
 	rnd           *rand.Rand
@@ -54,8 +56,8 @@ type Fuzzer struct {
 	rotatedSignal signal.Signal
 	// ===============DDRD====================
 	// Race signal tracking per fuzzer
-	newMaxRaceSignal  signal.Signal
-	rotatedRaceSignal signal.Signal
+	newMaxRaceSignal  ddrd.Signal
+	rotatedRaceSignal ddrd.Signal
 	// ===============DDRD====================
 	machineInfo []byte
 	instModules *cover.CanonicalizerInstance
@@ -147,11 +149,8 @@ func (serv *RPCServer) Connect(a *rpctype.ConnectArgs, r *rpctype.ConnectRes) er
 	}
 
 	// ===============DDRD====================
-	// Register fuzzer for mode transition synchronization
-	mgr := serv.mgr.(*Manager)
-	if mgr.fuzzScheduler != nil && mgr.fuzzScheduler.transitionMgr != nil {
-		mgr.fuzzScheduler.transitionMgr.RegisterFuzzer(a.Name)
-	}
+	// In restart mode, no need to register individual fuzzers
+	// They will be restarted as a group when mode transitions occur
 	// ===============DDRD====================
 
 	return nil
@@ -377,6 +376,35 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 		// Let rotated VMs run in isolation, don't send them anything.
 		return nil
 	}
+
+	// ===============DDRD====================
+	// Process race signal updates
+	if len(a.MaxRaceSignal) > 0 {
+		// Deserialize race signal from fuzzer
+		if raceSignal, err := deserializeRaceSignal(a.MaxRaceSignal); err == nil && raceSignal != nil {
+			newRaceSignal := serv.maxRaceSignal.Diff(*raceSignal)
+			if !newRaceSignal.Empty() {
+				serv.maxRaceSignal.Merge(newRaceSignal)
+				serv.stats.raceSignals.set(len(serv.maxRaceSignal))
+				// Distribute new race signal to other fuzzers
+				for _, f1 := range serv.fuzzers {
+					if f1 == f || f1.rotated {
+						continue
+					}
+					f1.newMaxRaceSignal.Merge(newRaceSignal)
+				}
+				log.Logf(2, "[DDRD-DEBUG] Poll: Race signal updated from %v: new size=%d",
+					a.Name, len(newRaceSignal))
+			}
+		}
+	}
+
+	// Send updated race signal to fuzzer
+	r.MaxRaceSignal = serializeRaceSignal(f.newMaxRaceSignal.Split(2000))
+
+	// Send new race pairs to fuzzer (distributed from other fuzzers)
+	r.NewRacePairs = serv.getNewRacePairsForFuzzer(a.Name)
+	// ===============DDRD====================
 	r.MaxSignal = f.newMaxSignal.Split(2000).Serialize()
 	if a.NeedCandidates {
 		r.Candidates = serv.mgr.candidateBatch(serv.batchSize)
@@ -446,63 +474,65 @@ func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.Ch
 
 // NewRacePair handles race pair data from fuzzer
 func (serv *RPCServer) NewRacePair(a *rpctype.NewRacePairArgs, r *rpctype.NewRacePairRes) error {
-	log.Logf(1, "NewRacePair from %v: pairID=%v, races=%d",
-		a.Name, a.PairID, len(a.Races))
+	log.Logf(1, "NewRacePair from %v: pairID=%v, signal len=%d",
+		a.Name, a.Pair.PairID, len(a.Pair.Signal))
 
 	// Now using Manager interface for complex processing
 	accepted := serv.mgr.newRacePair(a)
 
 	// Could set response fields based on processing results
 	if accepted {
-		log.Logf(2, "Race pair %s was accepted by Manager", a.PairID)
+		log.Logf(2, "Race pair %x was accepted by Manager", a.Pair.PairID)
 	}
 
 	return nil
 }
 
 // ===============DDRD====================
-// 模式切换同步 RPC 方法
+// 重启式模式切换 RPC 方法
 // ===============DDRD====================
 
-// CheckModeTransition 检查是否有pending的模式切换
+// CheckModeTransition 检查是否有pending的模式切换 (重启模式下总是返回false)
 func (serv *RPCServer) CheckModeTransition(a *rpctype.ModeTransitionArgs, r *rpctype.ModeTransitionRes) error {
-	mgr := serv.mgr.(*Manager)
-	if mgr.fuzzScheduler == nil || mgr.fuzzScheduler.transitionMgr == nil {
-		r.ShouldPrepare = false
-		return nil
-	}
+	// 在重启模式下，fuzzer不需要协调切换，直接返回无切换状态
+	r.ShouldPrepare = false
 
-	isTransitioning, transitionID, targetPhase := mgr.fuzzScheduler.transitionMgr.GetTransitionInfo()
-
-	if isTransitioning {
-		r.ShouldPrepare = true
-		r.TransitionID = transitionID
-		r.TargetPhase = int(targetPhase)
-		r.MaxWaitTime = 30 // 30秒
-
-		log.Logf(2, "Fuzzer %s notified of pending transition %s to phase %v",
-			a.Name, r.TransitionID, targetPhase)
-	} else {
-		r.ShouldPrepare = false
+	if log.V(2) {
+		log.Logf(2, "[DDRD-DEBUG] CheckModeTransition (restart mode): fuzzer=%s, shouldPrepare=false", a.Name)
 	}
 
 	return nil
 }
 
-// ReportModeReady Fuzzer报告准备就绪
+// ReportModeReady Fuzzer报告准备就绪 (重启模式下不需要)
 func (serv *RPCServer) ReportModeReady(a *rpctype.ModeReadyArgs, r *rpctype.ModeReadyRes) error {
-	mgr := serv.mgr.(*Manager)
-	if mgr.fuzzScheduler == nil || mgr.fuzzScheduler.transitionMgr == nil {
-		r.Acknowledged = false
-		return nil
+	// 在重启模式下，不需要fuzzer报告就绪状态
+	r.Acknowledged = false
+
+	if log.V(2) {
+		log.Logf(2, "[DDRD-DEBUG] ReportModeReady (restart mode): fuzzer=%s, acknowledged=false", a.Name)
 	}
 
-	r.Acknowledged = mgr.fuzzScheduler.transitionMgr.MarkFuzzerReady(a.Name, a.TransitionID)
-
-	log.Logf(1, "Fuzzer %s reported ready for transition %s: acknowledged=%v",
-		a.Name, a.TransitionID, r.Acknowledged)
-
 	return nil
+}
+
+// ===============DDRD====================
+// serializeRaceSignal serializes race signal to byte array
+func serializeRaceSignal(sig ddrd.Signal) []byte {
+	serial := sig.Serialize()
+	data, err := json.Marshal(serial)
+	if err != nil {
+		log.Logf(0, "Failed to serialize race signal: %v", err)
+		return []byte{}
+	}
+	return data
+}
+
+// getNewRacePairsForFuzzer returns race pairs pending distribution to a fuzzer
+func (serv *RPCServer) getNewRacePairsForFuzzer(fuzzerName string) []rpctype.RacePairInput {
+	// TODO: Get race pairs from manager that need to be distributed to this fuzzer
+	// For now return empty list
+	return []rpctype.RacePairInput{}
 }
 
 // ===============DDRD====================

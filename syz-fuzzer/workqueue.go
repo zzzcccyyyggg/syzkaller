@@ -161,3 +161,14 @@ func (wq *WorkQueue) extractCandidates(maxCount int) []interface{} {
 
 	return candidates
 }
+
+// hasActiveWork checks if the work queue has any pending work
+func (wq *WorkQueue) hasActiveWork() bool {
+	wq.mu.RLock()
+	defer wq.mu.RUnlock()
+
+	return len(wq.triageCandidate) > 0 ||
+		len(wq.candidate) > 0 ||
+		len(wq.triage) > 0 ||
+		len(wq.smash) > 0
+}

@@ -8,7 +8,6 @@ package rpctype
 import (
 	"math"
 
-	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/host"
 	"github.com/google/syzkaller/pkg/ipc"
 	"github.com/google/syzkaller/pkg/signal"
@@ -28,6 +27,29 @@ type Candidate struct {
 	Minimized bool
 	Smashed   bool
 }
+
+// ===============DDRD====================
+// RacePairInput represents a race pair discovered by a fuzzer
+type RacePairInput struct {
+	PairID uint64 // pair标识，使用哈希
+	Prog1  []byte // 程序1的序列化数据
+	Prog2  []byte // 程序2的序列化数据
+	Signal []byte // 关联的race signal (ddrd.Serial)
+	Races  []byte // 发现的races (序列化的[]ddrd.MayRacePair)
+}
+
+// NewRacePairArgs represents arguments for sending race pairs to manager
+type NewRacePairArgs struct {
+	Name string
+	Pair RacePairInput
+}
+
+// NewRacePairRes represents response for race pair submission
+type NewRacePairRes struct {
+	// Currently empty, reserved for future use
+}
+
+// ===============DDRD====================
 
 type ExecTask struct {
 	Prog []byte
@@ -75,13 +97,20 @@ type PollArgs struct {
 	Name           string
 	NeedCandidates bool
 	MaxSignal      signal.Serial
-	Stats          map[string]uint64
+	// ===============DDRD====================
+	MaxRaceSignal []byte // ddrd.Serial (避免循环导入，使用[]byte)
+	// ===============DDRD====================
+	Stats map[string]uint64
 }
 
 type PollRes struct {
 	Candidates []Candidate
 	NewInputs  []Input
 	MaxSignal  signal.Serial
+	// ===============DDRD====================
+	NewRacePairs  []RacePairInput // 新发现的race pair分发
+	MaxRaceSignal []byte          // 全局race signal (ddrd.Serial)
+	// ===============DDRD====================
 }
 
 type RunnerConnectArgs struct {
@@ -218,21 +247,7 @@ type LogMessageReq struct {
 
 // ===============DDRD====================
 // RPC structures for race pair management
-
-// NewRacePairArgs for reporting newly discovered race pairs
-type NewRacePairArgs struct {
-	Name      string             // fuzzer name
-	PairID    string             // race pair unique identifier
-	Prog1Data []byte             // first program data
-	Prog2Data []byte             // second program data
-	Races     []ddrd.MayRacePair // detected race pairs
-	Output    []byte             // execution output
-}
-
-// NewRacePairRes response for new race pair reporting
-type NewRacePairRes struct {
-	// Currently empty, may add feedback later
-}
+// Note: Main race pair structures are defined above
 
 // ===============DDRD====================
 // RPC structures for mode transition synchronization

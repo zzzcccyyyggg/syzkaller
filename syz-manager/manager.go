@@ -24,6 +24,7 @@ import (
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/db"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/gce"
 	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/host"
@@ -70,6 +71,16 @@ type Manager struct {
 	// ===============DDRD====================
 	// Fuzz scheduler for managing normal and race pair modes
 	fuzzScheduler *FuzzScheduler
+
+	// Race corpus management
+	raceCorpusDB *db.DB
+	raceCorpus   map[string]*RaceCorpusItem
+	raceCorpusMu sync.RWMutex
+	raceStats    struct {
+		totalPairs   int64
+		uniqueRaces  int64
+		lastSaveTime time.Time
+	}
 	// ===============DDRD====================
 
 	dash *dashapi.Dashboard
@@ -117,6 +128,25 @@ type CorpusItem struct {
 	Cover   []uint32
 	Updates []CorpusItemUpdate
 }
+
+// ===============DDRD====================
+// Race Corpus Data Structures
+// ===============DDRD====================
+
+// RaceCorpusItem represents a race pair item in the corpus
+type RaceCorpusItem struct {
+	PairID      string    `json:"pair_id"`
+	Prog1       []byte    `json:"prog1"`
+	Prog2       []byte    `json:"prog2"`
+	RaceSignal  []byte    `json:"race_signal"` // serialized ddrd.Serial
+	Races       []byte    `json:"races"`       // serialized []ddrd.MayRacePair
+	FirstSeen   time.Time `json:"first_seen"`
+	LastUpdated time.Time `json:"last_updated"`
+	Source      string    `json:"source"` // source fuzzer name
+	Count       int       `json:"count"`  // discovery count
+}
+
+// ===============DDRD====================
 
 func (item *CorpusItem) RPCInput() rpctype.Input {
 	return rpctype.Input{
@@ -213,6 +243,8 @@ func RunManager(cfg *mgrconfig.Config) {
 		// ===============DDRD====================
 		// Initialize fuzz scheduler for mode management
 		fuzzScheduler: NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
+		// Initialize race corpus
+		raceCorpus: make(map[string]*RaceCorpusItem),
 		// ===============DDRD====================
 	}
 
@@ -222,6 +254,10 @@ func RunManager(cfg *mgrconfig.Config) {
 	// ===============DDRD====================
 
 	mgr.preloadCorpus()
+	// ===============DDRD====================
+	// Initialize race corpus
+	mgr.initRaceCorpus()
+	// ===============DDRD====================
 	mgr.initStats() // Initializes prometheus variables.
 
 	mgr.initHTTP() // Creates HTTP server.
@@ -260,6 +296,8 @@ func RunManager(cfg *mgrconfig.Config) {
 			}
 			mgr.fuzzingTime += diff * time.Duration(atomic.LoadUint32(&mgr.numFuzzing))
 			executed := mgr.stats.execTotal.get()
+			execNormal := mgr.stats.execNormal.get()
+			execRace := mgr.stats.execRace.get()
 			crashes := mgr.stats.crashes.get()
 			corpusCover := mgr.stats.corpusCover.get()
 			corpusSignal := mgr.stats.corpusSignal.get()
@@ -268,21 +306,11 @@ func RunManager(cfg *mgrconfig.Config) {
 			newRaceSignals := mgr.stats.newRaceSignals.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
-
-			// ===============DDRD====================
-			// 更新scheduler的信号计数
-			if mgr.fuzzScheduler != nil {
-				mgr.fuzzScheduler.UpdateSignalCount(int(corpusSignal))
-				mgr.fuzzScheduler.UpdateRaceSignalCount(int(raceSignals))
-			}
-			// ===============DDRD====================
-
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v, cover %v, signal %v/%v, races %v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, corpusCover, corpusSignal, maxSignal, raceSignals, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
-
+			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
 		}
 	}()
 
@@ -321,6 +349,10 @@ func (mgr *Manager) initBench() {
 				continue
 			}
 			mgr.minimizeCorpus()
+			// ===============DDRD====================
+			// Maintain race corpus periodically
+			mgr.minimizeRaceCorpus()
+			// ===============DDRD====================
 			vals["corpus"] = uint64(len(mgr.corpus))
 			vals["uptime"] = uint64(time.Since(mgr.firstConnect)) / 1e9
 			vals["fuzzing"] = uint64(mgr.fuzzingTime) / 1e9
@@ -346,13 +378,10 @@ func (mgr *Manager) initModeTransitionSync() {
 		return
 	}
 
-	// 设置同步管理器
-	mgr.fuzzScheduler.SetupTransitionManager()
+	// 设置重启式切换管理器
+	mgr.fuzzScheduler.SetupTransitionManager(mgr)
 
-	// 启动周期性阶段切换检查
-	mgr.fuzzScheduler.StartPeriodicCheck()
-
-	log.Logf(1, "Mode transition synchronization initialized and periodic check started")
+	log.Logf(1, "Restart-based mode transition initialized")
 }
 
 // ===============DDRD====================
@@ -1358,6 +1387,229 @@ func (mgr *Manager) minimizeCorpus() {
 	mgr.corpusDB.BumpVersion(currentDBVersion)
 }
 
+// ===============DDRD====================
+// Race Corpus Management Methods
+// ===============DDRD====================
+
+func (mgr *Manager) initRaceCorpus() {
+	log.Logf(0, "loading race corpus...")
+	raceCorpusPath := filepath.Join(mgr.cfg.Workdir, "race-corpus.db")
+	raceCorpusDB, err := db.Open(raceCorpusPath, true)
+	if err != nil {
+		if raceCorpusDB == nil {
+			log.Fatalf("failed to open race corpus database: %v", err)
+		}
+		log.Errorf("race corpus db error: %v", err)
+	}
+
+	mgr.raceCorpusDB = raceCorpusDB
+	mgr.loadRaceCorpus()
+
+	log.Logf(0, "race corpus initialized: %d items loaded", len(mgr.raceCorpus))
+}
+
+func (mgr *Manager) loadRaceCorpus() {
+	mgr.raceCorpusMu.Lock()
+	defer mgr.raceCorpusMu.Unlock()
+
+	log.Logf(0, "Loading race corpus from database...")
+	log.Logf(0, "Database has %d records", len(mgr.raceCorpusDB.Records))
+
+	broken := 0
+	for key, rec := range mgr.raceCorpusDB.Records {
+		log.Logf(1, "Loading race corpus item: %s (size: %d bytes)", key, len(rec.Val))
+
+		var item RaceCorpusItem
+		if err := json.Unmarshal(rec.Val, &item); err != nil {
+			log.Logf(0, "failed to unmarshal race corpus item %s: %v", key, err)
+			mgr.raceCorpusDB.Delete(key)
+			broken++
+			continue
+		}
+
+		mgr.raceCorpus[key] = &item
+
+		// 详细输出每个加载的条目
+		log.Logf(0, "Loaded race pair: ID=%s, Count=%d, FirstSeen=%s, LastUpdated=%s",
+			item.PairID, item.Count, item.FirstSeen.Format("15:04:05"), item.LastUpdated.Format("15:04:05"))
+
+		// 输出程序信息
+		if len(item.Prog1) > 0 {
+			log.Logf(1, "  Prog1: %d bytes", len(item.Prog1))
+		}
+		if len(item.Prog2) > 0 {
+			log.Logf(1, "  Prog2: %d bytes", len(item.Prog2))
+		}
+
+		// 输出race signal信息
+		if len(item.RaceSignal) > 0 {
+			log.Logf(1, "  RaceSignal: %d bytes", len(item.RaceSignal))
+		}
+	}
+
+	log.Logf(0, "Race corpus loading complete: %d items loaded, %d broken items deleted",
+		len(mgr.raceCorpus), broken)
+}
+
+func (mgr *Manager) saveRaceCorpusItem(pairID string, args *rpctype.NewRacePairArgs) {
+	mgr.raceCorpusMu.Lock()
+	defer mgr.raceCorpusMu.Unlock()
+
+	now := time.Now()
+
+	// Check if already exists
+	if existing, exists := mgr.raceCorpus[pairID]; exists {
+		// Update existing item
+		existing.LastUpdated = now
+		existing.Count++
+
+		// Update race signal if provided
+		if len(args.Pair.Signal) > 0 {
+			existing.RaceSignal = args.Pair.Signal
+		}
+
+		log.Logf(2, "Updated existing race pair %s (count: %d)", pairID, existing.Count)
+	} else {
+		// Create new item
+		item := &RaceCorpusItem{
+			PairID:      pairID,
+			Prog1:       args.Pair.Prog1,
+			Prog2:       args.Pair.Prog2,
+			RaceSignal:  args.Pair.Signal,
+			Races:       args.Pair.Races,
+			FirstSeen:   now,
+			LastUpdated: now,
+			Source:      args.Name,
+			Count:       1,
+		}
+
+		mgr.raceCorpus[pairID] = item
+		mgr.raceStats.uniqueRaces++
+
+		log.Logf(2, "Added new race pair %s from %s", pairID, args.Name)
+	}
+
+	// Persist to database
+	mgr.persistRaceCorpusItem(pairID)
+}
+
+func (mgr *Manager) persistRaceCorpusItem(pairID string) {
+	item, exists := mgr.raceCorpus[pairID]
+	if !exists {
+		log.Logf(1, "persistRaceCorpusItem: item %s not found in memory", pairID)
+		return
+	}
+
+	data, err := json.Marshal(item)
+	if err != nil {
+		log.Logf(0, "failed to marshal race corpus item %s: %v", pairID, err)
+		return
+	}
+
+	log.Logf(1, "Persisting race corpus item %s (%d bytes)", pairID, len(data))
+
+	// Save to database
+	mgr.raceCorpusDB.Save(pairID, data, 0)
+
+	// Flush to ensure data is written to disk
+	if err := mgr.raceCorpusDB.Flush(); err != nil {
+		log.Logf(0, "failed to flush race corpus database: %v", err)
+	} else {
+		log.Logf(1, "Successfully persisted race corpus item %s to disk", pairID)
+	}
+}
+
+func (mgr *Manager) maintainRaceCorpus() {
+	mgr.raceCorpusMu.Lock()
+	defer mgr.raceCorpusMu.Unlock()
+
+	log.Logf(1, "Starting race corpus maintenance...")
+
+	before := len(mgr.raceCorpus)
+	removed := 0
+
+	// Clean up old and infrequent items
+	cutoff := time.Now().Add(-24 * time.Hour * 7) // 7 days ago
+
+	for pairID, item := range mgr.raceCorpus {
+		// Remove items that are old and only appeared once
+		if item.Count == 1 && item.LastUpdated.Before(cutoff) {
+			delete(mgr.raceCorpus, pairID)
+			mgr.raceCorpusDB.Delete(pairID)
+			removed++
+		}
+	}
+
+	// Flush database
+	if err := mgr.raceCorpusDB.Flush(); err != nil {
+		log.Logf(0, "failed to flush race corpus database: %v", err)
+	}
+
+	mgr.raceStats.lastSaveTime = time.Now()
+
+	log.Logf(1, "Race corpus maintenance completed: %d -> %d items (removed %d)",
+		before, len(mgr.raceCorpus), removed)
+}
+
+func (mgr *Manager) getRaceCorpusStats() map[string]interface{} {
+	mgr.raceCorpusMu.RLock()
+	defer mgr.raceCorpusMu.RUnlock()
+
+	return map[string]interface{}{
+		"total_pairs":  len(mgr.raceCorpus),
+		"unique_races": mgr.raceStats.uniqueRaces,
+		"last_updated": mgr.raceStats.lastSaveTime,
+	}
+}
+
+func (mgr *Manager) minimizeRaceCorpus() {
+	mgr.raceCorpusMu.Lock()
+	defer mgr.raceCorpusMu.Unlock()
+
+	log.Logf(1, "Starting race corpus maintenance...")
+
+	before := len(mgr.raceCorpus)
+	removed := 0
+
+	// Clean up old or unimportant items
+	cutoff := time.Now().Add(-24 * time.Hour * 7) // 7 days ago
+
+	for pairID, item := range mgr.raceCorpus {
+		// Remove items that appeared only once and haven't been updated for a week
+		if item.Count == 1 && item.LastUpdated.Before(cutoff) {
+			delete(mgr.raceCorpus, pairID)
+			mgr.raceCorpusDB.Delete(pairID)
+			removed++
+		}
+	}
+
+	// Flush database
+	if err := mgr.raceCorpusDB.Flush(); err != nil {
+		log.Logf(0, "failed to flush race corpus database: %v", err)
+	}
+
+	mgr.raceStats.lastSaveTime = time.Now()
+	mgr.raceStats.uniqueRaces = int64(len(mgr.raceCorpus))
+
+	log.Logf(1, "Race corpus maintenance completed: %d -> %d items (removed %d)",
+		before, len(mgr.raceCorpus), removed)
+}
+
+// deserializeRaceSignal deserializes race signal data from JSON.
+func deserializeRaceSignal(data []byte) (*ddrd.Signal, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var serial ddrd.Serial
+	if err := json.Unmarshal(data, &serial); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal race signal: %v", err)
+	}
+	sig := serial.Deserialize()
+	return &sig, nil
+}
+
+// ===============DDRD====================
+
 func setGuiltyFiles(crash *dashapi.Crash, report *report.Report) {
 	if report.GuiltyFile != "" {
 		crash.GuiltyFiles = []string{report.GuiltyFile}
@@ -1737,49 +1989,44 @@ func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
-	log.Logf(1, "Manager processing race pair from %v: pairID=%v", args.Name, args.PairID)
+	// Generate race pair ID
+	pairID := fmt.Sprintf("%x", args.Pair.PairID)
+	log.Logf(2, "Manager processing race pair %s from %v", pairID, args.Name)
 
-	// Here we can implement complex logic that integrates with Manager's state:
+	// 1. Save to race corpus
+	mgr.saveRaceCorpusItem(pairID, args)
+	mgr.raceStats.totalPairs++
 
-	// 1. Race signal processing and propagation
-	if len(args.Races) > 0 {
-		// Process race signals and add to global race coverage
-		for i, race := range args.Races {
-			// Convert race data to internal format and merge with global coverage
-			log.Logf(2, "Processing race %d: syscalls %d vs %d", i,
-				race.Syscall1Num, race.Syscall2Num)
+	// 2. Race signal processing and propagation
+	if len(args.Pair.Signal) > 0 {
+		// Process race signal from the pair
+		log.Logf(2, "Processing race signal: %d bytes", len(args.Pair.Signal))
+
+		// Deserialize and merge race signal (using RPC helper)
+		if raceSignal, err := deserializeRaceSignal(args.Pair.Signal); err == nil && raceSignal != nil {
+			// Update race signal statistics
+			currentRaceSignals := mgr.stats.raceSignals.get()
+			newSize := int(currentRaceSignals) + len(*raceSignal)
+			mgr.stats.raceSignals.set(newSize)
+			log.Logf(2, "Updated race signal stats: %d -> %d", currentRaceSignals, newSize)
+		} else if err != nil {
+			log.Logf(1, "Failed to deserialize race signal: %v", err)
 		}
 
 		// Update statistics through Manager's stats system
-		mgr.stats.newRaceSignals.add(len(args.Races))
-
-		// 2. Integration with corpus: could add race-triggering programs to corpus
-		if len(args.Prog1Data) > 0 && len(args.Prog2Data) > 0 {
-			// Analyze programs that triggered races
-			// Could prioritize these programs in future fuzzing
-			log.Logf(2, "Race-triggering programs: prog1=%d bytes, prog2=%d bytes",
-				len(args.Prog1Data), len(args.Prog2Data))
-
-			// Example: Add race-triggering programs to corpus with higher priority
-			// This demonstrates deeper Manager integration
-			// mgr.addRaceTriggeringPrograms(args.Prog1Data, args.Prog2Data)
-		}
-
-		// 3. Integration with scheduler: adjust fuzzing strategy based on races
-		if mgr.fuzzScheduler != nil {
-			// Could notify scheduler about race discoveries
-			// This might influence the fuzzing phase transitions
-			log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
-		}
-
-		// 4. Persistent storage: save race data for later analysis
-		// Could integrate with mgr.corpusDB or create dedicated race DB
-		// mgr.saveRaceData(args)
-
-		return true
+		mgr.stats.newRaceSignals.add(1)
 	}
 
-	return false
+	// 3. Integration with scheduler: adjust fuzzing strategy based on races
+	if mgr.fuzzScheduler != nil {
+		// Could notify scheduler about race discoveries
+		// This might influence the fuzzing phase transitions
+		log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
+	}
+
+	log.Logf(1, "Race pair %s saved to corpus (total pairs: %d, unique: %d)",
+		pairID, mgr.raceStats.totalPairs, mgr.raceStats.uniqueRaces)
+	return true
 }
 
 // ===============DDRD====================

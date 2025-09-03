@@ -5,6 +5,7 @@ package main
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"math/rand"
 	"os"
@@ -33,6 +34,11 @@ type Proc struct {
 	execOptsCollide *ipc.ExecOpts
 	execOptsCover   *ipc.ExecOpts
 	execOptsComps   *ipc.ExecOpts
+
+	// Execution state tracking for scheduler debug
+	executing     atomic.Bool // True if currently executing a program
+	lastExecStart time.Time   // Time when last execution started
+	lastExecEnd   time.Time   // Time when last execution ended
 }
 
 func newProc(fuzzer *Fuzzer, pid int) (*Proc, error) {
@@ -68,33 +74,18 @@ func (proc *Proc) loop() {
 		generatePeriod = 2
 	}
 
-	var lastModeCheck time.Time
-	var isTestPairMode bool
-	// [!todo] finish the test mode manager (提供或使用manager的API)
+	// ===============DDRD====================
+	// 使用启动时确定的模式标志位 (整个生命周期不变)
+	isTestPairMode := proc.fuzzer.isTestPairMode
+	if isTestPairMode {
+		log.Logf(1, "proc %d running in RACE PAIR mode", proc.pid)
+	} else {
+		log.Logf(1, "proc %d running in NORMAL mode", proc.pid)
+	}
+	// ===============DDRD====================
+
 	for i := 0; ; i++ {
-		// ===============DDRD====================
-		// 检查是否正在准备模式切换
-		if proc.fuzzer.preparingSwitch.Load() {
-			// 快速完成当前工作，不接受新工作
-			time.Sleep(100 * time.Millisecond) // 短暂等待
-			continue
-		}
-		// ===============DDRD====================
-
-		// 每5秒检查一次模式，避免频繁RPC调用
-		if time.Since(lastModeCheck) > 5*time.Second {
-			// ===============DDRD====================
-			// Use the race pair manager API
-			newMode := proc.fuzzer.checkTestPairMode()
-			// ===============DDRD====================
-			if newMode != isTestPairMode {
-				log.Logf(0, "proc %d race pair mode changed: %v -> %v", proc.pid, isTestPairMode, newMode)
-				isTestPairMode = newMode
-			}
-			lastModeCheck = time.Now()
-		}
-
-		// Enhanced mode execution
+		// Enhanced mode execution based on fixed mode
 		if isTestPairMode {
 			// ===============DDRD====================
 			// Race pair mode: ONLY handle race pair work items from separate queue
@@ -404,14 +395,36 @@ func (proc *Proc) executeRaw(opts *ipc.ExecOpts, p *prog.Prog, stat Stat) *ipc.P
 		// Let's do it outside of the gate ticket.
 		err := proc.env.RestartIfNeeded(p.Target)
 		if err == nil {
+			// Mark as executing for scheduler tracking
+			proc.executing.Store(true)
+			proc.lastExecStart = time.Now()
+
+			if log.V(2) {
+				log.Logf(2, "[DDRD-DEBUG] proc %d: starting execution at %v", proc.pid, proc.lastExecStart)
+			}
+
 			// Limit concurrency.
 			ticket := proc.fuzzer.gate.Enter()
 			proc.logProgram(opts, p)
 			atomic.AddUint64(&proc.fuzzer.stats[stat], 1)
 			output, info, hanged, err = proc.env.Exec(opts, p)
 			proc.fuzzer.gate.Leave(ticket)
+
+			// Mark as finished executing
+			proc.executing.Store(false)
+			proc.lastExecEnd = time.Now()
+
+			if log.V(2) {
+				execDuration := proc.lastExecEnd.Sub(proc.lastExecStart)
+				log.Logf(2, "[DDRD-DEBUG] proc %d: finished execution at %v (duration=%v)",
+					proc.pid, proc.lastExecEnd, execDuration)
+			}
 		}
 		if err != nil {
+			// Make sure to clear executing state on error
+			proc.executing.Store(false)
+			proc.lastExecEnd = time.Now()
+
 			if err == prog.ErrExecBufferTooSmall {
 				// It's bad if we systematically fail to serialize programs,
 				// but so far we don't have a better handling than counting this.
@@ -521,10 +534,28 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 		proc.fuzzer.gate.Leave(ticket)
 		log.Logf(0, "proc %d: released gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
 	}()
-	// ===============DDRD====================
+
+	// Mark as executing for scheduler tracking
+	proc.executing.Store(true)
+	proc.lastExecStart = time.Now()
+
+	if log.V(2) {
+		log.Logf(2, "[DDRD-DEBUG] proc %d: starting pair execution at %v", proc.pid, proc.lastExecStart)
+	}
 
 	// Execute the pair using the IPC layer
 	output, info, hanged, err := proc.env.ExecPair(opts1, opts2, p1, p2)
+
+	// Mark as finished executing
+	proc.executing.Store(false)
+	proc.lastExecEnd = time.Now()
+
+	if log.V(2) {
+		execDuration := proc.lastExecEnd.Sub(proc.lastExecStart)
+		log.Logf(2, "[DDRD-DEBUG] proc %d: finished pair execution at %v (duration=%v)",
+			proc.pid, proc.lastExecEnd, execDuration)
+	}
+	// ===============DDRD====================
 	if err != nil {
 		log.Logf(0, "proc %d: pair execution failed: %v", proc.pid, err)
 		return nil
@@ -553,7 +584,7 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 		// [!todo] 不应该直接的使用syzkaller的signal 使用race cover 中的signal替代即可
 		if len(raceSignalData) > 0 {
 			// Create signal from race data
-			raceSignal := signal.FromRaw(raceSignalData, 0)
+			raceSignal := ddrd.FromRaw(raceSignalData, 0)
 
 			// Check if this is new race coverage
 			if !proc.fuzzer.corpusRaceSignalDiff(raceSignal).Empty() {
@@ -564,7 +595,7 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 					proc.pid, len(info.MayRacePairs), len(raceSignalData))
 
 				// Send race pair results to manager
-				proc.sendRacePairsToManager(p1, p2, info.MayRacePairs, output)
+				proc.sendRacePairsToManager(p1, p2, info.MayRacePairs, raceSignal, output)
 			}
 		}
 	} else {
@@ -577,8 +608,7 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 
 // ===============DDRD====================
 // sendRacePairsToManager sends discovered race pairs to the manager
-// [!todo]: 补充完整
-func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.MayRacePair, output []byte) {
+func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.MayRacePair, raceSignal ddrd.Signal, output []byte) {
 	if len(racePairs) == 0 {
 		return
 	}
@@ -595,19 +625,43 @@ func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.May
 		return
 	}
 
-	// Generate unique pair ID
-	pairID := fmt.Sprintf("%x_%x_%d",
-		hash.Hash(prog1Data[:prog1Size]),
-		hash.Hash(prog2Data[:prog2Size]),
-		len(racePairs))
+	// Generate unique pair ID using uint64 hash
+	hash1 := hash.Hash(prog1Data[:prog1Size])
+	hash2 := hash.Hash(prog2Data[:prog2Size])
+	hash3 := hash.Hash([]byte(fmt.Sprintf("%d", len(racePairs))))
+
+	// Convert hash signatures to uint64 for XOR operation
+	var pairIDHash uint64
+	for i := 0; i < 8 && i < len(hash1); i++ {
+		pairIDHash ^= uint64(hash1[i]) << uint(i*8)
+	}
+	for i := 0; i < 8 && i < len(hash2); i++ {
+		pairIDHash ^= uint64(hash2[i]) << uint(i*8)
+	}
+	for i := 0; i < 8 && i < len(hash3); i++ {
+		pairIDHash ^= uint64(hash3[i]) << uint(i*8)
+	}
+
+	// Serialize race pairs data
+	racePairsData, err := json.Marshal(racePairs)
+	if err != nil {
+		log.Logf(0, "proc %d: failed to serialize race pairs: %v", proc.pid, err)
+		return
+	}
+
+	// Create race pair input
+	racePairInput := rpctype.RacePairInput{
+		PairID: pairIDHash,
+		Prog1:  prog1Data[:prog1Size],
+		Prog2:  prog2Data[:prog2Size],
+		Signal: serializeRaceSignal(raceSignal),
+		Races:  racePairsData,
+	}
 
 	// Send to manager
 	args := &rpctype.NewRacePairArgs{
-		Name:      proc.fuzzer.name,
-		PairID:    pairID,
-		Prog1Data: prog1Data[:prog1Size],
-		Prog2Data: prog2Data[:prog2Size],
-		Output:    output,
+		Name: proc.fuzzer.name,
+		Pair: racePairInput,
 	}
 
 	go func() {
@@ -728,4 +782,55 @@ func (proc *Proc) executePairFromValuable(item *PairWorkValuable) {
 
 		// TODO: Consider mutating the valuable pair and re-queueing variants
 	}
+}
+
+// isExecuting checks if this proc is currently executing a program
+// This implementation uses actual execution state tracking
+func (proc *Proc) isExecuting() bool {
+	if proc.env == nil {
+		if log.V(2) {
+			log.Logf(2, "[DDRD-DEBUG] proc %d: env is nil, considered idle", proc.pid)
+		}
+		return false
+	}
+
+	// Primary check: is the proc currently executing?
+	isCurrentlyExecuting := proc.executing.Load()
+	if isCurrentlyExecuting {
+		if log.V(2) {
+			log.Logf(2, "[DDRD-DEBUG] proc %d: currently executing (started at %v)",
+				proc.pid, proc.lastExecStart)
+		}
+		return true
+	}
+
+	// Secondary check: has it finished executing very recently? (within 100ms)
+	// This helps catch the brief gap between executions
+	now := time.Now()
+	if !proc.lastExecEnd.IsZero() {
+		timeSinceLastExec := now.Sub(proc.lastExecEnd)
+		if timeSinceLastExec < 100*time.Millisecond {
+			if log.V(2) {
+				log.Logf(2, "[DDRD-DEBUG] proc %d: recently finished executing (%v ago), considered busy",
+					proc.pid, timeSinceLastExec)
+			}
+			return true
+		}
+	}
+
+	// Check if there's ongoing execution activity (heuristic)
+	if proc.env.StatExecs > 0 || proc.env.StatRestarts > 0 {
+		if log.V(2) {
+			log.Logf(2, "[DDRD-DEBUG] proc %d: env stats indicate activity (execs=%d, restarts=%d)",
+				proc.pid, proc.env.StatExecs, proc.env.StatRestarts)
+		}
+		return true
+	}
+
+	if log.V(3) {
+		log.Logf(3, "[DDRD-DEBUG] proc %d: all checks passed, considered idle (last exec ended %v ago)",
+			proc.pid, now.Sub(proc.lastExecEnd))
+	}
+
+	return false
 }
