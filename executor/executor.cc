@@ -1738,23 +1738,75 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	}
 #endif
 
-	// UKC设置完成后，同时通知两个子进程开始执行
-	debug("Parent: UKC setup complete, signaling children to start\n");
+	// UKC设置完成后，根据不同模式采用不同的执行策略
+	debug("Parent: UKC setup complete, applying execution strategy based on lock_status=%u\n", req.lock_status);
 	char start_signal = 1;
 	
-	// 同时发送开始信号给两个子进程
-	ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
-	ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
-	
-	if (write_result1 != 1 || write_result2 != 1) {
-		debug("Parent: Failed to send start signals to children\n");
-		// 清理子进程
-		kill(pid1, SIGKILL);
-		kill(pid2, SIGKILL);
-		waitpid(pid1, nullptr, 0);
-		waitpid(pid2, nullptr, 0);
-		close(start_pipe1[1]); close(start_pipe2[1]);
-		return false;
+	if (req.lock_status == 0) { // NO_LOCKS: 轮流先运行prog1或prog2
+		// 使用attempt编号来决定顺序，实现轮流
+		static uint32_t attempt_counter = 0;
+		bool prog1_first = (attempt_counter % 2 == 0);
+		attempt_counter++;
+		
+		if (prog1_first) {
+			debug("Parent: NO_LOCKS mode - prog1 runs first, prog2 sleeps 1s\n");
+			// 先启动prog1
+			ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
+			if (write_result1 != 1) {
+				debug("Parent: Failed to send start signal to child1\n");
+				goto cleanup_children;
+			}
+			
+			// 等待1秒后启动prog2
+			sleep(1);
+			ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
+			if (write_result2 != 1) {
+				debug("Parent: Failed to send start signal to child2\n");
+				goto cleanup_children;
+			}
+		} else {
+			debug("Parent: NO_LOCKS mode - prog2 runs first, prog1 sleeps 1s\n");
+			// 先启动prog2
+			ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
+			if (write_result2 != 1) {
+				debug("Parent: Failed to send start signal to child2\n");
+				goto cleanup_children;
+			}
+			
+			// 等待1秒后启动prog1
+			sleep(1);
+			ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
+			if (write_result1 != 1) {
+				debug("Parent: Failed to send start signal to child1\n");
+				goto cleanup_children;
+			}
+		}
+	} else if (req.lock_status == 1) { // ONE_SIDED_LOCK: 无锁侧先运行
+		debug("Parent: ONE_SIDED_LOCK mode - no_lock_tid runs first, with_lock_tid sleeps 1s\n");
+		// 先启动无锁侧（child1对应no_lock_tid）
+		ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
+		if (write_result1 != 1) {
+			debug("Parent: Failed to send start signal to no_lock child\n");
+			goto cleanup_children;
+		}
+		
+		// 等待1秒后启动有锁侧（child2对应with_lock_tid）
+		sleep(1);
+		ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
+		if (write_result2 != 1) {
+			debug("Parent: Failed to send start signal to with_lock child\n");
+			goto cleanup_children;
+		}
+	} else { // 其他情况（两边锁不同等同于NO_LOCKS）
+		debug("Parent: Different locks mode (treated as NO_LOCKS) - simultaneous execution\n");
+		// 同时发送开始信号给两个子进程
+		ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
+		ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
+		
+		if (write_result1 != 1 || write_result2 != 1) {
+			debug("Parent: Failed to send start signals to children\n");
+			goto cleanup_children;
+		}
 	}
 	
 	close(start_pipe1[1]);
@@ -1762,6 +1814,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 
 	debug("Parent: Start signals sent, waiting for children to complete\n");
 
+cleanup_children:
 	// 等待两个子进程完成
 	int status1 = 0, status2 = 0;
 	for (int completed = 0; completed < 2; completed++) {
@@ -1787,14 +1840,10 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	}
 #endif
 
-	// 简单的race检测：检查是否有输出数据（意味着检测到了race）
-	bool race_detected = false;
-	if (flag_collect_race && output_pos > output_data) {
-		debug("Parent: Race validation attempt detected race activity\n");
-		race_detected = true;
-	}
-
-	return race_detected;
+	// 在validate时不需要搜集信息，只需要运行程序即可
+	// 简单返回true表示执行完成
+	debug("Parent: Race validation attempt completed\n");
+	return true;
 }
 
 // ===============DDRD====================
