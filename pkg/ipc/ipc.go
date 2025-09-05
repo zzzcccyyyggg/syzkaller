@@ -110,6 +110,27 @@ type PairProgInfo struct {
 	MayRacePairs []ddrd.MayRacePair // store the detail information of each pair
 }
 
+// Race validation related structures
+type RaceValidationOpts struct {
+	Opts1      *ExecOpts // Options for first program
+	Opts2      *ExecOpts // Options for second program
+	RaceSignal uint64
+	VarName1   uint64
+	VarName2   uint64
+	CallStack1 uint64
+	CallStack2 uint64
+	Sn1        uint64
+	Sn2        uint64
+	LockStatus uint32
+	Attempts   int
+}
+
+type RaceValidationResult struct {
+	RaceDetected bool
+	Attempts     int
+	Details      string
+}
+
 type Env struct {
 	in  []byte
 	out []byte
@@ -702,6 +723,88 @@ func (env *Env) ExecPairWithOpts(pairOpts *ExecPairOpts, p1, p2 *prog.Prog) (
 	return env.ExecPair(opts1, opts2, p1, p2)
 }
 
+// RaceValidation executes race validation using executor's standalone race validation mode
+func (env *Env) RaceValidation(opts *RaceValidationOpts, p1, p2 *prog.Prog) (output []byte, hanged bool, err0 error) {
+	if p1 == nil || p2 == nil {
+		err0 = fmt.Errorf("both programs must be non-nil")
+		return nil, false, err0
+	}
+
+	if opts.Opts1 == nil {
+		opts.Opts1 = &ExecOpts{}
+	}
+	if opts.Opts2 == nil {
+		opts.Opts2 = &ExecOpts{}
+	}
+
+	if opts.Attempts <= 0 {
+		opts.Attempts = 1
+	}
+
+	// Serialize both programs
+	prog1Size, err := p1.SerializeForExec(env.in)
+	if err != nil {
+		err0 = fmt.Errorf("failed to serialize program 1: %w", err)
+		return
+	}
+
+	// Use a separate buffer for the second program to avoid overwriting env.in
+	prog2Buffer := make([]byte, prog.ExecBufferSize)
+	prog2Size, err := p2.SerializeForExec(prog2Buffer)
+	if err != nil {
+		err0 = fmt.Errorf("failed to serialize program 2: %w", err)
+		return
+	}
+	var prog1Data, prog2Data []byte
+	if !env.config.UseShmem {
+		// Pipe mode: send program data through pipes
+		prog1Data = env.in[:prog1Size]
+		prog2Data = prog2Buffer[:prog2Size]
+	} else {
+		// Shared memory mode: programs are already in shared memory
+		// For shmem mode with two programs, we need to handle this carefully
+
+		// Ensure program 2 starts at 8-byte aligned boundary
+		alignedProg1Size := (prog1Size + 7) &^ 7 // Round up to next 8-byte boundary
+
+		if alignedProg1Size+prog2Size > len(env.in) {
+			err0 = fmt.Errorf("programs too large for shared memory buffer (aligned size: %d)", alignedProg1Size+prog2Size)
+			return
+		}
+
+		// Clear any padding between prog1 and prog2
+		for i := prog1Size; i < alignedProg1Size; i++ {
+			env.in[i] = 0
+		}
+
+		// Copy second program data starting at aligned position
+		copy(env.in[alignedProg1Size:], prog2Buffer[:prog2Size])
+
+		// In shmem mode, progData should be nil since data is already in shared memory
+		prog1Data = nil
+		prog2Data = nil
+	}
+
+	// Clear output buffer for race data
+	for i := 0; i < 8; i++ {
+		env.out[i] = 0
+	}
+
+	err0 = env.RestartIfNeeded(p1.Target)
+	if err0 != nil {
+		return
+	}
+
+	output, hanged, err0 = env.cmd.execRaceValidation(opts, prog1Data, prog2Data, int(prog1Size), int(prog2Size))
+	if err0 != nil {
+		env.cmd.close()
+		env.cmd = nil
+		return
+	}
+
+	return
+}
+
 func (env *Env) ForceRestart() {
 	if env.cmd != nil {
 		env.cmd.close()
@@ -978,10 +1081,12 @@ type command struct {
 }
 
 const (
-	inMagic      = uint64(0xbadc0ffeebadface)
-	inPairMagic  = uint64(0xbadc0ffeebadfa0e) // Magic for pair execution requests
-	outMagic     = uint32(0xbadf00d)
-	outPairMagic = uint32(0xbadfeed)
+	inMagic                = uint64(0xbadc0ffeebadface)
+	inPairMagic            = uint64(0xbadc0ffeebadfa0e) // Magic for pair execution requests
+	inRaceValidationMagic  = uint64(0xbadc0ffeebadfade) // Magic for race validation requests
+	outMagic               = uint32(0xbadf00d)
+	outPairMagic           = uint32(0xbadfeed)
+	outRaceValidationMagic = uint32(0xbadfa1d)
 )
 
 type handshakeReq struct {
@@ -1021,6 +1126,23 @@ type executePairReq struct {
 	prog1Size        uint64 // size of first program
 	prog2Size        uint64 // size of second program
 	// This structure is followed by two serialized test programs in encodingexec format.
+}
+
+// raceValidationReq is for race validation execution
+type raceValidationReq struct {
+	magic        uint64
+	prog1Size    uint64
+	prog2Size    uint64
+	raceSignal   uint64
+	varName1     uint64
+	varName2     uint64
+	callStack1   uint64
+	callStack2   uint64
+	sn1          uint64
+	sn2          uint64
+	lockStatus   uint32
+	attemptCount uint32
+	// This structure is followed by two serialized test programs
 }
 
 type executeReply struct {
@@ -1340,6 +1462,109 @@ func (c *command) exec(opts *ExecOpts, progData []byte) (output []byte, hanged b
 	// with fork server the top process can exit with statusFail if it wants special handling.
 	if exitStatus == statusFail {
 		err0 = fmt.Errorf("executor %v: exit status %d err %w\n%s", c.pid, exitStatus, err, output)
+	}
+	return
+}
+
+func (c *command) execRaceValidation(opts *RaceValidationOpts, prog1Data, prog2Data []byte, prog1Size, prog2Size int) (output []byte, hanged bool, err0 error) {
+	req := &raceValidationReq{
+		magic:        inRaceValidationMagic,
+		prog1Size:    uint64(prog1Size),
+		prog2Size:    uint64(prog2Size),
+		raceSignal:   opts.RaceSignal,
+		varName1:     opts.VarName1,
+		varName2:     opts.VarName2,
+		callStack1:   opts.CallStack1,
+		callStack2:   opts.CallStack2,
+		sn1:          opts.Sn1,
+		sn2:          opts.Sn2,
+		lockStatus:   opts.LockStatus,
+		attemptCount: uint32(opts.Attempts),
+	}
+
+	reqData := (*[unsafe.Sizeof(*req)]byte)(unsafe.Pointer(req))[:]
+	if _, err := c.outwp.Write(reqData); err != nil {
+		output = <-c.readDone
+		err0 = fmt.Errorf("executor %v: failed to write race validation control pipe: %w", c.pid, err)
+		return
+	}
+
+	// Write program 1 data
+	if _, err := c.outwp.Write(prog1Data); err != nil {
+		output = <-c.readDone
+		err0 = fmt.Errorf("executor %v: failed to write prog1 data: %w", c.pid, err)
+		return
+	}
+
+	// Write program 2 data
+	if _, err := c.outwp.Write(prog2Data); err != nil {
+		output = <-c.readDone
+		err0 = fmt.Errorf("executor %v: failed to write prog2 data: %w", c.pid, err)
+		return
+	}
+
+	// Wait for execution with timeout
+	done := make(chan bool)
+	hang := make(chan bool)
+	go func() {
+		t := time.NewTimer(c.timeout)
+		select {
+		case <-t.C:
+			c.cmd.Process.Kill()
+			hang <- true
+		case <-done:
+			t.Stop()
+			hang <- false
+		}
+	}()
+
+	exitStatus := -1
+
+	reply := &executeReply{}
+	replyData := (*[unsafe.Sizeof(*reply)]byte)(unsafe.Pointer(reply))[:]
+	if _, err := io.ReadFull(c.inrp, replyData); err != nil {
+		close(done)
+		if <-hang {
+			hanged = true
+		}
+		output = <-c.readDone
+		err0 = fmt.Errorf("executor %v: failed to read pair completion: %w", c.pid, err)
+		return
+	}
+
+	if reply.magic != outMagic {
+		fmt.Fprintf(os.Stderr, "executor %v: got bad pair reply magic 0x%x\n", c.pid, reply.magic)
+		os.Exit(1)
+	}
+
+	if exitStatus == 0 {
+		// Pair execution was OK.
+		<-hang
+		return
+	}
+
+	c.cmd.Process.Kill()
+	output = <-c.readDone
+	err := c.wait()
+	if err != nil {
+		output = append(output, err.Error()...)
+		output = append(output, '\n')
+	}
+	if <-hang {
+		hanged = true
+		return
+	}
+
+	if exitStatus == -1 {
+		if c.cmd.ProcessState == nil {
+			exitStatus = statusFail
+		} else {
+			exitStatus = osutil.ProcessExitStatus(c.cmd.ProcessState)
+		}
+	}
+
+	if exitStatus == statusFail {
+		err0 = fmt.Errorf("executor %v: validate exit status %d err %w\n%s", c.pid, exitStatus, err, output)
 	}
 	return
 }

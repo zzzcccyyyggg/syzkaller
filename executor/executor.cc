@@ -4,8 +4,10 @@
 // +build
 
 #include <algorithm>
+#include <cstdint>
 #include <errno.h>
 #include <limits.h>
+#include <linux/if_link.h>
 #include <signal.h>
 #include <stdarg.h>
 #include <stddef.h>
@@ -332,6 +334,13 @@ struct PairSyscallTiming {
 	bool valid; // whether this record is valid
 };
 
+// 子进程线程信息结构
+struct child_thread_info {
+	pid_t pid;
+	pid_t tid;
+	bool ready;
+};
+
 // Shared memory structure for inter-process communication
 struct PairSyscallSharedData {
 	PairSyscallTiming prog1_syscalls[MAX_PAIR_SYSCALLS];
@@ -487,6 +496,8 @@ const uint32 kOutMagic = 0xbadf00d;
 // ===============DDRD====================
 const uint32 kOutPairMagic = 0xbadfeed;
 const uint64 kInPairMagic = 0xbadc0ffeebadfa0e; // Different magic for pair requests
+const uint64 kRaceValidationInMagic = 0xbadc0ffeebadfade;
+// const uint32 kRaceValidationOutMagic = 0xbadfa1d;
 // ===============DDRD====================
 
 struct handshake_req {
@@ -529,6 +540,27 @@ struct execute_pair_req {
 // Function declarations that depend on execute_pair_req
 static void execute_pair(const execute_pair_req& req);
 void receive_execute_pair_internal(const execute_pair_req& req);
+
+struct race_validation_req {
+    uint64 magic;
+    uint64 prog1_size;
+    uint64 prog2_size;
+    uint64 race_signal;
+    uint64 var_name1;
+	uint64 var_name2;
+	uint64 call_stack1;
+	uint64 call_stack2;
+	uint64 sn1;
+	uint64 sn2;
+    uint32 lock_status;
+    uint32 attempt_count;
+    uint64 timeout_ms;
+};
+
+static void race_validate(const race_validation_req);
+void receive_race_validation_internal(const race_validation_req& req);
+static bool execute_race_validation_attempt(const race_validation_req& req);
+
 // ===============DDRD====================
 
 struct execute_reply {
@@ -964,6 +996,21 @@ int receive_execute_dispatch()
 		receive_execute_pair_internal(req);
 		execute_pair(req); // Pass req directly instead of using global variable
 		return 0;
+	} else if (magic == kRaceValidationInMagic) {
+		// Race validation request
+		race_validation_req req;
+		req.magic = magic; // Set the magic we already read
+		char* req_ptr = (char*)&req + sizeof(magic); // Point to after magic field
+		size_t remaining_size = sizeof(req) - sizeof(magic);
+		if (read(kInPipeFd, req_ptr, remaining_size) != (ssize_t)remaining_size)
+			fail("failed to read race validation request");
+		debug("Race validation request: prog1_size=%llu, prog2_size=%llu, race_signal=%llx, var_name1=%llx, var_name2=%llx\n",
+			  req.prog1_size, req.prog2_size, req.race_signal, req.var_name1, req.var_name2);
+		
+		// Process the race validation request
+		receive_race_validation_internal(req);
+		race_validate(req);
+		return 0;
 	} else {
 		failmsg("unknown request magic", "magic=0x%llx", magic);
 	}
@@ -1398,6 +1445,359 @@ void execute_pair(const execute_pair_req& req)
 #endif
 	reply_execute(final_status);
 }
+
+// ===============DDRD Race Validation====================
+void receive_race_validation_internal(const race_validation_req& req)
+{
+	debug("Race validation internal: prog1_size=%llu, prog2_size=%llu\n", 
+		  req.prog1_size, req.prog2_size);
+	
+	if (req.magic != kRaceValidationInMagic)
+		failmsg("bad race validation request magic", "magic=0x%llx", req.magic);
+	if (req.prog1_size > kMaxInput || req.prog2_size > kMaxInput)
+		failmsg("bad race validation prog size", "size1=0x%llx size2=0x%llx", 
+				req.prog1_size, req.prog2_size);
+	
+	// 设置基本参数
+	procid = 1; // 固定procid用于race validation
+	syscall_timeout_ms = req.timeout_ms > 0 ? req.timeout_ms : 5000; // 默认5秒超时
+	program_timeout_ms = req.timeout_ms > 0 ? req.timeout_ms : 10000; // 默认10秒程序超时
+	slowdown_scale = 1;
+	
+	// 设置race validation相关flags
+	flag_collect_signal = false;
+	flag_collect_cover = false;
+	flag_collect_race = true;  // 启用race collection
+	flag_debug = true;         // 启用调试输出
+	flag_test_pair_sync = true; // 启用同步执行
+	
+	// 调用race validation逻辑
+	race_validate(req);
+}
+
+static void race_validate(const race_validation_req req)
+{
+	debug("Starting race validation: race_signal=0x%llx, var_name1=0x%llx, var_name2=0x%llx\n",
+		  req.race_signal, req.var_name1, req.var_name2);
+	debug("Lock status: %u, attempt_count: %u\n", req.lock_status, req.attempt_count);
+
+#if SYZ_EXECUTOR_USES_SHMEM
+	// 初始化输出数据缓冲区
+	realloc_output_data();
+	output_pos = output_data;
+#endif
+
+	// 执行多次尝试race validation
+	int successful_attempts = 0;
+	debug("Starting %u validation attempts\n", req.attempt_count);
+	
+	for (uint32_t attempt = 0; attempt < req.attempt_count; attempt++) {
+		debug("Race validation attempt %u/%u\n", attempt + 1, req.attempt_count);
+		
+		// 清理之前的状态
+		if (pair_shared_data == nullptr) {
+			create_pair_syscall_shared_memory();
+		}
+		clear_pair_syscall_timing();
+		
+		// 重置输出缓冲区位置
+		output_pos = output_data;
+		
+		// 执行同步的race validation（参考execute_pair的逻辑）
+		bool race_reproduced = execute_race_validation_attempt(req);
+		
+		if (race_reproduced) {
+			successful_attempts++;
+			debug("Race validation attempt %u: SUCCESS\n", attempt + 1);
+		} else {
+			debug("Race validation attempt %u: FAILED\n", attempt + 1);
+		}
+		
+		// 短暂延时避免系统负载过高
+		if (attempt < req.attempt_count - 1) {
+			usleep(1000); // 1ms延时
+		}
+	}
+	
+	// 计算成功率
+	double success_rate = (double)successful_attempts / req.attempt_count;
+	debug("Race validation completed: %d/%u successful (%.2f%%)\n", 
+		  successful_attempts, req.attempt_count, success_rate * 100.0);
+
+	// 清理资源
+	cleanup_pair_syscall_shared_memory();
+	
+	// 发送completion信号（简化版，不需要详细结果）
+	reply_execute(0);
+}
+
+// 执行单次race validation尝试
+static bool execute_race_validation_attempt(const race_validation_req& req)
+{
+	// 创建线程信息收集管道 - 子进程向父进程报告线程号
+	int tid_pipe1[2], tid_pipe2[2]; // 用于子进程报告线程号
+	int start_pipe1[2], start_pipe2[2]; // 用于父进程通知子进程开始执行
+	
+	if (pipe(tid_pipe1) || pipe(tid_pipe2) || pipe(start_pipe1) || pipe(start_pipe2)) {
+		debug("Failed to create communication pipes\n");
+		return false;
+	}
+
+	child_thread_info child1_info = {0}, child2_info = {0};
+
+	// Fork第一个子进程执行程序1
+	pid_t pid1 = fork();
+	if (pid1 < 0) {
+		debug("Failed to fork for prog1\n");
+		// 关闭所有管道
+		close(tid_pipe1[0]); close(tid_pipe1[1]);
+		close(tid_pipe2[0]); close(tid_pipe2[1]);
+		close(start_pipe1[0]); close(start_pipe1[1]);
+		close(start_pipe2[0]); close(start_pipe2[1]);
+		return false;
+	}
+
+	if (pid1 == 0) {
+		// 子进程1：执行程序1
+		is_pair_prog1 = true;
+		is_pair_prog2 = false;
+
+		// 关闭不需要的管道端
+		close(tid_pipe1[0]); // 关闭读端
+		close(tid_pipe2[0]); close(tid_pipe2[1]); // 关闭prog2的管道
+		close(start_pipe1[1]); // 关闭写端
+		close(start_pipe2[0]); close(start_pipe2[1]); // 关闭prog2的管道
+
+		// 获取并发送线程号给父进程
+		pid_t my_tid = gettid();
+		child_thread_info my_info = {getpid(), my_tid, true};
+		if (write(tid_pipe1[1], &my_info, sizeof(my_info)) != sizeof(my_info)) {
+			debug("Child1: Failed to send thread info\n");
+			doexit(1);
+		}
+		close(tid_pipe1[1]);
+		
+		debug("Child1: Sent TID %d to parent, waiting for start signal\n", my_tid);
+
+		// 等待父进程的开始信号
+		char start_signal;
+		ssize_t read_result = read(start_pipe1[0], &start_signal, 1);
+		if (read_result != 1) {
+			debug("Child1: Failed to receive start signal\n");
+			doexit(1);
+		}
+		close(start_pipe1[0]);
+		
+		debug("Child1: Received start signal, beginning execution\n");
+
+		execute_one();
+		doexit(0);
+	}
+
+	// 记录子进程1信息
+	child1_info.pid = pid1;
+
+	// Fork第二个子进程执行程序2  
+	pid_t pid2 = fork();
+	if (pid2 < 0) {
+		debug("Failed to fork for prog2\n");
+		kill(pid1, SIGKILL);
+		waitpid(pid1, nullptr, 0);
+		// 关闭剩余管道
+		close(tid_pipe1[0]); close(tid_pipe1[1]);
+		close(tid_pipe2[0]); close(tid_pipe2[1]);
+		close(start_pipe1[0]); close(start_pipe1[1]);
+		close(start_pipe2[0]); close(start_pipe2[1]);
+		return false;
+	}
+
+	if (pid2 == 0) {
+		// 子进程2：执行程序2
+		is_pair_prog1 = false;
+		is_pair_prog2 = true;
+
+		// 关闭不需要的管道端
+		close(tid_pipe2[0]); // 关闭读端
+		close(tid_pipe1[0]); close(tid_pipe1[1]); // 关闭prog1的管道
+		close(start_pipe2[1]); // 关闭写端
+		close(start_pipe1[0]); close(start_pipe1[1]); // 关闭prog1的管道
+
+		// 获取并发送线程号给父进程
+		pid_t my_tid = gettid();
+		child_thread_info my_info = {getpid(), my_tid, true};
+		if (write(tid_pipe2[1], &my_info, sizeof(my_info)) != sizeof(my_info)) {
+			debug("Child2: Failed to send thread info\n");
+			doexit(1);
+		}
+		close(tid_pipe2[1]);
+		
+		debug("Child2: Sent TID %d to parent, waiting for start signal\n", my_tid);
+
+		// 等待父进程的开始信号
+		char start_signal;
+		ssize_t read_result = read(start_pipe2[0], &start_signal, 1);
+		if (read_result != 1) {
+			debug("Child2: Failed to receive start signal\n");
+			doexit(1);
+		}
+		close(start_pipe2[0]);
+		
+		debug("Child2: Received start signal, beginning execution\n");
+
+		// 切换到程序2的数据
+		uint64 aligned_offset = (req.prog1_size + 7) & ~7ULL;
+		input_data = input_data + aligned_offset;
+
+		execute_one();
+		doexit(0);
+	}
+
+	// 记录子进程2信息
+	child2_info.pid = pid2;
+
+	// 父进程：收集两个子进程的线程号
+	// 关闭不需要的管道端
+	close(tid_pipe1[1]); close(tid_pipe2[1]); // 关闭写端
+	close(start_pipe1[0]); close(start_pipe2[0]); // 关闭读端
+
+	debug("Parent: Waiting for thread info from both children\n");
+
+	bool success = true;
+	
+	// 收集子进程1的线程信息
+	if (read(tid_pipe1[0], &child1_info, sizeof(child1_info)) != sizeof(child1_info)) {
+		debug("Parent: Failed to receive thread info from child1\n");
+		success = false;
+	}
+	close(tid_pipe1[0]);
+	
+	if (success) {
+		debug("Parent: Received child1 info - PID:%d, TID:%d\n", child1_info.pid, child1_info.tid);
+
+		// 收集子进程2的线程信息
+		if (read(tid_pipe2[0], &child2_info, sizeof(child2_info)) != sizeof(child2_info)) {
+			debug("Parent: Failed to receive thread info from child2\n");
+			success = false;
+		}
+	}
+	close(tid_pipe2[0]);
+	
+	if (success) {
+		debug("Parent: Received child2 info - PID:%d, TID:%d\n", child2_info.pid, child2_info.tid);
+	}
+
+	if (!success) {
+		// 清理子进程
+		kill(pid1, SIGKILL);
+		kill(pid2, SIGKILL);
+		waitpid(pid1, nullptr, 0);
+		waitpid(pid2, nullptr, 0);
+		close(start_pipe1[1]); close(start_pipe2[1]);
+		return false;
+	}
+
+#if GOOS_linux
+	// 现在设置UKC信息，使用实际的线程号
+	if (ukc_controller) {
+		if (req.lock_status == 0) { // NO_LOCKS
+			debug("Parent: Setting no-lock reproduction mode with TID %d\n", child1_info.tid);
+			nolockreproduce_info_t info = {
+				.var_name = req.var_name1,
+				.stack_hash = req.call_stack1, 
+				.tid = child1_info.tid, // 使用实际的线程ID
+				.sn = (int)req.sn1
+			};
+			if (ukc_ctl_set_nolockrepro_info(ukc_controller, info) != 0) {
+				debug("Parent: Failed to set no-lock repro info\n");
+			} else {
+				debug("Parent: Successfully set no-lock repro info\n");
+			}
+		} else if (req.lock_status == 1) { // ONE_SIDED_LOCK  
+			debug("Parent: Setting one-sided lock reproduction mode with TIDs %d and %d\n", 
+				  child1_info.tid, child2_info.tid);
+			onesidedreproduce_info_t info = {
+				.var_name = req.var_name1,
+				.stack_hash = req.call_stack1,
+				.no_lock_tid = child1_info.tid,   // 使用实际的线程ID
+				.with_lock_tid = child2_info.tid, // 使用实际的线程ID
+				.sn = (int)req.sn1
+			};
+			if (ukc_ctl_set_onesidedrepro_info(ukc_controller, info) != 0) {
+				debug("Parent: Failed to set one-sided lock repro info\n");  
+			} else {
+				debug("Parent: Successfully set one-sided lock repro info\n");
+			}
+		}
+		
+		// 启动CHECK_SYNC模式进行race validation
+		if (ukc_ctl_start_check_sync(ukc_controller) == 0) {
+			debug("Parent: UKC switched to CHECK_SYNC mode for race validation\n");
+		} else {
+			debug("Parent: Failed to switch UKC to CHECK_SYNC mode\n");
+		}
+	}
+#endif
+
+	// UKC设置完成后，同时通知两个子进程开始执行
+	debug("Parent: UKC setup complete, signaling children to start\n");
+	char start_signal = 1;
+	
+	// 同时发送开始信号给两个子进程
+	ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
+	ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
+	
+	if (write_result1 != 1 || write_result2 != 1) {
+		debug("Parent: Failed to send start signals to children\n");
+		// 清理子进程
+		kill(pid1, SIGKILL);
+		kill(pid2, SIGKILL);
+		waitpid(pid1, nullptr, 0);
+		waitpid(pid2, nullptr, 0);
+		close(start_pipe1[1]); close(start_pipe2[1]);
+		return false;
+	}
+	
+	close(start_pipe1[1]);
+	close(start_pipe2[1]);
+
+	debug("Parent: Start signals sent, waiting for children to complete\n");
+
+	// 等待两个子进程完成
+	int status1 = 0, status2 = 0;
+	for (int completed = 0; completed < 2; completed++) {
+		int status;
+		pid_t finished = waitpid(-1, &status, 0);
+		if (finished == pid1) {
+			status1 = status;
+			debug("Parent: Child1 (PID:%d) completed with status %d\n", pid1, status1);
+		} else if (finished == pid2) {
+			status2 = status;
+			debug("Parent: Child2 (PID:%d) completed with status %d\n", pid2, status2);
+		}
+	}
+
+#if GOOS_linux
+	// 切换回MONITOR模式
+	if (ukc_controller) {
+		if (ukc_ctl_start_monitor(ukc_controller) == 0) {
+			debug("Parent: UKC switched back to MONITOR mode\n");
+		} else {
+			debug("Parent: Failed to switch UKC back to MONITOR mode\n");
+		}
+	}
+#endif
+
+	// 简单的race检测：检查是否有输出数据（意味着检测到了race）
+	bool race_detected = false;
+	if (flag_collect_race && output_pos > output_data) {
+		debug("Parent: Race validation attempt detected race activity\n");
+		race_detected = true;
+	}
+
+	return race_detected;
+}
+
+// ===============DDRD====================
 // ===============DDRD====================
 bool cover_collection_required()
 {

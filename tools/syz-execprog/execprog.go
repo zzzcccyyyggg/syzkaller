@@ -53,6 +53,18 @@ var (
 	// Note, however, that we do not have to do the same for `syz-prog2c`, as `collide` was there false
 	// by default.
 	flagCollide = flag.Bool("collide", false, "(DEPRECATED) collide syscalls to provoke data races")
+
+	// Race validation flags
+	flagRaceValidation = flag.Bool("race-validation", false, "enable race validation mode")
+	flagRaceSignal     = flag.Uint64("race-signal", 0, "race signal for validation")
+	flagVarName1       = flag.Uint64("var-name1", 0, "variable name 1 for race validation")
+	flagVarName2       = flag.Uint64("var-name2", 0, "variable name 2 for race validation")
+	flagCallStack1     = flag.Uint64("call-stack1", 0, "call stack 1 for race validation")
+	flagCallStack2     = flag.Uint64("call-stack2", 0, "call stack 2 for race validation")
+	flagSn1            = flag.Uint64("sn1", 0, "sequence number 1 for race validation")
+	flagSn2            = flag.Uint64("sn2", 0, "sequence number 2 for race validation")
+	flagLockStatus     = flag.Uint("lock-status", 0, "lock status for race validation")
+	flagAttempts       = flag.Int("attempts", 1, "number of validation attempts")
 )
 
 func main() {
@@ -74,6 +86,38 @@ func main() {
 	target, err := prog.GetTarget(*flagOS, *flagArch)
 	if err != nil {
 		log.Fatalf("%v", err)
+	}
+
+	// Handle race validation mode early - use specialized loading
+	if *flagRaceValidation {
+		if len(flag.Args()) != 2 {
+			log.Fatalf("race validation mode requires exactly 2 program files, got %d", len(flag.Args()))
+		}
+		if *flagRaceSignal == 0 {
+			log.Fatalf("race validation mode requires -race-signal parameter")
+		}
+
+		// Load program pair from two separate files
+		prog1, prog2, err := loadRaceValidationPrograms(target, flag.Args()[0], flag.Args()[1])
+		if err != nil {
+			log.Fatalf("failed to load race validation programs: %v", err)
+		}
+
+		features, err := host.Check(target)
+		if err != nil {
+			log.Fatalf("%v", err)
+		}
+
+		config, _ := createConfig(target, features, featuresFlags)
+		if err = host.Setup(target, features, featuresFlags, config.Executor); err != nil {
+			log.Fatal(err)
+		}
+
+		sysTarget := targets.Get(*flagOS, *flagArch)
+
+		// Execute race validation
+		executeRaceValidation(prog1, prog2, config, sysTarget)
+		return
 	}
 
 	progs := loadPrograms(target, flag.Args())
@@ -108,6 +152,7 @@ func main() {
 	}
 	sysTarget := targets.Get(*flagOS, *flagArch)
 	upperBase := getKernelUpperBase(sysTarget)
+
 	ctx := &Context{
 		progs:     progs,
 		config:    config,
@@ -347,6 +392,54 @@ func loadPrograms(target *prog.Target, files []string) []*prog.Prog {
 	return progs
 }
 
+// loadRaceValidationPrograms loads a program pair from two separate files for race validation
+func loadRaceValidationPrograms(target *prog.Target, prog1File, prog2File string) (*prog.Prog, *prog.Prog, error) {
+	// Load program 1
+	prog1Data, err := os.ReadFile(prog1File)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read program 1 file %s: %w", prog1File, err)
+	}
+
+	// Parse program 1 - try to get the first program from the file
+	prog1Entries := target.ParseLog(prog1Data)
+	if len(prog1Entries) == 0 {
+		return nil, nil, fmt.Errorf("no valid programs found in file %s", prog1File)
+	}
+	if len(prog1Entries) > 1 {
+		log.Logf(1, "warning: file %s contains %d programs, using the first one", prog1File, len(prog1Entries))
+	}
+	prog1 := prog1Entries[0].P
+
+	// Load program 2
+	prog2Data, err := os.ReadFile(prog2File)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to read program 2 file %s: %w", prog2File, err)
+	}
+
+	// Parse program 2 - try to get the first program from the file
+	prog2Entries := target.ParseLog(prog2Data)
+	if len(prog2Entries) == 0 {
+		return nil, nil, fmt.Errorf("no valid programs found in file %s", prog2File)
+	}
+	if len(prog2Entries) > 1 {
+		log.Logf(1, "warning: file %s contains %d programs, using the first one", prog2File, len(prog2Entries))
+	}
+	prog2 := prog2Entries[0].P
+
+	// Validate programs
+	if prog1 == nil {
+		return nil, nil, fmt.Errorf("failed to parse program from file %s", prog1File)
+	}
+	if prog2 == nil {
+		return nil, nil, fmt.Errorf("failed to parse program from file %s", prog2File)
+	}
+
+	log.Logf(0, "loaded program pair: prog1 (%d syscalls) from %s, prog2 (%d syscalls) from %s",
+		len(prog1.Calls), prog1File, len(prog2.Calls), prog2File)
+
+	return prog1, prog2, nil
+}
+
 func createConfig(target *prog.Target, features *host.Features, featuresFlags csource.Features) (
 	*ipc.Config, *ipc.ExecOpts) {
 	config, execOpts, err := ipcconfig.Default(target)
@@ -401,4 +494,56 @@ func createConfig(target *prog.Target, features *host.Features, featuresFlags cs
 		config.Flags |= ipc.FlagEnableWifi
 	}
 	return config, execOpts
+}
+
+// executeRaceValidation performs race validation using direct IPC call
+func executeRaceValidation(prog1, prog2 *prog.Prog, config *ipc.Config, target *targets.Target) {
+	log.Logf(0, "Starting race validation...")
+	log.Logf(0, "Program 1: %d syscalls", len(prog1.Calls))
+	log.Logf(0, "Program 2: %d syscalls", len(prog2.Calls))
+	log.Logf(0, "Race Signal: 0x%x", *flagRaceSignal)
+
+	if *flagOutput {
+		log.Logf(0, "Program 1:\n%s", prog1.Serialize())
+		log.Logf(0, "Program 2:\n%s", prog2.Serialize())
+	}
+
+	// Create IPC environment
+	env, err := ipc.MakeEnv(config, 0)
+	if err != nil {
+		log.Fatalf("failed to create ipc env: %v", err)
+	}
+	defer env.Close()
+
+	// Setup race validation options
+	opts := &ipc.RaceValidationOpts{
+		Opts1:      &ipc.ExecOpts{},
+		Opts2:      &ipc.ExecOpts{},
+		RaceSignal: *flagRaceSignal,
+		VarName1:   *flagVarName1,
+		VarName2:   *flagVarName2,
+		CallStack1: *flagCallStack1,
+		CallStack2: *flagCallStack2,
+		Sn1:        *flagSn1,
+		Sn2:        *flagSn2,
+		LockStatus: uint32(*flagLockStatus),
+		Attempts:   *flagAttempts,
+	}
+
+	log.Logf(0, "Executing race validation with %d attempts...", *flagAttempts)
+
+	// Execute race validation
+	output, hanged, err := env.RaceValidation(opts, prog1, prog2)
+
+	// Report results
+	log.Logf(0, "Race validation completed.")
+	if err != nil {
+		log.Logf(0, "Error: %v", err)
+	}
+	if hanged {
+		log.Logf(0, "Warning: Execution hanged")
+	}
+	if len(output) > 0 {
+		log.Logf(0, "Output:\n%s", output)
+	}
 }

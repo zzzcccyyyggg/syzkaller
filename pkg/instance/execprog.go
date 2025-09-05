@@ -184,6 +184,45 @@ func (inst *ExecProgInstance) RunSyzProg(syzProg []byte, duration time.Duration,
 	return inst.RunSyzProgFile(progFile, duration, opts)
 }
 
+func (inst *ExecProgInstance) RunRaceValidation(prog1Data, prog2Data []byte, duration time.Duration,
+	raceSignal, varName1, varName2, callStack1, callStack2, sn1, sn2 uint64,
+	lockStatus uint32, attempts int) (*RunResult, error) {
+
+	// Create temporary files for both programs
+	prog1File, err := osutil.WriteTempFile(prog1Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write prog1 temp file: %v", err)
+	}
+	defer os.Remove(prog1File)
+
+	prog2File, err := osutil.WriteTempFile(prog2Data)
+	if err != nil {
+		return nil, fmt.Errorf("failed to write prog2 temp file: %v", err)
+	}
+	defer os.Remove(prog2File)
+
+	// Copy programs to VM
+	vmProg1, err := inst.VMInstance.Copy(prog1File)
+	if err != nil {
+		return nil, &TestError{Title: fmt.Sprintf("failed to copy prog1 to VM: %v", err)}
+	}
+
+	vmProg2, err := inst.VMInstance.Copy(prog2File)
+	if err != nil {
+		return nil, &TestError{Title: fmt.Sprintf("failed to copy prog2 to VM: %v", err)}
+	}
+
+	target := inst.mgrCfg.SysTarget
+
+	// Build race validation command
+	command := RaceValidationCmd(inst.execprogBin, inst.executorBin, target.OS, target.Arch,
+		raceSignal, varName1, varName2, callStack1, callStack2, sn1, sn2,
+		lockStatus, attempts, !inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown,
+		vmProg1, vmProg2)
+
+	return inst.runCommand(command, duration)
+}
+
 func (inst *ExecProgInstance) Close() {
 	inst.VMInstance.Close()
 }

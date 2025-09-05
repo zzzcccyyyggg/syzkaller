@@ -556,6 +556,32 @@ func ExecprogCmd(execprog, executor, OS, arch, sandbox string, sandboxArg int, r
 		optionalArg, progFile)
 }
 
+// RaceValidationCmd builds command for race validation execution in syz-execprog
+func RaceValidationCmd(execprog, executor, OS, arch string, raceSignal, varName1, varName2,
+	callStack1, callStack2, sn1, sn2 uint64, lockStatus uint32, attempts int,
+	optionalFlags bool, slowdown int, prog1File, prog2File string) string {
+	osArg := ""
+	if targets.Get(OS, arch).HostFuzzer {
+		osArg = " -os=" + OS
+	}
+
+	optionalArg := ""
+	if optionalFlags {
+		optionalArg = " " + tool.OptionalFlags([]tool.Flag{
+			{Name: "slowdown", Value: fmt.Sprint(slowdown)},
+		})
+	}
+
+	return fmt.Sprintf("%v -executor=%v -arch=%v%v -race-validation"+
+		" -race-signal=%v -var-name1=%v -var-name2=%v"+
+		" -call-stack1=%v -call-stack2=%v -sn1=%v -sn2=%v"+
+		" -lock-status=%v -attempts=%v%v %v %v",
+		execprog, executor, arch, osArg,
+		raceSignal, varName1, varName2,
+		callStack1, callStack2, sn1, sn2,
+		lockStatus, attempts, optionalArg, prog1File, prog2File)
+}
+
 var MakeBin = func() string {
 	if runtime.GOOS == targets.FreeBSD || runtime.GOOS == targets.OpenBSD {
 		return "gmake"
