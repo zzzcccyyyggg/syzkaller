@@ -554,7 +554,6 @@ struct race_validation_req {
 	uint64 sn2;
     uint32 lock_status;
     uint32 attempt_count;
-    uint64 timeout_ms;
 };
 
 static void race_validate(const race_validation_req);
@@ -1460,8 +1459,8 @@ void receive_race_validation_internal(const race_validation_req& req)
 	
 	// 设置基本参数
 	procid = 1; // 固定procid用于race validation
-	syscall_timeout_ms = req.timeout_ms > 0 ? req.timeout_ms : 5000; // 默认5秒超时
-	program_timeout_ms = req.timeout_ms > 0 ? req.timeout_ms : 10000; // 默认10秒程序超时
+	syscall_timeout_ms = 5000;  // 默认5秒超时
+	program_timeout_ms = 10000; // 默认10秒程序超时
 	slowdown_scale = 1;
 	
 	// 设置race validation相关flags
@@ -1729,11 +1728,26 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			}
 		}
 		
-		// 启动CHECK_SYNC模式进行race validation
-		if (ukc_ctl_start_check_sync(ukc_controller) == 0) {
-			debug("Parent: UKC switched to CHECK_SYNC mode for race validation\n");
+		// 根据lock_status启动相应的reproduction模式进行race validation
+		if (req.lock_status == 0) { // NO_LOCKS
+			if (ukc_ctl_start_nolockreproduce(ukc_controller) == 0) {
+				debug("Parent: UKC switched to NO_LOCK_REPRODUCE mode for race validation\n");
+			} else {
+				debug("Parent: Failed to switch UKC to NO_LOCK_REPRODUCE mode\n");
+			}
+		} else if (req.lock_status == 1) { // ONE_SIDED_LOCK
+			if (ukc_ctl_start_onesidedreproduce(ukc_controller) == 0) {
+				debug("Parent: UKC switched to ONE_SIDED_REPRODUCE mode for race validation\n");
+			} else {
+				debug("Parent: Failed to switch UKC to ONE_SIDED_REPRODUCE mode\n");
+			}
 		} else {
-			debug("Parent: Failed to switch UKC to CHECK_SYNC mode\n");
+			// 对于其他情况，使用默认的monitor模式
+			if (ukc_ctl_start_monitor(ukc_controller) == 0) {
+				debug("Parent: UKC remains in MONITOR mode for race validation\n");
+			} else {
+				debug("Parent: Failed to keep UKC in MONITOR mode\n");
+			}
 		}
 	}
 #endif

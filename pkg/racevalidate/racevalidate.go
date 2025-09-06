@@ -89,6 +89,7 @@ type validationInstance struct {
 	inst  *instance.ExecProgInstance
 }
 
+// ErrNoPrograms is returned when no programs are available to validate
 var ErrNoPrograms = fmt.Errorf("no programs to validate")
 
 // Run performs race validation on the corpus
@@ -98,6 +99,7 @@ func Run(corpusPath string, cfg *mgrconfig.Config, hostFeatures *host.Features, 
 	if err != nil {
 		return nil, nil, err
 	}
+
 	// Start VM management
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -111,9 +113,16 @@ func Run(corpusPath string, cfg *mgrconfig.Config, hostFeatures *host.Features, 
 		ctx.bootRequests <- idx
 	}
 
-	defer wg.Wait()
+	// Run validation
+	results, stats, err := ctx.run()
 
-	return ctx.run()
+	// Wait for createInstances goroutine to finish
+	wg.Wait()
+
+	// Close all remaining instances after validation and goroutines complete
+	ctx.closeAllInstances()
+
+	return results, stats, err
 }
 
 func prepareCtx(corpusPath string, cfg *mgrconfig.Config, features *host.Features, reporter *report.Reporter,
@@ -162,9 +171,7 @@ func (ctx *context) run() (*Results, *Stats, error) {
 	}
 
 	return results, ctx.stats, nil
-}
-
-// min helper function
+} // min helper function
 func min(a, b int) int {
 	if a < b {
 		return a
@@ -179,13 +186,27 @@ func (ctx *context) parseProgram(data []byte) (*prog.Prog, error) {
 		return prog, nil
 	}
 
-	// If that fails, try as binary format (DeserializeProg)
-	// But we need to check if the data looks like binary first
-	if len(data) > 0 && data[0] < 32 { // Likely binary if starts with control character
-		// This might be binary format - unfortunately syzkaller doesn't have
-		// a public binary deserialization method, so we need to handle this differently
-		return nil, fmt.Errorf("binary program format not supported in validation")
+	// If that fails, try as binary format (which is what SerializeForExec produces)
+	// Binary format starts with control characters, so check for that
+	if len(data) > 0 && data[0] < 32 {
+		// This is binary format - we need to deserialize it properly
+		// Binary format is the output of SerializeForExec, we need to parse it back
+		prog := &prog.Prog{
+			Target: ctx.pTarget,
+		}
+
+		// Try to deserialize binary format
+		// Unfortunately, syzkaller doesn't expose a public method to deserialize binary format
+		// So we need to handle this by converting back to text first
+		// For now, let's try strict text parsing as fallback
+		if prog, err := ctx.pTarget.Deserialize(data, prog.Strict); err == nil {
+			return prog, nil
+		}
+
+		return nil, fmt.Errorf("binary program format detected but failed to parse: data starts with 0x%x", data[0])
 	}
+
+	// Try strict text parsing as final attempt
 	return ctx.pTarget.Deserialize(data, prog.Strict)
 }
 
@@ -400,6 +421,30 @@ func (ctx *context) createInstances() {
 			inst:  execProg,
 		}
 	}
+}
+
+// closeAllInstances closes all remaining VM instances in the channel
+func (ctx *context) closeAllInstances() {
+	log.Logf(1, "starting VM instances cleanup")
+
+	// 从channel中取出并关闭所有剩余的实例
+	instanceCount := 0
+	for {
+		select {
+		case inst := <-ctx.instances:
+			if inst != nil && inst.inst != nil && inst.inst.VMInstance != nil {
+				log.Logf(1, "closing VM instance %d during cleanup", inst.index)
+				inst.inst.VMInstance.Close()
+				instanceCount++
+			}
+		default:
+			// channel为空，退出循环
+			goto cleanup_done
+		}
+	}
+
+cleanup_done:
+	log.Logf(1, "all VM instances closed during cleanup (closed %d instances)", instanceCount)
 }
 
 func (ctx *context) validateLogf(level int, format string, args ...interface{}) {

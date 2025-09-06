@@ -429,6 +429,17 @@ func (fs *FuzzScheduler) checkPhaseSwitch() {
 		return
 	}
 
+	// 检查是否已经在进行transition
+	if fs.transitionMgr != nil {
+		isTransitioning, transitionID, _ := fs.transitionMgr.GetTransitionInfo()
+		if isTransitioning {
+			if log.V(1) {
+				log.Logf(1, "[DDRD-DEBUG] checkPhaseSwitch skipped: transition already in progress (ID=%s)", transitionID)
+			}
+			return
+		}
+	}
+
 	now := time.Now()
 	phaseRunTime := now.Sub(fs.phaseStartTime)
 

@@ -613,21 +613,16 @@ func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.May
 		return
 	}
 
-	// Serialize programs
-	prog1Data := make([]byte, prog.ExecBufferSize)
-	prog2Data := make([]byte, prog.ExecBufferSize)
+	// Serialize programs in text format (not binary)
+	prog1Data := p1.Serialize() // Use text serialization
+	prog2Data := p2.Serialize() // Use text serialization
 
-	prog1Size, err1 := p1.SerializeForExec(prog1Data)
-	prog2Size, err2 := p2.SerializeForExec(prog2Data)
-
-	if err1 != nil || err2 != nil {
-		log.Logf(0, "proc %d: failed to serialize programs for race pair reporting", proc.pid)
-		return
-	}
+	log.Logf(2, "proc %d: serialized programs: prog1=%d bytes, prog2=%d bytes",
+		proc.pid, len(prog1Data), len(prog2Data))
 
 	// Generate unique pair ID using uint64 hash
-	hash1 := hash.Hash(prog1Data[:prog1Size])
-	hash2 := hash.Hash(prog2Data[:prog2Size])
+	hash1 := hash.Hash(prog1Data)
+	hash2 := hash.Hash(prog2Data)
 	hash3 := hash.Hash([]byte(fmt.Sprintf("%d", len(racePairs))))
 
 	// Convert hash signatures to uint64 for XOR operation
@@ -652,8 +647,8 @@ func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.May
 	// Create race pair input
 	racePairInput := rpctype.RacePairInput{
 		PairID: pairIDHash,
-		Prog1:  prog1Data[:prog1Size],
-		Prog2:  prog2Data[:prog2Size],
+		Prog1:  prog1Data,
+		Prog2:  prog2Data,
 		Signal: serializeRaceSignal(raceSignal),
 		Races:  racePairsData,
 	}
