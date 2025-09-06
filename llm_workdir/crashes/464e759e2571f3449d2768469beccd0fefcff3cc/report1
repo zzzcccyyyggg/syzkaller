@@ -1,6 +1,0 @@
-r1 = open$btrfs(&(0x7f0000002b00), 0x0, 0x9)
-ioctl$BTRFS_IOC_BALANCE_CTL(r1, 0x40049421, 0x0)
-12:22:29 executing program 1:
-r0 = open$btrfs(&(0x7f0000000040), 0x0, 0x0)
-ioctl$BTRFS_IOC_QUOTA_RESCAN(r0, 0x4040942c, 0x0)
-2025/08/11 12:22:29 SYZFATAL: executor 1 failed 11 times: bad reply magic 0x1

@@ -1,5 +1,0 @@
-open$btrfs(&(0x7f0000000480), 0x42, 0x48)
-r4 = open$btrfs(&(0x7f0000000500), 0x10001, 0x9055684bf712dbd8)
-ioctl$BTRFS_IOC_QGROUP_CREATE(r4, 0x4010942a, &(0x7f0000000540)={0x1, 0x9})
-ioctl$BTRFS_IOC_RM_DEV_V2(r3, 0x5000943a, &(0x7f00000046c0)={{r1}, r2, 0x8, @unused=[0x1, 0x4], @devid})
-2025/08/11 14:34:43 SYZFATAL: executor 1 failed 11 times: bad reply magic 0x7

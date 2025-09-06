@@ -816,7 +816,6 @@ func parseOutputType(str string) OutputType {
 	}
 }
 
-// TODO: updateRaceCoverage
 func (fuzzer *Fuzzer) updateRaceCoverage(races []ddrd.MayRacePair) {
 	if len(races) == 0 {
 		return

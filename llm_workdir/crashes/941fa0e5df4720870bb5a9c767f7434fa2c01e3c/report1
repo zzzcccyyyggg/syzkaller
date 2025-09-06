@@ -1,5 +1,0 @@
-ioctl$BTRFS_IOC_QUOTA_RESCAN_STATUS(r6, 0x8040942d, &(0x7f0000002680))
-ioctl$BTRFS_IOC_SCRUB_PROGRESS(0xffffffffffffffff, 0xc400941d, &(0x7f0000002700)={r7, 0x200, 0xfffffffffffff001, 0x1})
-r12 = open$btrfs(&(0x7f0000002b00), 0x129002, 0x9)
-ioctl$BTRFS_IOC_BALANCE_CTL(r12, 0x40049421, 0x2)
-2025/08/11 14:08:42 SYZFATAL: executor 3 failed 11 times: bad reply magic 0x4
