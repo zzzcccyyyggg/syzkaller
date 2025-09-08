@@ -339,10 +339,17 @@ func main() {
 	fuzzer.gate = ipc.NewGate(gateSize, gateCallback)
 
 	for needCandidates, more := true, true; more; needCandidates = false {
-		more = fuzzer.poll(needCandidates, nil)
-		// This loop lead to "no output" in qemu emulation, tell manager we are not dead.
-		log.Logf(0, "fetching corpus: %v, signal %v/%v (executing program)",
+		// Log before poll
+		log.Logf(0, "fetching corpus: %v, signal %v/%v (before poll)",
 			len(fuzzer.corpus), len(fuzzer.corpusSignal), len(fuzzer.maxSignal))
+
+		more = fuzzer.poll(needCandidates, nil)
+
+		// Log after poll
+		log.Logf(0, "fetching corpus: %v, signal %v/%v (after poll)",
+			len(fuzzer.corpus), len(fuzzer.corpusSignal), len(fuzzer.maxSignal))
+
+		// This loop lead to "no output" in qemu emulation, tell manager we are not dead.
 	}
 	calls := make(map[*prog.Syscall]bool)
 	for _, id := range r.CheckResult.EnabledCalls[sandbox] {
@@ -852,56 +859,6 @@ func (fuzzer *Fuzzer) updateRaceCoverage(races []ddrd.MayRacePair) {
 	// ===============DDRD====================
 }
 
-// ===============DDRD====================
-// generateTestPairsFromCorpus creates race test pairs from corpus combinations
-func (fuzzer *Fuzzer) generateTestPairsFromCorpus(maxPairs int) {
-	fuzzer.corpusMu.RLock()
-	corpus := make([]*prog.Prog, len(fuzzer.corpus))
-	copy(corpus, fuzzer.corpus)
-	fuzzer.corpusMu.RUnlock()
-
-	var programs []*prog.Prog
-
-	// If corpus is empty or insufficient, try to get candidates from work queue
-	if len(corpus) < 2 {
-		log.Logf(2, "corpus size (%d) insufficient for pair generation, trying candidates", len(corpus))
-
-		// Extract available candidates from work queue
-		candidates := fuzzer.workQueue.extractCandidates(maxPairs * 2) // Get more than needed
-		for _, candidate := range candidates {
-			if wc, ok := candidate.(*WorkCandidate); ok {
-				programs = append(programs, wc.p)
-			}
-		}
-
-		// Combine corpus and candidates
-		programs = append(corpus, programs...)
-
-		if len(programs) < 2 {
-			log.Logf(2, "still insufficient programs (%d) for pair generation", len(programs))
-			return
-		}
-
-		log.Logf(2, "using %d corpus + %d candidates = %d programs for pair generation",
-			len(corpus), len(programs)-len(corpus), len(programs))
-	} else {
-		programs = corpus
-	}
-
-	generated := 0
-	// Generate pairs from available programs
-	for i := 0; i < len(programs) && generated < maxPairs; i++ {
-		for j := i + 1; j < len(programs) && generated < maxPairs; j++ {
-			fuzzer.racePairWorkQueue.enqueueCorpusPair(programs[i], programs[j])
-			generated++
-		}
-	}
-
-	if generated > 0 {
-		log.Logf(1, "generated %d race pairs from %d programs", generated, len(programs))
-	}
-}
-
 // checkForNewRaceCoverage checks if a pair potentially brings new race coverage
 func (fuzzer *Fuzzer) checkForNewRaceCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) bool {
 	if len(races) == 0 {
@@ -924,18 +881,51 @@ func (fuzzer *Fuzzer) checkForNewRaceCoverage(p1, p2 *prog.Prog, races []*ddrd.M
 // maintainRacePairQueues ensures race pair queues have sufficient work
 func (fuzzer *Fuzzer) maintainRacePairQueues() {
 	// ===============DDRD====================
-	// Use race pair work queue instead of normal work queue
-	// corpusCount, newCoverCount := fuzzer.racePairWorkQueue.getQueueStats()
+	// Get pair candidates directly from manager instead of generating locally
 	// ===============DDRD====================
 
-	// Maintain corpus-based pairs (lower priority)
+	// Check if race pair work queue needs more pairs
+	if fuzzer.racePairWorkQueue == nil {
+		log.Logf(0, "maintainRacePairQueues: racePairWorkQueue is nil")
+		return
+	}
 
-	fuzzer.generateTestPairsFromCorpus(0x10000)
+	// Get current queue status (you may need to implement this method in RacePairWorkQueue)
+	// For now, we'll request a batch regardless
+	batchSize := 20 // Request 20 pair candidates at a time
 
-	// Log queue status periodically
-	// if corpusCount > 0 || newCoverCount > 0 {
-	// log.Logf(2, "race pair queues: corpus=%d, new_cover=%d", corpusCount, newCoverCount)
-	// }
+	// Get pair candidates from manager
+	pairCandidates := fuzzer.getPairCandidatesFromManager(batchSize)
+	if len(pairCandidates) == 0 {
+		log.Logf(2, "maintainRacePairQueues: no pair candidates available from manager")
+		return
+	}
+
+	// Convert manager's PairCandidate to local race pair work items
+	added := 0
+	for _, pairCandidate := range pairCandidates {
+		// Deserialize the two programs
+		prog1 := fuzzer.deserializeInput(pairCandidate.Prog1)
+		prog2 := fuzzer.deserializeInput(pairCandidate.Prog2)
+
+		if prog1 == nil || prog2 == nil {
+			log.Logf(1, "maintainRacePairQueues: failed to deserialize pair candidate %x", pairCandidate.PairID)
+			continue
+		}
+
+		// Add to race pair work queue
+		// Using PairID as string identifier
+		pairIDStr := fmt.Sprintf("mgr_%x", pairCandidate.PairID)
+		fuzzer.racePairWorkQueue.enqueueCorpusPair(prog1, prog2)
+		added++
+
+		log.Logf(2, "maintainRacePairQueues: added pair %s from manager", pairIDStr)
+	}
+
+	if added > 0 {
+		log.Logf(1, "maintainRacePairQueues: added %d race pairs from manager (requested %d)",
+			added, len(pairCandidates))
+	}
 } // addRacePairWithNewCoverage adds a program pair that brings new race coverage
 func (fuzzer *Fuzzer) addRacePairWithNewCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) {
 	pairID := fmt.Sprintf("newcover_%d_%d", time.Now().UnixNano(), len(races))
@@ -989,6 +979,39 @@ func (fuzzer *Fuzzer) distributeRacePair(racePair rpctype.RacePairInput) {
 	// For now, just log the receipt
 	log.Logf(2, "[DDRD-DEBUG] Distributed race pair %x with signal len=%d",
 		racePair.PairID, len(racePair.Signal))
+}
+
+// getAllCandidatesFromManager requests all current candidates from manager
+func (fuzzer *Fuzzer) getAllCandidatesFromManager() []rpctype.Candidate {
+	args := &rpctype.GetAllCandidatesArgs{
+		Name: fuzzer.name,
+	}
+	res := &rpctype.GetAllCandidatesRes{}
+
+	if err := fuzzer.manager.Call("Manager.GetAllCandidates", args, res); err != nil {
+		log.Logf(0, "GetAllCandidates RPC failed: %v", err)
+		return nil
+	}
+
+	log.Logf(2, "getAllCandidatesFromManager: received %d candidates", len(res.Candidates))
+	return res.Candidates
+}
+
+// getPairCandidatesFromManager requests a batch of pair candidates from manager
+func (fuzzer *Fuzzer) getPairCandidatesFromManager(size int) []rpctype.PairCandidate {
+	args := &rpctype.GetPairCandidatesArgs{
+		Name: fuzzer.name,
+		Size: size,
+	}
+	res := &rpctype.GetPairCandidatesRes{}
+
+	if err := fuzzer.manager.Call("Manager.GetPairCandidates", args, res); err != nil {
+		log.Logf(0, "GetPairCandidates RPC failed: %v", err)
+		return nil
+	}
+
+	log.Logf(2, "getPairCandidatesFromManager: received %d pair candidates", len(res.PairCandidates))
+	return res.PairCandidates
 }
 
 // ===============DDRD====================

@@ -28,6 +28,13 @@ type Candidate struct {
 	Smashed   bool
 }
 
+// PairCandidate represents a pair of candidates for race testing
+type PairCandidate struct {
+	Prog1  []byte
+	Prog2  []byte
+	PairID uint64 // unique identifier for this pair
+}
+
 // ===============DDRD====================
 // RacePairInput represents a race pair discovered by a fuzzer
 type RacePairInput struct {
@@ -274,6 +281,27 @@ type ModeReadyArgs struct {
 // ModeReadyRes response for mode ready report
 type ModeReadyRes struct {
 	Acknowledged bool // 是否确认收到
+}
+
+// GetAllCandidatesArgs request for getting all candidates
+type GetAllCandidatesArgs struct {
+	Name string // fuzzer name
+}
+
+// GetAllCandidatesRes response with all candidates
+type GetAllCandidatesRes struct {
+	Candidates []Candidate // all current candidates
+}
+
+// GetPairCandidatesArgs request for getting pair candidates
+type GetPairCandidatesArgs struct {
+	Name string // fuzzer name
+	Size int    // number of pair candidates to request
+}
+
+// GetPairCandidatesRes response with pair candidates
+type GetPairCandidatesRes struct {
+	PairCandidates []PairCandidate // requested pair candidates
 }
 
 // ===============DDRD====================

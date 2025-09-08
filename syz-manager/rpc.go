@@ -79,6 +79,10 @@ type RPCManagerView interface {
 	// ===============DDRD====================
 	// Process new race pair discoveries with full Manager integration
 	newRacePair(args *rpctype.NewRacePairArgs) bool
+	// Get all current candidates for fuzzer
+	getAllCandidates() []rpctype.Candidate
+	// Get batch of pair candidates for fuzzer
+	pairCandidateBatch(size int) []rpctype.PairCandidate
 	// ===============DDRD====================
 }
 
@@ -501,6 +505,48 @@ func (serv *RPCServer) CheckModeTransition(a *rpctype.ModeTransitionArgs, r *rpc
 		log.Logf(2, "[DDRD-DEBUG] CheckModeTransition (restart mode): fuzzer=%s, shouldPrepare=false", a.Name)
 	}
 
+	return nil
+}
+
+// GetAllCandidates returns all current candidates to fuzzer
+func (serv *RPCServer) GetAllCandidates(a *rpctype.GetAllCandidatesArgs, r *rpctype.GetAllCandidatesRes) error {
+	log.Logf(2, "GetAllCandidates request from %v", a.Name)
+
+	serv.mu.Lock()
+	defer serv.mu.Unlock()
+
+	f := serv.fuzzers[a.Name]
+	if f == nil {
+		log.Logf(1, "GetAllCandidates: fuzzer %v is not connected", a.Name)
+		return nil
+	}
+
+	// Get all candidates from manager
+	candidates := serv.mgr.getAllCandidates()
+	r.Candidates = candidates
+
+	log.Logf(2, "GetAllCandidates: returning %d candidates to %v", len(candidates), a.Name)
+	return nil
+}
+
+// GetPairCandidates returns a batch of pair candidates to fuzzer
+func (serv *RPCServer) GetPairCandidates(a *rpctype.GetPairCandidatesArgs, r *rpctype.GetPairCandidatesRes) error {
+	log.Logf(2, "GetPairCandidates request from %v for %d pairs", a.Name, a.Size)
+
+	serv.mu.Lock()
+	defer serv.mu.Unlock()
+
+	f := serv.fuzzers[a.Name]
+	if f == nil {
+		log.Logf(1, "GetPairCandidates: fuzzer %v is not connected", a.Name)
+		return nil
+	}
+
+	// Get batch of pair candidates from manager
+	pairCandidates := serv.mgr.pairCandidateBatch(a.Size)
+	r.PairCandidates = pairCandidates
+
+	log.Logf(2, "GetPairCandidates: returning %d pair candidates to %v", len(pairCandidates), a.Name)
 	return nil
 }
 

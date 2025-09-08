@@ -7,6 +7,7 @@ import (
 	"sync"
 
 	"github.com/google/syzkaller/pkg/ipc"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -136,21 +137,23 @@ func (wq *WorkQueue) wantCandidates() bool {
 
 // extractCandidates extracts up to maxCount candidates from the queue
 // This is used when corpus is insufficient for race pair generation
+// If maxCount is 0, extract all available candidates
 func (wq *WorkQueue) extractCandidates(maxCount int) []interface{} {
 	wq.mu.Lock()
 	defer wq.mu.Unlock()
 
 	var candidates []interface{}
+	extractAll := maxCount == 0
 
 	// Extract from candidate queue first (highest priority for race pairs)
-	for len(wq.candidate) > 0 && len(candidates) < maxCount {
+	for len(wq.candidate) > 0 && (extractAll || len(candidates) < maxCount) {
 		last := len(wq.candidate) - 1
 		candidates = append(candidates, wq.candidate[last])
 		wq.candidate = wq.candidate[:last]
 	}
 
 	// If we still need more, extract from triage queue
-	for len(wq.triage) > 0 && len(candidates) < maxCount {
+	for len(wq.triage) > 0 && (extractAll || len(candidates) < maxCount) {
 		last := len(wq.triage) - 1
 		// Convert WorkTriage to WorkCandidate for race pair usage
 		triage := wq.triage[last]
@@ -159,6 +162,7 @@ func (wq *WorkQueue) extractCandidates(maxCount int) []interface{} {
 		wq.triage = wq.triage[:last]
 	}
 
+	log.Logf(2, "extractCandidates: extracted %d candidates from local queue (maxCount=%d)", len(candidates), maxCount)
 	return candidates
 }
 

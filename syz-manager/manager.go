@@ -89,7 +89,8 @@ type Manager struct {
 	phase                 int
 	targetEnabledSyscalls map[*prog.Syscall]bool
 
-	candidates       []rpctype.Candidate // untriaged inputs from corpus and hub
+	candidates       []rpctype.Candidate     // untriaged inputs from corpus and hub
+	pairCandidates   []rpctype.PairCandidate // pairs of candidates for race testing
 	disabledHashes   map[string]struct{}
 	corpus           map[string]CorpusItem
 	seeds            [][]byte
@@ -748,6 +749,9 @@ func (mgr *Manager) loadCorpus() {
 		panic(fmt.Sprintf("loadCorpus: bad phase %v", mgr.phase))
 	}
 	mgr.phase = phaseLoadedCorpus
+
+	// Generate initial pair candidates after corpus is loaded
+	mgr.generatePairCandidates()
 }
 
 func (mgr *Manager) loadProg(data []byte, minimized, smashed bool) bool {
@@ -1313,9 +1317,74 @@ func (mgr *Manager) addNewCandidates(candidates []rpctype.Candidate) {
 	}
 
 	mgr.candidates = append(mgr.candidates, candidates...)
+
 	if mgr.phase == phaseTriagedCorpus {
 		mgr.phase = phaseQueriedHub
 	}
+}
+
+// generatePairCandidates creates pair candidates from current candidates
+func (mgr *Manager) generatePairCandidates() {
+	if len(mgr.candidates) < 2 {
+		return
+	}
+
+	// Generate pairs from recent candidates (avoid O(n^2) for large candidate sets)
+	// Only pair the last few candidates with existing ones
+	maxNewPairs := 1000000 // limit to avoid memory explosion
+	startIndex := 0
+	if len(mgr.candidates) > 1000 {
+		startIndex = len(mgr.candidates) - 1000 // only use last 1000 candidates for pairing
+	}
+
+	pairsGenerated := 0
+	for i := startIndex; i < len(mgr.candidates) && pairsGenerated < maxNewPairs; i++ {
+		for j := i + 1; j < len(mgr.candidates) && pairsGenerated < maxNewPairs; j++ {
+			pairID := mgr.generatePairID(mgr.candidates[i], mgr.candidates[j])
+
+			pair := rpctype.PairCandidate{
+				Prog1:  mgr.candidates[i].Prog,
+				Prog2:  mgr.candidates[j].Prog,
+				PairID: pairID,
+			}
+
+			mgr.pairCandidates = append(mgr.pairCandidates, pair)
+			pairsGenerated++
+		}
+	}
+
+	if pairsGenerated > 0 {
+		log.Logf(1, "generated %d pair candidates from %d candidates", pairsGenerated, len(mgr.candidates))
+	}
+}
+
+// generatePairID creates a unique ID for a pair of candidates
+func (mgr *Manager) generatePairID(c1, c2 rpctype.Candidate) uint64 {
+	// Use a simple hash of the two programs
+	h := hash.Hash(append(c1.Prog, c2.Prog...))
+	// Convert first 8 bytes of hash to uint64
+	var id uint64
+	for i := 0; i < 8 && i < len(h); i++ {
+		id = id<<8 | uint64(h[i])
+	}
+	return id
+}
+
+// pairCandidateBatch returns a batch of pair candidates (similar to candidateBatch)
+func (mgr *Manager) pairCandidateBatch(size int) []rpctype.PairCandidate {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	var res []rpctype.PairCandidate
+	for i := 0; i < size && len(mgr.pairCandidates) > 0; i++ {
+		last := len(mgr.pairCandidates) - 1
+		res = append(res, mgr.pairCandidates[last])
+		mgr.pairCandidates[last] = rpctype.PairCandidate{} // clear for GC
+		mgr.pairCandidates = mgr.pairCandidates[:last]
+	}
+
+	log.Logf(2, "pairCandidateBatch: returning %d pairs, %d remaining", len(res), len(mgr.pairCandidates))
+	return res
 }
 
 func (mgr *Manager) minimizeCorpus() {
@@ -1754,6 +1823,18 @@ func (mgr *Manager) candidateBatch(size int) []rpctype.Candidate {
 		}
 	}
 	return res
+}
+
+func (mgr *Manager) getAllCandidates() []rpctype.Candidate {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	// Return a copy of all current candidates
+	candidates := make([]rpctype.Candidate, len(mgr.candidates))
+	copy(candidates, mgr.candidates)
+
+	log.Logf(2, "getAllCandidates: returning %d candidates", len(candidates))
+	return candidates
 }
 
 func (mgr *Manager) hubIsUnreachable() {
