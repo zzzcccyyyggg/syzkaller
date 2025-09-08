@@ -67,6 +67,15 @@ Function: entry_SYSCALL_64_after_hwframe+0x77/0x7f
 		t.Errorf("expected title to contain CUSTOM_DATARACE, got %q", rep.Title)
 	}
 
+	// Check that the title contains both VarNames
+	if !contains(rep.Title, "17363501701721901078") {
+		t.Errorf("expected title to contain VarName1 '17363501701721901078', got %q", rep.Title)
+	}
+
+	if !contains(rep.Title, "16100634012471765034") {
+		t.Errorf("expected title to contain VarName2 '16100634012471765034', got %q", rep.Title)
+	}
+
 	if len(rep.ReportedRaces) == 0 {
 		t.Fatalf("expected at least one reported race")
 	}
@@ -97,6 +106,7 @@ Function: entry_SYSCALL_64_after_hwframe+0x77/0x7f
 	}
 
 	t.Logf("Successfully parsed custom datarace: VarName1=%s, VarName2=%s", race.VarName1, race.VarName2)
+	t.Logf("Parsed title: %s", rep.Title)
 
 	// Test the utility functions
 	varNames := rep.GetRaceVarNames()

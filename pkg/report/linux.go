@@ -2072,12 +2072,42 @@ var linuxOopses = append([]*oops{
 	{
 		[]byte("Kernel panic"),
 		[]oopsFormat{
-			// Custom DATARACE format with VarName extraction
+			// Custom DATARACE format based on actual kernel output
 			{
 				title:  compile("Kernel panic: ============ DATARACE ============"),
-				report: compile("Kernel panic: ============ DATARACE ============\\nVarName ([0-9]+),"),
+				report: compile("Kernel panic: ============ DATARACE ============[\\s\\S]*?VarName ([0-9]+), BlockLineNumber[\\s\\S]*?============OTHER_INFO============[\\s\\S]*?VarName ([0-9]+), BlockLineNumber"),
+				fmt:    "CUSTOM_DATARACE: VarName1=%[1]v, VarName2=%[2]v",
+				alt:    []string{"data-race between VarName1=%[1]v and VarName2=%[2]v"},
+				stack: &stackFmt{
+					parts: []*regexp.Regexp{
+						compile("Function: ([^\\n]+)"),
+						parseStackTrace,
+					},
+				},
+				reportType:   crash.DataRace,
+				noStackTrace: false,
+			},
+			// Custom DATARACE format fallback - single VarName from actual format
+			{
+				title:  compile("Kernel panic: ============ DATARACE ============"),
+				report: compile("Kernel panic: ============ DATARACE ============[\\s\\S]*?VarName ([0-9]+), BlockLineNumber"),
 				fmt:    "CUSTOM_DATARACE: VarName %[1]v",
 				alt:    []string{"data-race with VarName %[1]v"},
+				stack: &stackFmt{
+					parts: []*regexp.Regexp{
+						compile("Function: ([^\\n]+)"),
+						parseStackTrace,
+					},
+				},
+				reportType:   crash.DataRace,
+				noStackTrace: false,
+			},
+			// Debug: Catch any DATARACE panic to see the actual format
+			{
+				title:  compile("============ DATARACE ============"),
+				report: compile("============ DATARACE ============"),
+				fmt:    "CUSTOM_DATARACE: DEBUG_FORMAT_MATCHED",
+				alt:    []string{"debug datarace format"},
 				stack: &stackFmt{
 					parts: []*regexp.Regexp{
 						compile("Function: ([^\\n]+)"),

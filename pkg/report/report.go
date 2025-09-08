@@ -316,6 +316,10 @@ type replacement struct {
 
 func replaceTable(replacements []replacement, str string) string {
 	for _, repl := range replacements {
+		// Special case: don't replace addresses or numbers in CUSTOM_DATARACE titles
+		if strings.Contains(str, "CUSTOM_DATARACE") && (strings.Contains(repl.replacement, "ADDR") || strings.Contains(repl.replacement, "NUM")) {
+			continue
+		}
 		for stop := false; !stop; {
 			newStr := repl.match.ReplaceAllString(str, repl.replacement)
 			stop = newStr == str
@@ -496,6 +500,7 @@ func extractDescription(output []byte, oops *oops, params *stackParams) (
 	desc, corrupted string, altTitles []string, format oopsFormat) {
 	startPos := len(output)
 	matchedTitle := false
+
 	for _, f := range oops.formats {
 		match := f.title.FindSubmatchIndex(output)
 		if match == nil || match[0] > startPos {
@@ -510,6 +515,7 @@ func extractDescription(output []byte, oops *oops, params *stackParams) (
 			startPos = match[0]
 		}
 		matchedTitle = true
+
 		if f.report != nil {
 			match = f.report.FindSubmatchIndex(output)
 			if match == nil {
@@ -531,6 +537,7 @@ func extractDescription(output []byte, oops *oops, params *stackParams) (
 			}
 		}
 		desc = fmt.Sprintf(f.fmt, args...)
+
 		for _, alt := range f.alt {
 			altTitles = append(altTitles, fmt.Sprintf(alt, args...))
 		}
