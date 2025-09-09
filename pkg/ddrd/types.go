@@ -1,5 +1,9 @@
 package ddrd
 
+import (
+	"github.com/google/syzkaller/pkg/hash"
+)
+
 // MayRacePair represents a race condition pair transmitted from executor
 // This structure MUST match exactly with may_race_pair_t in executor/ddrd.h
 // CRITICAL: Keep field order and sizes EXACTLY matching the C struct!
@@ -27,4 +31,16 @@ type MayRacePair struct {
 	AccessType2 uint32 // Second access type (read/write/free) - MUST be uint32 to match C
 
 	TimeDiff uint64 // Time difference between accesses (nanoseconds)
+}
+
+// GeneratePairID creates a unique ID for a pair of prog1 and prog2
+func GeneratePairID(Prog1, Prog2 []byte) uint64 {
+	// Use a simple hash of the two programs
+	h := hash.Hash(append(Prog1, Prog2...))
+	// Convert first 8 bytes of hash to uint64
+	var id uint64
+	for i := 0; i < 8 && i < len(h); i++ {
+		id = id<<8 | uint64(h[i])
+	}
+	return id
 }

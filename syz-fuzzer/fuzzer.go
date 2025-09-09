@@ -541,14 +541,6 @@ func (fuzzer *Fuzzer) poll(needCandidates bool, stats map[string]uint64) bool {
 		}
 	}
 
-	// Process new race pairs from other fuzzers
-	for _, racePair := range r.NewRacePairs {
-		log.Logf(2, "[DDRD-DEBUG] Poll: Received race pair: pairID=%x", racePair.PairID)
-		// Add race pair to local queue for execution
-		fuzzer.distributeRacePair(racePair)
-	}
-	// ===============DDRD====================
-
 	for _, inp := range r.NewInputs {
 		fuzzer.addInputFromAnotherFuzzer(inp)
 	}
@@ -966,19 +958,6 @@ func serializeRaceSignal(sig ddrd.Signal) []byte {
 		return []byte{}
 	}
 	return data
-}
-
-// distributeRacePair processes race pair from other fuzzers
-func (fuzzer *Fuzzer) distributeRacePair(racePair rpctype.RacePairInput) {
-	// Parse programs from race pair
-	if len(racePair.Prog1) == 0 || len(racePair.Prog2) == 0 {
-		return
-	}
-
-	// TODO: Deserialize programs and add to race pair work queue
-	// For now, just log the receipt
-	log.Logf(2, "[DDRD-DEBUG] Distributed race pair %x with signal len=%d",
-		racePair.PairID, len(racePair.Signal))
 }
 
 // getAllCandidatesFromManager requests all current candidates from manager

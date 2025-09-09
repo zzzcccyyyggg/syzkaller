@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -74,7 +75,7 @@ type Manager struct {
 
 	// Race corpus management
 	raceCorpusDB *db.DB
-	raceCorpus   map[string]*RaceCorpusItem
+	raceCorpus   map[uint64]*RaceCorpusItem
 	raceCorpusMu sync.RWMutex
 	raceStats    struct {
 		totalPairs   int64
@@ -89,16 +90,17 @@ type Manager struct {
 	phase                 int
 	targetEnabledSyscalls map[*prog.Syscall]bool
 
-	candidates       []rpctype.Candidate     // untriaged inputs from corpus and hub
-	pairCandidates   []rpctype.PairCandidate // pairs of candidates for race testing
-	disabledHashes   map[string]struct{}
-	corpus           map[string]CorpusItem
-	seeds            [][]byte
-	newRepros        [][]byte
-	lastMinCorpus    int
-	memoryLeakFrames map[string]bool
-	dataRaceFrames   map[string]bool
-	saturatedCalls   map[string]bool
+	candidates           []rpctype.Candidate     // untriaged inputs from corpus and hub
+	pairCandidates       []rpctype.PairCandidate // pairs of candidates for race testing
+	raceCorpusCandidates []rpctype.PairCandidate // high-priority race pairs from race corpus
+	disabledHashes       map[string]struct{}
+	corpus               map[string]CorpusItem
+	seeds                [][]byte
+	newRepros            [][]byte
+	lastMinCorpus        int
+	memoryLeakFrames     map[string]bool
+	dataRaceFrames       map[string]bool
+	saturatedCalls       map[string]bool
 
 	needMoreRepros     chan chan bool
 	externalReproQueue chan *Crash
@@ -245,7 +247,7 @@ func RunManager(cfg *mgrconfig.Config) {
 		// Initialize fuzz scheduler for mode management
 		fuzzScheduler: NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
 		// Initialize race corpus
-		raceCorpus: make(map[string]*RaceCorpusItem),
+		raceCorpus: make(map[uint64]*RaceCorpusItem),
 		// ===============DDRD====================
 	}
 
@@ -350,10 +352,6 @@ func (mgr *Manager) initBench() {
 				continue
 			}
 			mgr.minimizeCorpus()
-			// ===============DDRD====================
-			// Maintain race corpus periodically
-			mgr.minimizeRaceCorpus()
-			// ===============DDRD====================
 			vals["corpus"] = uint64(len(mgr.corpus))
 			vals["uptime"] = uint64(time.Since(mgr.firstConnect)) / 1e9
 			vals["fuzzing"] = uint64(mgr.fuzzingTime) / 1e9
@@ -1340,7 +1338,7 @@ func (mgr *Manager) generatePairCandidates() {
 	pairsGenerated := 0
 	for i := startIndex; i < len(mgr.candidates) && pairsGenerated < maxNewPairs; i++ {
 		for j := i + 1; j < len(mgr.candidates) && pairsGenerated < maxNewPairs; j++ {
-			pairID := mgr.generatePairID(mgr.candidates[i], mgr.candidates[j])
+			pairID := ddrd.GeneratePairID(mgr.candidates[i].Prog, mgr.candidates[j].Prog)
 
 			pair := rpctype.PairCandidate{
 				Prog1:  mgr.candidates[i].Prog,
@@ -1358,18 +1356,6 @@ func (mgr *Manager) generatePairCandidates() {
 	}
 }
 
-// generatePairID creates a unique ID for a pair of candidates
-func (mgr *Manager) generatePairID(c1, c2 rpctype.Candidate) uint64 {
-	// Use a simple hash of the two programs
-	h := hash.Hash(append(c1.Prog, c2.Prog...))
-	// Convert first 8 bytes of hash to uint64
-	var id uint64
-	for i := 0; i < 8 && i < len(h); i++ {
-		id = id<<8 | uint64(h[i])
-	}
-	return id
-}
-
 // pairCandidateBatch returns a batch of pair candidates (similar to candidateBatch)
 func (mgr *Manager) pairCandidateBatch(size int) []rpctype.PairCandidate {
 	mgr.mu.Lock()
@@ -1385,6 +1371,56 @@ func (mgr *Manager) pairCandidateBatch(size int) []rpctype.PairCandidate {
 
 	log.Logf(2, "pairCandidateBatch: returning %d pairs, %d remaining", len(res), len(mgr.pairCandidates))
 	return res
+}
+
+// getPriorityPairCandidates returns pair candidates with race pairs prioritized
+func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	var res []rpctype.PairCandidate
+
+	// First, provide race pair candidates (high priority)
+	for i := 0; i < size && len(mgr.raceCorpusCandidates) > 0; i++ {
+		last := len(mgr.raceCorpusCandidates) - 1
+		res = append(res, mgr.raceCorpusCandidates[last])
+		mgr.raceCorpusCandidates[last] = rpctype.PairCandidate{} // clear for GC
+		mgr.raceCorpusCandidates = mgr.raceCorpusCandidates[:last]
+	}
+
+	// If still need more pairs, use generated pair candidates
+	remaining := size - len(res)
+	for i := 0; i < remaining && len(mgr.pairCandidates) > 0; i++ {
+		last := len(mgr.pairCandidates) - 1
+		res = append(res, mgr.pairCandidates[last])
+		mgr.pairCandidates[last] = rpctype.PairCandidate{} // clear for GC
+		mgr.pairCandidates = mgr.pairCandidates[:last]
+	}
+
+	// log.Logf(2, "getPriorityPairCandidates: returning %d pairs (%d race, %d generated), %d race pairs remaining, %d generated pairs remaining",
+	// 	len(res), size-remaining, len(res)-(size-remaining), len(mgr.raceCorpusCandidates), len(mgr.pairCandidates))
+	return res
+}
+
+func min(a, b int) int {
+	if a < b {
+		return a
+	}
+	return b
+}
+
+// getCorpusCandidatesCount returns the number of race corpus candidates available
+func (mgr *Manager) getCorpusCandidatesCount() int {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	return len(mgr.raceCorpusCandidates)
+}
+
+// getGeneratedPairCount returns the number of generated pair candidates available
+func (mgr *Manager) getGeneratedPairCount() int {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	return len(mgr.pairCandidates)
 }
 
 func (mgr *Manager) minimizeCorpus() {
@@ -1474,7 +1510,11 @@ func (mgr *Manager) initRaceCorpus() {
 	mgr.raceCorpusDB = raceCorpusDB
 	mgr.loadRaceCorpus()
 
-	log.Logf(0, "race corpus initialized: %d items loaded", len(mgr.raceCorpus))
+	// Convert race corpus to high-priority pair candidates
+	mgr.loadCandidatesFromCorpus()
+
+	log.Logf(0, "race corpus initialized: %d items loaded, %d race corpus candidates created",
+		len(mgr.raceCorpus), len(mgr.raceCorpusCandidates))
 }
 
 func (mgr *Manager) loadRaceCorpus() {
@@ -1495,11 +1535,11 @@ func (mgr *Manager) loadRaceCorpus() {
 			broken++
 			continue
 		}
-
-		mgr.raceCorpus[key] = &item
+		keyNum, _ := strconv.ParseUint(key, 16, 64)
+		mgr.raceCorpus[keyNum] = &item
 
 		// 详细输出每个加载的条目
-		log.Logf(0, "Loaded race pair: ID=%s, Count=%d, FirstSeen=%s, LastUpdated=%s",
+		log.Logf(0, "Loaded race pair: ID=%x, Count=%d, FirstSeen=%s, LastUpdated=%s",
 			item.PairID, item.Count, item.FirstSeen.Format("15:04:05"), item.LastUpdated.Format("15:04:05"))
 
 		// 输出程序信息
@@ -1520,14 +1560,14 @@ func (mgr *Manager) loadRaceCorpus() {
 		len(mgr.raceCorpus), broken)
 }
 
-func (mgr *Manager) saveRaceCorpusItem(pairID string, args *rpctype.NewRacePairArgs) {
+func (mgr *Manager) saveRaceCorpusItem(args *rpctype.NewRacePairArgs) {
 	mgr.raceCorpusMu.Lock()
 	defer mgr.raceCorpusMu.Unlock()
 
 	now := time.Now()
 
 	// Check if already exists
-	if existing, exists := mgr.raceCorpus[pairID]; exists {
+	if existing, exists := mgr.raceCorpus[args.Pair.PairID]; exists {
 		// Update existing item
 		existing.LastUpdated = now
 		existing.Count++
@@ -1537,11 +1577,11 @@ func (mgr *Manager) saveRaceCorpusItem(pairID string, args *rpctype.NewRacePairA
 			existing.RaceSignal = args.Pair.Signal
 		}
 
-		log.Logf(2, "Updated existing race pair %s (count: %d)", pairID, existing.Count)
+		log.Logf(2, "Updated existing race pair %s (count: %d)", args.Pair.PairID, existing.Count)
 	} else {
 		// Create new item
 		item := &RaceCorpusItem{
-			PairID:      pairID,
+			PairID:      strconv.FormatUint(args.Pair.PairID, 16),
 			Prog1:       args.Pair.Prog1,
 			Prog2:       args.Pair.Prog2,
 			RaceSignal:  args.Pair.Signal,
@@ -1552,40 +1592,58 @@ func (mgr *Manager) saveRaceCorpusItem(pairID string, args *rpctype.NewRacePairA
 			Count:       1,
 		}
 
-		mgr.raceCorpus[pairID] = item
+		mgr.raceCorpus[args.Pair.PairID] = item
 		mgr.raceStats.uniqueRaces++
 
-		log.Logf(2, "Added new race pair %s from %s", pairID, args.Name)
+		log.Logf(2, "Added new race pair %s from %s", args.Pair.PairID, args.Name)
 	}
 
 	// Persist to database
-	mgr.persistRaceCorpusItem(pairID)
+	mgr.persistRaceCorpusItem(args.Pair.PairID)
 }
 
-func (mgr *Manager) persistRaceCorpusItem(pairID string) {
+func (mgr *Manager) persistRaceCorpusItem(pairID uint64) {
 	item, exists := mgr.raceCorpus[pairID]
 	if !exists {
-		log.Logf(1, "persistRaceCorpusItem: item %s not found in memory", pairID)
+		log.Logf(1, "persistRaceCorpusItem: item %x not found in memory", pairID)
 		return
 	}
 
 	data, err := json.Marshal(item)
 	if err != nil {
-		log.Logf(0, "failed to marshal race corpus item %s: %v", pairID, err)
+		log.Logf(0, "failed to marshal race corpus item %x: %v", pairID, err)
 		return
 	}
 
-	log.Logf(1, "Persisting race corpus item %s (%d bytes)", pairID, len(data))
+	log.Logf(1, "Persisting race corpus item %x (%d bytes)", pairID, len(data))
 
 	// Save to database
-	mgr.raceCorpusDB.Save(pairID, data, 0)
+	mgr.raceCorpusDB.Save(strconv.FormatUint(pairID, 16), data, 0)
 
 	// Flush to ensure data is written to disk
 	if err := mgr.raceCorpusDB.Flush(); err != nil {
 		log.Logf(0, "failed to flush race corpus database: %v", err)
 	} else {
-		log.Logf(1, "Successfully persisted race corpus item %s to disk", pairID)
+		log.Logf(1, "Successfully persisted race corpus item %x to disk", pairID)
 	}
+}
+
+// loadRacePairCandidates converts race corpus items to high-priority pair candidates
+func (mgr *Manager) loadCandidatesFromCorpus() {
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	mgr.raceCorpusMu.RLock()
+	defer mgr.raceCorpusMu.RUnlock()
+	for _, item := range mgr.raceCorpus {
+		PairID, _ := strconv.ParseUint(item.PairID, 16, 64)
+		pair := rpctype.PairCandidate{
+			Prog1:  item.Prog1,
+			Prog2:  item.Prog2,
+			PairID: PairID,
+		}
+		mgr.raceCorpusCandidates = append(mgr.raceCorpusCandidates, pair)
+	}
+	log.Logf(0, "Converted %d race corpus items to pair candidates", len(mgr.raceCorpusCandidates))
 }
 
 func (mgr *Manager) maintainRaceCorpus() {
@@ -1604,7 +1662,7 @@ func (mgr *Manager) maintainRaceCorpus() {
 		// Remove items that are old and only appeared once
 		if item.Count == 1 && item.LastUpdated.Before(cutoff) {
 			delete(mgr.raceCorpus, pairID)
-			mgr.raceCorpusDB.Delete(pairID)
+			mgr.raceCorpusDB.Delete(strconv.FormatUint(pairID, 16))
 			removed++
 		}
 	}
@@ -1629,39 +1687,6 @@ func (mgr *Manager) getRaceCorpusStats() map[string]interface{} {
 		"unique_races": mgr.raceStats.uniqueRaces,
 		"last_updated": mgr.raceStats.lastSaveTime,
 	}
-}
-
-func (mgr *Manager) minimizeRaceCorpus() {
-	mgr.raceCorpusMu.Lock()
-	defer mgr.raceCorpusMu.Unlock()
-
-	log.Logf(1, "Starting race corpus maintenance...")
-
-	before := len(mgr.raceCorpus)
-	removed := 0
-
-	// Clean up old or unimportant items
-	cutoff := time.Now().Add(-24 * time.Hour * 7) // 7 days ago
-
-	for pairID, item := range mgr.raceCorpus {
-		// Remove items that appeared only once and haven't been updated for a week
-		if item.Count == 1 && item.LastUpdated.Before(cutoff) {
-			delete(mgr.raceCorpus, pairID)
-			mgr.raceCorpusDB.Delete(pairID)
-			removed++
-		}
-	}
-
-	// Flush database
-	if err := mgr.raceCorpusDB.Flush(); err != nil {
-		log.Logf(0, "failed to flush race corpus database: %v", err)
-	}
-
-	mgr.raceStats.lastSaveTime = time.Now()
-	mgr.raceStats.uniqueRaces = int64(len(mgr.raceCorpus))
-
-	log.Logf(1, "Race corpus maintenance completed: %d -> %d items (removed %d)",
-		before, len(mgr.raceCorpus), removed)
 }
 
 // deserializeRaceSignal deserializes race signal data from JSON.
@@ -2070,12 +2095,8 @@ func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
 
-	// Generate race pair ID
-	pairID := fmt.Sprintf("%x", args.Pair.PairID)
-	log.Logf(2, "Manager processing race pair %s from %v", pairID, args.Name)
-
 	// 1. Save to race corpus
-	mgr.saveRaceCorpusItem(pairID, args)
+	mgr.saveRaceCorpusItem(args)
 	mgr.raceStats.totalPairs++
 
 	// 2. Race signal processing and propagation
@@ -2104,9 +2125,6 @@ func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
 		// This might influence the fuzzing phase transitions
 		log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
 	}
-
-	log.Logf(1, "Race pair %s saved to corpus (total pairs: %d, unique: %d)",
-		pairID, mgr.raceStats.totalPairs, mgr.raceStats.uniqueRaces)
 	return true
 }
 

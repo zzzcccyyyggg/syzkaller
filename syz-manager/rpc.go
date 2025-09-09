@@ -81,8 +81,12 @@ type RPCManagerView interface {
 	newRacePair(args *rpctype.NewRacePairArgs) bool
 	// Get all current candidates for fuzzer
 	getAllCandidates() []rpctype.Candidate
-	// Get batch of pair candidates for fuzzer
+	// Get batch of pair candidates for fuzzer with priority
+	getPriorityPairCandidates(size int) []rpctype.PairCandidate
 	pairCandidateBatch(size int) []rpctype.PairCandidate
+	// Get counts for logging
+	getCorpusCandidatesCount() int
+	getGeneratedPairCount() int
 	// ===============DDRD====================
 }
 
@@ -98,6 +102,11 @@ func startRPCServer(mgr *Manager) (*RPCServer, error) {
 	if serv.batchSize < mgr.cfg.Procs {
 		serv.batchSize = mgr.cfg.Procs
 	}
+
+	// ===============DDRD====================
+	// Initialize race signals from loaded race corpus
+	serv.initializeRaceSignalsFromCorpus(mgr)
+	// ===============DDRD====================
 	s, err := rpctype.NewRPCServer(mgr.cfg.RPC, "Manager", serv)
 	if err != nil {
 		return nil, err
@@ -406,8 +415,6 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 	// Send updated race signal to fuzzer
 	r.MaxRaceSignal = serializeRaceSignal(f.newMaxRaceSignal.Split(2000))
 
-	// Send new race pairs to fuzzer (distributed from other fuzzers)
-	r.NewRacePairs = serv.getNewRacePairsForFuzzer(a.Name)
 	// ===============DDRD====================
 	r.MaxSignal = f.newMaxSignal.Split(2000).Serialize()
 	if a.NeedCandidates {
@@ -531,7 +538,7 @@ func (serv *RPCServer) GetAllCandidates(a *rpctype.GetAllCandidatesArgs, r *rpct
 
 // GetPairCandidates returns a batch of pair candidates to fuzzer
 func (serv *RPCServer) GetPairCandidates(a *rpctype.GetPairCandidatesArgs, r *rpctype.GetPairCandidatesRes) error {
-	log.Logf(2, "GetPairCandidates request from %v for %d pairs", a.Name, a.Size)
+	// log.Logf(2, "GetPairCandidates request from %v for %d pairs", a.Name, a.Size)
 
 	serv.mu.Lock()
 	defer serv.mu.Unlock()
@@ -542,11 +549,10 @@ func (serv *RPCServer) GetPairCandidates(a *rpctype.GetPairCandidatesArgs, r *rp
 		return nil
 	}
 
-	// Get batch of pair candidates from manager
-	pairCandidates := serv.mgr.pairCandidateBatch(a.Size)
+	// Get batch of pair candidates from manager (race pairs have priority)
+	pairCandidates := serv.mgr.getPriorityPairCandidates(a.Size)
 	r.PairCandidates = pairCandidates
 
-	log.Logf(2, "GetPairCandidates: returning %d pair candidates to %v", len(pairCandidates), a.Name)
 	return nil
 }
 
@@ -574,11 +580,58 @@ func serializeRaceSignal(sig ddrd.Signal) []byte {
 	return data
 }
 
-// getNewRacePairsForFuzzer returns race pairs pending distribution to a fuzzer
-func (serv *RPCServer) getNewRacePairsForFuzzer(fuzzerName string) []rpctype.RacePairInput {
-	// TODO: Get race pairs from manager that need to be distributed to this fuzzer
-	// For now return empty list
-	return []rpctype.RacePairInput{}
+// initializeRaceSignalsFromCorpus initializes race signals from loaded race corpus
+func (serv *RPCServer) initializeRaceSignalsFromCorpus(mgr *Manager) {
+	log.Logf(1, "Initializing race signals from corpus...")
+
+	mgr.raceCorpusMu.RLock()
+	defer mgr.raceCorpusMu.RUnlock()
+
+	totalSignals := 0
+	processedItems := 0
+
+	// Initialize empty race signals if not already done
+	if serv.maxRaceSignal == nil {
+		serv.maxRaceSignal = make(ddrd.Signal)
+	}
+	if serv.corpusRaceSignal == nil {
+		serv.corpusRaceSignal = make(ddrd.Signal)
+	}
+
+	// Process each race corpus item
+	for pairID, item := range mgr.raceCorpus {
+		if len(item.RaceSignal) == 0 {
+			continue // Skip items without race signal
+		}
+
+		// Deserialize the race signal using existing function
+		raceSignal, err := deserializeRaceSignal(item.RaceSignal)
+		if err != nil {
+			log.Logf(0, "Failed to deserialize race signal for pair %v: %v", pairID, err)
+			continue
+		}
+
+		if raceSignal != nil && !raceSignal.Empty() {
+			// Merge into both corpus and max race signals
+			serv.corpusRaceSignal.Merge(*raceSignal)
+			serv.maxRaceSignal.Merge(*raceSignal)
+
+			totalSignals += len(*raceSignal)
+			processedItems++
+
+			log.Logf(2, "Loaded race signal from pair %v: %d signals",
+				pairID, len(*raceSignal))
+		}
+	}
+
+	log.Logf(0, "Race signal initialization complete: processed %d items, loaded %d total signals",
+		processedItems, totalSignals)
+	log.Logf(1, "Final race signal sizes: corpus=%d, max=%d",
+		len(serv.corpusRaceSignal), len(serv.maxRaceSignal))
 }
+
+// ===============DDRD====================
+
+// ===============DDRD====================
 
 // ===============DDRD====================

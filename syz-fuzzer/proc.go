@@ -621,22 +621,7 @@ func (proc *Proc) sendRacePairsToManager(p1, p2 *prog.Prog, racePairs []ddrd.May
 		proc.pid, len(prog1Data), len(prog2Data))
 
 	// Generate unique pair ID using uint64 hash
-	hash1 := hash.Hash(prog1Data)
-	hash2 := hash.Hash(prog2Data)
-	hash3 := hash.Hash([]byte(fmt.Sprintf("%d", len(racePairs))))
-
-	// Convert hash signatures to uint64 for XOR operation
-	var pairIDHash uint64
-	for i := 0; i < 8 && i < len(hash1); i++ {
-		pairIDHash ^= uint64(hash1[i]) << uint(i*8)
-	}
-	for i := 0; i < 8 && i < len(hash2); i++ {
-		pairIDHash ^= uint64(hash2[i]) << uint(i*8)
-	}
-	for i := 0; i < 8 && i < len(hash3); i++ {
-		pairIDHash ^= uint64(hash3[i]) << uint(i*8)
-	}
-
+	var pairIDHash uint64 = ddrd.GeneratePairID(prog1Data, prog2Data)
 	// Serialize race pairs data
 	racePairsData, err := json.Marshal(racePairs)
 	if err != nil {
