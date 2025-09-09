@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"strconv"
 	"sync"
 	"time"
 
@@ -66,6 +67,14 @@ type RaceCorpusItem struct {
 	Count       int       `json:"count"`  // discovery count
 }
 
+type RaceValidated struct {
+	PairID     string `json:"pair_id"`
+	Prog1      []byte `json:"prog1"`
+	Prog2      []byte `json:"prog2"`
+	RaceSignal []byte `json:"race_signal"` // serialized ddrd.Serial
+	Iscrashed  bool   `json:"is_crashed"`
+}
+
 // context contains race validation context
 type context struct {
 	logf         func(string, ...interface{})
@@ -81,6 +90,7 @@ type context struct {
 	bootRequests chan int
 	stats        *Stats
 	timeouts     targets.Timeouts
+	validatedDB  *ValidatedDB // Database for tracking validated race pairs
 }
 
 // validationInstance wraps a VM instance for race validation
@@ -122,6 +132,11 @@ func Run(corpusPath string, cfg *mgrconfig.Config, hostFeatures *host.Features, 
 	// Close all remaining instances after validation and goroutines complete
 	ctx.closeAllInstances()
 
+	// Close validation database
+	if closeErr := ctx.validatedDB.Close(); closeErr != nil {
+		log.Logf(0, "Warning: failed to close validation database: %v", closeErr)
+	}
+
 	return results, stats, err
 }
 
@@ -137,6 +152,12 @@ func prepareCtx(corpusPath string, cfg *mgrconfig.Config, features *host.Feature
 		return nil, fmt.Errorf("failed to get prog target: %v", err)
 	}
 
+	// Initialize validation database
+	validatedDB, err := OpenValidatedDB(cfg.Workdir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open validation database: %v", err)
+	}
+
 	ctx := &context{
 		logf:         func(format string, args ...interface{}) { log.Logf(0, format, args...) },
 		maxAttempts:  maxAttempts,
@@ -150,6 +171,7 @@ func prepareCtx(corpusPath string, cfg *mgrconfig.Config, features *host.Feature
 		bootRequests: make(chan int, VMs),
 		stats:        new(Stats),
 		timeouts:     cfg.Timeouts,
+		validatedDB:  validatedDB,
 	}
 	// Load race corpus
 	loadStart := time.Now()
@@ -158,6 +180,15 @@ func prepareCtx(corpusPath string, cfg *mgrconfig.Config, features *host.Feature
 	}
 	ctx.stats.LoadCorpusTime = time.Since(loadStart)
 	ctx.validateLogf(0, "loaded %d race pairs from corpus", len(ctx.raceCorpus))
+
+	// Print validation statistics
+	total, valid, invalid, err := ctx.validatedDB.GetValidationStats()
+	if err != nil {
+		ctx.validateLogf(0, "Warning: failed to get validation stats: %v", err)
+	} else {
+		ctx.validateLogf(0, "validation database stats: %d total (%d valid, %d invalid)", total, valid, invalid)
+	}
+
 	return ctx, nil
 }
 
@@ -191,16 +222,13 @@ func (ctx *context) parseProgram(data []byte) (*prog.Prog, error) {
 	if len(data) > 0 && data[0] < 32 {
 		// This is binary format - we need to deserialize it properly
 		// Binary format is the output of SerializeForExec, we need to parse it back
-		prog := &prog.Prog{
-			Target: ctx.pTarget,
-		}
 
 		// Try to deserialize binary format
 		// Unfortunately, syzkaller doesn't expose a public method to deserialize binary format
 		// So we need to handle this by converting back to text first
 		// For now, let's try strict text parsing as fallback
-		if prog, err := ctx.pTarget.Deserialize(data, prog.Strict); err == nil {
-			return prog, nil
+		if progResult, err := ctx.pTarget.Deserialize(data, prog.Strict); err == nil {
+			return progResult, nil
 		}
 
 		return nil, fmt.Errorf("binary program format detected but failed to parse: data starts with 0x%x", data[0])
@@ -210,27 +238,55 @@ func (ctx *context) parseProgram(data []byte) (*prog.Prog, error) {
 	return ctx.pTarget.Deserialize(data, prog.Strict)
 }
 
-// loadRaceCorpus loads race pairs from the corpus database
+// loadRaceCorpus loads race pairs from the corpus database, filtering out already validated ones
 func (ctx *context) loadRaceCorpus(corpusPath string) error {
 	raceCorpusDB, err := db.Open(corpusPath, false) // Read-only
 	if err != nil {
 		return err
 	}
 
+	// Get list of unvalidated pairs from validation database
+	unvalidatedPairIDs := ctx.validatedDB.GetUnvalidatedPairs(raceCorpusDB)
+	unvalidatedSet := make(map[uint64]bool)
+	for _, pairID := range unvalidatedPairIDs {
+		unvalidatedSet[pairID] = true
+	}
+
 	ctx.raceCorpus = make(map[string]*RaceCorpusItem)
 
+	loaded := 0
+	skipped := 0
 	broken := 0
+
 	for key, rec := range raceCorpusDB.Records {
-		var item RaceCorpusItem
-		if err := json.Unmarshal(rec.Val, &item); err != nil {
-			log.Logf(0, "failed to unmarshal race corpus item %s: %v", key, err)
+		// Parse pair ID from key (hex format)
+		pairID, err := strconv.ParseUint(key, 16, 64)
+		if err != nil {
+			ctx.validateLogf(1, "Invalid corpus key format: %s, skipping", key)
 			broken++
 			continue
 		}
+
+		// Skip if already validated
+		if !unvalidatedSet[pairID] {
+			skipped++
+			continue
+		}
+
+		var item RaceCorpusItem
+		if err := json.Unmarshal(rec.Val, &item); err != nil {
+			ctx.validateLogf(0, "failed to unmarshal race corpus item %s: %v", key, err)
+			broken++
+			continue
+		}
+
 		ctx.raceCorpus[key] = &item
+		loaded++
 	}
 
-	log.Logf(0, "race corpus loaded: %d items, %d broken", len(ctx.raceCorpus), broken)
+	ctx.validateLogf(0, "Race corpus loading complete: %d loaded, %d already validated (skipped), %d broken",
+		loaded, skipped, broken)
+
 	return nil
 }
 
@@ -253,9 +309,38 @@ func (ctx *context) validate() (*Results, error) {
 
 		results.RaceResults = append(results.RaceResults, raceResult)
 
+		// Convert string PairID to uint64
+		pairIDNum, err := strconv.ParseUint(raceItem.PairID, 16, 64)
+		if err != nil {
+			ctx.validateLogf(0, "Warning: invalid PairID format %s: %v", raceItem.PairID, err)
+			continue
+		}
+
 		if raceResult.Confirmed {
 			results.ConfirmedRaces++
+			// Record successful validation
+			if err := ctx.validatedDB.MarkAsValidated(pairIDNum, raceItem.Source); err != nil {
+				ctx.validateLogf(0, "Warning: failed to record successful validation for %x: %v", pairIDNum, err)
+			} else {
+				ctx.validateLogf(2, "Recorded successful validation for race pair %x", pairIDNum)
+			}
+		} else {
+			// Record failed validation
+			errorMsg := raceResult.ErrorMsg
+			if errorMsg == "" {
+				errorMsg = "race not confirmed after validation attempts"
+			}
+			if err := ctx.validatedDB.MarkAsInvalid(pairIDNum, errorMsg, raceItem.Source); err != nil {
+				ctx.validateLogf(0, "Warning: failed to record failed validation for %x: %v", pairIDNum, err)
+			} else {
+				ctx.validateLogf(2, "Recorded failed validation for race pair %x: %s", pairIDNum, errorMsg)
+			}
 		}
+	}
+
+	// Flush validation database to ensure data is persisted
+	if err := ctx.validatedDB.Flush(); err != nil {
+		ctx.validateLogf(0, "Warning: failed to flush validation database: %v", err)
 	}
 
 	return results, nil
