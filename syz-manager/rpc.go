@@ -491,9 +491,12 @@ func (serv *RPCServer) NewRacePair(a *rpctype.NewRacePairArgs, r *rpctype.NewRac
 	// Now using Manager interface for complex processing
 	accepted := serv.mgr.newRacePair(a)
 
-	// Could set response fields based on processing results
+	// Set response fields based on processing results
+	r.Accepted = accepted
 	if accepted {
 		log.Logf(2, "Race pair %x was accepted by Manager", a.Pair.PairID)
+	} else {
+		log.Logf(2, "Race pair %x was rejected by Manager", a.Pair.PairID)
 	}
 
 	return nil

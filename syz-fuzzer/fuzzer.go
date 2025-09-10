@@ -815,7 +815,7 @@ func parseOutputType(str string) OutputType {
 	}
 }
 
-func (fuzzer *Fuzzer) updateRaceCoverage(races []ddrd.MayRacePair) {
+func (fuzzer *Fuzzer) updateRaceCoverage(races []*ddrd.MayRacePair) {
 	if len(races) == 0 {
 		return
 	}
@@ -835,14 +835,8 @@ func (fuzzer *Fuzzer) updateRaceCoverage(races []ddrd.MayRacePair) {
 	}
 
 	// ===============DDRD====================
-	// Convert to pointers for RaceCover processing
-	racePtrs := make([]*ddrd.MayRacePair, len(races))
-	for i := range races {
-		racePtrs[i] = &races[i]
-	}
-
-	// Update max race coverage and detect new races
-	newRaces := fuzzer.maxRaceCover.MergeDiff(racePtrs)
+	// Update max race coverage and detect new races (races already as pointers)
+	newRaces := fuzzer.maxRaceCover.MergeDiff(races)
 	if len(newRaces) > 0 {
 		log.Logf(1, "discovered %d new race pairs", len(newRaces))
 		// Add to new race coverage for manager sync

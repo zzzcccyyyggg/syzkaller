@@ -54,8 +54,8 @@ func (s *Signal) Split(n int) Signal {
 	return c
 }
 
-// FromRaw creates a signal from raw uint32 elements with the given priority.
-func FromRaw(raw []uint32, prio uint8) Signal {
+// FromRaw creates a signal from raw uint64 elements with the given priority.
+func FromRaw(raw []uint64, prio uint8) Signal {
 	if len(raw) == 0 {
 		return nil
 	}

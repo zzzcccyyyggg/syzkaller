@@ -53,7 +53,7 @@ type NewRacePairArgs struct {
 
 // NewRacePairRes represents response for race pair submission
 type NewRacePairRes struct {
-	// Currently empty, reserved for future use
+	Accepted bool `json:"accepted"` // Whether the race pair was accepted by manager
 }
 
 // ===============DDRD====================

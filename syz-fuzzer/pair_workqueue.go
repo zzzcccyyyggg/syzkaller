@@ -26,7 +26,7 @@ type PairWorkTriage struct {
 // PairWorkValuable represents a valuable work item for race pair execution
 type PairWorkValuable struct {
 	progPair *ProgPair
-	info     *ipc.PairProgInfo
+	score    int
 }
 
 // RacePairWorkQueue holds race pair work items for RACE PAIR mode
@@ -89,19 +89,19 @@ func (rpwq *RacePairWorkQueue) dequeue() interface{} {
 	rpwq.mu.Lock()
 	defer rpwq.mu.Unlock()
 
-	// Prioritize candidates first
-	if len(rpwq.candidates) != 0 {
-		last := len(rpwq.candidates) - 1
-		item := rpwq.candidates[last]
-		rpwq.candidates = rpwq.candidates[:last]
-		return item
-	}
-
 	// Then triage
 	if len(rpwq.triage) != 0 {
 		last := len(rpwq.triage) - 1
 		item := rpwq.triage[last]
 		rpwq.triage = rpwq.triage[:last]
+		return item
+	}
+
+	// Prioritize candidates first
+	if len(rpwq.candidates) != 0 {
+		last := len(rpwq.candidates) - 1
+		item := rpwq.candidates[last]
+		rpwq.candidates = rpwq.candidates[:last]
 		return item
 	}
 
@@ -121,13 +121,6 @@ func (rpwq *RacePairWorkQueue) getQueueStats() (candidatesCount, triageCount, va
 	rpwq.mu.RLock()
 	defer rpwq.mu.RUnlock()
 	return len(rpwq.candidates), len(rpwq.triage), len(rpwq.valuable)
-}
-
-// hasWork returns true if there are any work items to process
-func (rpwq *RacePairWorkQueue) hasWork() bool {
-	rpwq.mu.RLock()
-	defer rpwq.mu.RUnlock()
-	return len(rpwq.candidates) > 0 || len(rpwq.triage) > 0 || len(rpwq.valuable) > 0
 }
 
 // enqueueCorpusPair adds a race pair derived from corpus combinations
@@ -164,13 +157,3 @@ func (rpwq *RacePairWorkQueue) enqueueNewCoverPair(p1, p2 *prog.Prog, pairID str
 }
 
 // ===============DDRD====================
-
-// hasActiveWork checks if the race pair work queue has any pending work
-func (rpwq *RacePairWorkQueue) hasActiveWork() bool {
-	rpwq.mu.RLock()
-	defer rpwq.mu.RUnlock()
-
-	return len(rpwq.candidates) > 0 ||
-		len(rpwq.triage) > 0 ||
-		len(rpwq.valuable) > 0
-}
