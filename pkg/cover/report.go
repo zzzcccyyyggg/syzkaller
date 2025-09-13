@@ -9,6 +9,7 @@ import (
 
 	"github.com/google/syzkaller/pkg/cover/backend"
 	"github.com/google/syzkaller/pkg/host"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/sys/targets"
 )
@@ -131,9 +132,26 @@ func (rg *ReportGenerator) prepareFileMap(progs []Prog) (map[string]*file, error
 	// If the backend provided coverage callback locations for the binaries, use them to
 	// verify data returned by kcov.
 	if verifyCoverPoints && (len(unmatchedProgPCs) > 0) {
-		return nil, fmt.Errorf("%d out of %d PCs returned by kcov do not have matching "+
-			"coverage callbacks. Check the discoverModules() code",
+		log.Logf(0, "Warning: %d out of %d PCs returned by kcov do not have matching "+
+			"coverage callbacks. Removing unmatched PCs and continuing. "+
+			"Check the discoverModules() code for potential issues",
 			len(unmatchedProgPCs), len(progPCs))
+		
+		// Remove unmatched PCs from progPCs to continue processing
+		for unmatchedPC := range unmatchedProgPCs {
+			delete(progPCs, unmatchedPC)
+		}
+		
+		// Also remove these PCs from the original progs data to keep consistency
+		for i := range progs {
+			var filteredPCs []uint64
+			for _, pc := range progs[i].PCs {
+				if !unmatchedProgPCs[pc] {
+					filteredPCs = append(filteredPCs, pc)
+				}
+			}
+			progs[i].PCs = filteredPCs
+		}
 	}
 	for _, unit := range rg.Units {
 		f := files[unit.Name]

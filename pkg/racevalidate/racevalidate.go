@@ -457,16 +457,16 @@ func (ctx *context) attemptValidation(prog1, prog2 *prog.Prog, raceItem *RaceCor
 				racePair.LockType, ctx.maxAttempts)
 
 			if err != nil {
-				log.Logf(0, "race validation execution failed for pair %d: %v", i+1, err)
+				ctx.validateLogf(0, "race validation execution failed for pair %d: %v", i+1, err)
 				continue
 			}
 
 			// Process results for this race pair
 			if result.Report != nil {
 				reports = append(reports, result.Report)
-				log.Logf(1, "race validation detected crash for pair %d: %v", i+1, result.Report.Title)
+				ctx.validateLogf(1, "race validation detected crash for pair %d: %v", i+1, result.Report.Title)
 			} else {
-				log.Logf(1, "race validation completed without crash for pair %d", i+1)
+				ctx.validateLogf(1, "race validation completed without crash for pair %d", i+1)
 			}
 		}
 	} else {

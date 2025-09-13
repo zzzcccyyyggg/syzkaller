@@ -42,13 +42,19 @@ func usage() {
 	fmt.Fprintf(os.Stderr, "Examples:\n")
 	fmt.Fprintf(os.Stderr, "  # Basic validation\n")
 	fmt.Fprintf(os.Stderr, "  %s -config=my.cfg -corpus=workdir/race-corpus.db\n\n", os.Args[0])
+	fmt.Fprintf(os.Stderr, "  # Auto-locate corpus in workdir (if using default name)\n")
+	fmt.Fprintf(os.Stderr, "  %s -config=my.cfg\n\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  # Show only database statistics\n")
 	fmt.Fprintf(os.Stderr, "  %s -config=my.cfg -corpus=workdir/race-corpus.db -stats-only\n\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "  # Use fewer VMs and more attempts\n")
 	fmt.Fprintf(os.Stderr, "  %s -config=my.cfg -corpus=workdir/race-corpus.db -count=2 -attempts=5\n\n", os.Args[0])
 	fmt.Fprintf(os.Stderr, "Options:\n")
 	flag.PrintDefaults()
-	fmt.Fprintf(os.Stderr, "\nValidation Database:\n")
+	fmt.Fprintf(os.Stderr, "\nCorpus Auto-location:\n")
+	fmt.Fprintf(os.Stderr, "  If -corpus is not specified or uses the default name 'race-corpus.db',\n")
+	fmt.Fprintf(os.Stderr, "  the tool will automatically look for it in the workdir.\n")
+	fmt.Fprintf(os.Stderr, "  Auto-location path: {workdir}/race-corpus.db\n\n")
+	fmt.Fprintf(os.Stderr, "Validation Database:\n")
 	fmt.Fprintf(os.Stderr, "  The tool maintains a validation database (race_validated.db) to track\n")
 	fmt.Fprintf(os.Stderr, "  which race pairs have been validated, preventing duplicate work.\n")
 	fmt.Fprintf(os.Stderr, "  Location: {workdir}/race_validated.db\n\n")
@@ -63,8 +69,8 @@ func main() {
 		return
 	}
 
-	if *flagConfig == "" || *flagCorpus == "" {
-		fmt.Fprintf(os.Stderr, "Error: -config and -corpus are required\n\n")
+	if *flagConfig == "" {
+		fmt.Fprintf(os.Stderr, "Error: -config is required\n\n")
 		usage()
 		os.Exit(1)
 	}
@@ -79,6 +85,15 @@ func main() {
 	if *flagWorkdir != "" {
 		workdir = *flagWorkdir
 		cfg.Workdir = workdir
+	}
+
+	// Auto-locate race corpus in workdir if using default name
+	if *flagCorpus == "race-corpus.db" && workdir != "" {
+		workdirCorpus := filepath.Join(workdir, "race-corpus.db")
+		if osutil.IsExist(workdirCorpus) {
+			*flagCorpus = workdirCorpus
+			log.Logf(1, "Auto-located race corpus in workdir: %s", workdirCorpus)
+		}
 	}
 
 	if !osutil.IsExist(*flagCorpus) {
