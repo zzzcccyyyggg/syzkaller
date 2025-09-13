@@ -1,0 +1,16 @@
+resource fd_usb_fs[fd]
+open$usb(file ptr[in, string["/mnt/usb/testfile"]], flags flags[open_flags], mode flags[open_mode]) fd_usb_fs
+read$usb(fd fd_usb_fs, buf ptr[out, array[int8]], count len[buf])
+write$usb(fd fd_usb_fs, buf ptr[in, array[int8]], count len[buf])
+close$usb(fd fd_usb_fs)
+fchmod$usb(fd fd_usb_fs, mode flags[open_mode])
+
+truncate$usb(path ptr[in, string["/mnt/usb/testfile"]], length intptr)
+fallocate$usb(fd fd_usb_fs, mode flags[fallocate_mode], offset intptr, len intptr)
+
+# 链接操作
+link$usb(oldpath ptr[in, string["/mnt/usb/testfile"]], newpath ptr[in, string["/mnt/usb/hardlink_testfile"]])
+unlink$usb(path ptr[in, string["/mnt/usb/hardlink_testfile"]])
+setxattr$usb(path ptr[in, string["/mnt/usb/testfile"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsetxattr$usb(fd fd_usb_fs, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsync$usb(fd fd_usb_fs)

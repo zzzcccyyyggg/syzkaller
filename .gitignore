@@ -31,3 +31,5 @@ dashboard/app/.gcloudignore
 /test
 log
 /build
+
+*.log

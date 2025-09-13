@@ -316,7 +316,7 @@ func NewFuzzScheduler(mode FuzzMode) *FuzzScheduler {
 		lastRaceSignalUpdate: time.Now(),
 		normalFuzzEnabled:    normalEnabled,
 		raceFuzzEnabled:      raceEnabled,
-		maxPhaseTime:         2 * time.Minute, // 2 minutes per phase for testing
+		maxPhaseTime:         10 * time.Minute, // 2 minutes per phase for testing
 	}
 
 	return scheduler
