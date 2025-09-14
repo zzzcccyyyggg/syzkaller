@@ -235,6 +235,10 @@ type Experimental struct {
 	// Maximum number of data race VarName combinations to remember (default: 10000)
 	// When this limit is reached, old combinations will be cleared to prevent memory growth
 	MaxDataRaceCombinations int `json:"max_data_race_combinations,omitempty"`
+
+	// Ignore SYZFATAL crashes to prevent VM restarts from internal syzkaller errors
+	// This helps maintain testing continuity when syzkaller components encounter issues
+	IgnoreSyzFatal bool `json:"ignore_syz_fatal,omitempty"`
 	// ===============DDRD====================
 }
 

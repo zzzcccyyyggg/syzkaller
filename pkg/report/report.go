@@ -102,7 +102,15 @@ func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
 	if ctor == nil {
 		return nil, fmt.Errorf("unknown OS: %v", typ)
 	}
-	ignores, err := compileRegexps(cfg.Ignores)
+	
+	// Prepare ignores list
+	ignoresConfig := cfg.Ignores
+	// Add SYZFATAL to ignores if the experimental option is enabled
+	if cfg.Experimental.IgnoreSyzFatal {
+		ignoresConfig = append(ignoresConfig, "^SYZFATAL:")
+	}
+	
+	ignores, err := compileRegexps(ignoresConfig)
 	if err != nil {
 		return nil, err
 	}
