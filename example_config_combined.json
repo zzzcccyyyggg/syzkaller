@@ -1,0 +1,23 @@
+{
+    "name": "test_combined_features",
+    "target": "linux/amd64",
+    "http": "127.0.0.1:56741", 
+    "workdir": "/tmp/syzkaller-workdir",
+    "kernel_obj": "/path/to/kernel/vmlinux",
+    "image": "/path/to/kernel/image",
+    "sshkey": "/path/to/ssh/key",
+    "syzkaller": "/path/to/syzkaller",
+    "procs": 8,
+    "type": "qemu",
+    "vm": {
+        "count": 4,
+        "kernel": "/path/to/bzImage",
+        "cpu": 2,
+        "mem": 2048
+    },
+    "experimental": {
+        "skip_duplicate_data_races": true,
+        "max_data_race_combinations": 10000,
+        "ignore_syz_fatal": true
+    }
+}

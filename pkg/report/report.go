@@ -102,14 +102,15 @@ func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
 	if ctor == nil {
 		return nil, fmt.Errorf("unknown OS: %v", typ)
 	}
-	
+
 	// Prepare ignores list
 	ignoresConfig := cfg.Ignores
 	// Add SYZFATAL to ignores if the experimental option is enabled
 	if cfg.Experimental.IgnoreSyzFatal {
-		ignoresConfig = append(ignoresConfig, "^SYZFATAL:")
+		ignoresConfig = append(ignoresConfig, "SYZFATAL:")
+		fmt.Printf("DEBUG: Added SYZFATAL to ignores list\n")
 	}
-	
+
 	ignores, err := compileRegexps(ignoresConfig)
 	if err != nil {
 		return nil, err
@@ -495,12 +496,28 @@ func matchOops(line []byte, oops *oops, ignores []*regexp.Regexp) bool {
 	if match == -1 {
 		return false
 	}
+
+	// Debug: Check if this is SYZFATAL
+	if bytes.Contains(oops.header, []byte("SYZFATAL:")) {
+		fmt.Printf("DEBUG: Found SYZFATAL header match in line: %s\n", string(line))
+	}
+
 	if matchesAny(line, oops.suppressions) {
 		return false
 	}
 	if matchesAny(line, ignores) {
+		// Debug: Check if we're ignoring SYZFATAL
+		if bytes.Contains(line, []byte("SYZFATAL:")) {
+			fmt.Printf("DEBUG: Ignoring SYZFATAL line: %s\n", string(line))
+		}
 		return false
 	}
+
+	// Debug: SYZFATAL not ignored
+	if bytes.Contains(line, []byte("SYZFATAL:")) {
+		fmt.Printf("DEBUG: SYZFATAL NOT ignored, will report as crash: %s\n", string(line))
+	}
+
 	return true
 }
 
