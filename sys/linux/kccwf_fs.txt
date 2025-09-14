@@ -79,10 +79,52 @@ fcntl$F_GET_FILE_RW_HINT$kccwf(fd fd, cmd const[F_GET_FILE_RW_HINT], hint ptr[ou
 fcntl$F_SET_RW_HINT$kccwf(fd fd, cmd const[F_SET_RW_HINT], hint ptr[in, flags[fcntl_rw_hint, int64]])
 fcntl$F_SET_FILE_RW_HINT$kccwf(fd fd, cmd const[F_SET_FILE_RW_HINT], hint ptr[in, flags[fcntl_rw_hint, int64]])
 
-### 文件系统和同步 (Filesystem and Synchronization)
-
 fsync$kccwf(fd fd)
 fdatasync$kccwf(fd fd)
 sync$kccwf()
 syncfs$kccwf(fd fd)
 sync_file_range$kccwf(fd fd, off intptr, nbytes intptr, flags flags[sync_file_flags])
+
+# 基础文件操作
+open$kccwf(file ptr[in, string["/mnt/kccwf/testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
+
+# 目录操作
+mkdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]], mode flags[open_mode])
+rmdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]])
+
+# 文件元数据
+chmod$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], mode flags[open_mode])
+chown$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], uid int32, gid int32)
+utimes$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], times ptr[in, timeval])
+
+# 高级文件操作
+rename$kccwf(old ptr[in, string["/mnt/kccwf/testfile#"]], new ptr[in, string["/mnt/kccwf/testfile#"]])
+truncate$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], length intptr)
+
+# 链接操作
+link$kccwf(oldpath ptr[in, string["/mnt/kccwf/testfile#"]], newpath ptr[in, string["/mnt/kccwf/hardlink#"]])
+unlink$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]])
+symlink$kccwf(target ptr[in, string["/mnt/kccwf/target_%d"]], linkpath ptr[in, string["/mnt/kccwf/symlink#"]])
+
+# 扩展属性 (修正指针参数)
+setxattr$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+fsetxattr$kccwf(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+
+
+# 文件状态获取 (修正指针嵌套)
+stat$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], buf ptr[out, stat_buffer])
+
+
+stat_buffer {
+    st_dev      int64
+    st_ino      int64
+    st_mode     int32
+    st_nlink    int32
+    st_uid      int32
+    st_gid      int32
+    st_rdev     int64
+    st_size     int64
+    st_blksize  int64
+    st_blocks   int64
+}

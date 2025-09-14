@@ -36,9 +36,10 @@ type Stats struct {
 	corpusSignal        Stat
 	maxSignal           Stat
 	// Race覆盖率统计
-	raceSignals    Stat
-	newRaceSignals Stat
-	racePrograms   Stat
+	raceSignals      Stat
+	newRaceSignals   Stat
+	racePrograms     Stat
+	skippedDataRaces Stat // Count of skipped duplicate data races
 
 	mu         sync.Mutex
 	namedStats map[string]uint64

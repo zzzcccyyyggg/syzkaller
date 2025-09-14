@@ -1,0 +1,21 @@
+{
+    "name": "test-datarace-skip",
+    "target": "linux/amd64",
+    "http": "127.0.0.1:56741",
+    "workdir": "./workdir",
+    "kernel_obj": "/path/to/vmlinux",
+    "image": "/path/to/disk.img",
+    "sshkey": "/path/to/key",
+    "syzkaller": "/path/to/syzkaller",
+    "procs": 8,
+    "type": "qemu",
+    "vm": {
+        "count": 4,
+        "cpu": 2,
+        "mem": 2048
+    },
+    "experimental": {
+        "skip_duplicate_data_races": true,
+        "max_data_race_combinations": 5000
+    }
+}

@@ -86,7 +86,7 @@ type Manager struct {
 
 	dash *dashapi.Dashboard
 
-	mu                    sync.Mutex
+	mu                    sync.RWMutex
 	phase                 int
 	targetEnabledSyscalls map[*prog.Syscall]bool
 
@@ -100,7 +100,10 @@ type Manager struct {
 	lastMinCorpus        int
 	memoryLeakFrames     map[string]bool
 	dataRaceFrames       map[string]bool
-	saturatedCalls       map[string]bool
+	// Track duplicate data race VarName combinations to avoid repeated reports
+	reportedDataRaceCombinations map[string]bool
+	skippedDataRaceCount         int64 // Statistics for skipped duplicate data races
+	saturatedCalls               map[string]bool
 
 	needMoreRepros     chan chan bool
 	externalReproQueue chan *Crash
@@ -223,26 +226,28 @@ func RunManager(cfg *mgrconfig.Config) {
 	}
 
 	mgr := &Manager{
-		cfg:                cfg,
-		vmPool:             vmPool,
-		target:             cfg.Target,
-		sysTarget:          cfg.SysTarget,
-		reporter:           reporter,
-		crashdir:           crashdir,
-		startTime:          time.Now(),
-		stats:              &Stats{haveHub: cfg.HubClient != ""},
-		crashTypes:         make(map[string]bool),
-		corpus:             make(map[string]CorpusItem),
-		disabledHashes:     make(map[string]struct{}),
-		memoryLeakFrames:   make(map[string]bool),
-		dataRaceFrames:     make(map[string]bool),
-		fresh:              true,
-		vmStop:             make(chan bool),
-		externalReproQueue: make(chan *Crash, 10),
-		needMoreRepros:     make(chan chan bool),
-		reproRequest:       make(chan chan map[string]bool),
-		usedFiles:          make(map[string]time.Time),
-		saturatedCalls:     make(map[string]bool),
+		cfg:                          cfg,
+		vmPool:                       vmPool,
+		target:                       cfg.Target,
+		sysTarget:                    cfg.SysTarget,
+		reporter:                     reporter,
+		crashdir:                     crashdir,
+		startTime:                    time.Now(),
+		stats:                        &Stats{haveHub: cfg.HubClient != ""},
+		crashTypes:                   make(map[string]bool),
+		corpus:                       make(map[string]CorpusItem),
+		disabledHashes:               make(map[string]struct{}),
+		memoryLeakFrames:             make(map[string]bool),
+		dataRaceFrames:               make(map[string]bool),
+		reportedDataRaceCombinations: make(map[string]bool),
+		skippedDataRaceCount:         0,
+		fresh:                        true,
+		vmStop:                       make(chan bool),
+		externalReproQueue:           make(chan *Crash, 10),
+		needMoreRepros:               make(chan chan bool),
+		reproRequest:                 make(chan chan map[string]bool),
+		usedFiles:                    make(map[string]time.Time),
+		saturatedCalls:               make(map[string]bool),
 		// ===============DDRD====================
 		// Initialize fuzz scheduler for mode management
 		fuzzScheduler: NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
@@ -307,13 +312,14 @@ func RunManager(cfg *mgrconfig.Config) {
 			maxSignal := mgr.stats.maxSignal.get()
 			raceSignals := mgr.stats.raceSignals.get()
 			newRaceSignals := mgr.stats.newRaceSignals.get()
+			skippedDataRaces := mgr.stats.skippedDataRaces.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
+			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v, skippedDataRaces %v",
+				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen, skippedDataRaces)
 		}
 	}()
 
@@ -325,6 +331,9 @@ func RunManager(cfg *mgrconfig.Config) {
 		go mgr.dashboardReporter()
 		go mgr.dashboardReproTasks()
 	}
+
+	// Start data race combination cleanup goroutine
+	go mgr.cleanupDataRaceCombinations()
 
 	osutil.HandleInterrupts(vm.Shutdown)
 	if mgr.vmPool == nil {
@@ -920,7 +929,9 @@ func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Re
 	}
 
 	var vmInfo []byte
-	rep := inst.MonitorExecution(outc, errc, mgr.reporter, vm.ExitTimeout)
+	// Create monitor config for skipping duplicate data races
+	monitorConfig := mgr.createMonitorConfig()
+	rep := inst.MonitorExecutionWithConfig(outc, errc, mgr.reporter, vm.ExitTimeout, monitorConfig)
 	if rep == nil {
 		// This is the only "OK" outcome.
 		log.Logf(0, "%s: running for %v, restarting", instanceName, time.Since(start))
@@ -959,13 +970,23 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 		mgr.mu.Unlock()
 	}
 	if crash.Type == crash_pkg.DataRace {
+		// Check if this is a duplicate VarName combination
+		if !mgr.isNewDataRaceCombination(crash.Report) {
+			// This is a duplicate combination, skip reporting
+			if len(crash.Report.ReportedRaces) > 0 {
+				mgr.logDataRaceSkip(crash.Report.ReportedRaces[0])
+			}
+			// Return false to indicate the crash was skipped
+			return false
+		}
+
 		mgr.mu.Lock()
 		mgr.dataRaceFrames[crash.Frame] = true
 		mgr.mu.Unlock()
 
 		// Handle custom datarace reports - simplified for queue-based system
 		if crash.Report.IsDataRaceReport() {
-			log.Logf(0, "vm-%v: datarace report detected and logged", crash.vmIndex)
+			log.Logf(0, "vm-%v: new datarace report detected and logged", crash.vmIndex)
 
 			// Output race summary if available
 			if len(crash.Report.GetReportedRaces()) > 0 {
@@ -2126,6 +2147,150 @@ func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
 		log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
 	}
 	return true
+}
+
+// normalizeVarNameKey creates a normalized key for VarName combinations
+// Ensures consistent ordering to avoid duplicate entries like "A:B" vs "B:A"
+func normalizeVarNameKey(var1, var2 string) string {
+	if var1 == "" && var2 == "" {
+		return ""
+	}
+	if var1 == "" {
+		return var2
+	}
+	if var2 == "" {
+		return var1
+	}
+	// Ensure consistent ordering
+	if var1 > var2 {
+		return var2 + ":" + var1
+	}
+	return var1 + ":" + var2
+}
+
+// isNewDataRaceCombination checks if a data race VarName combination has been seen before
+// Returns true if this is a new combination that should be reported
+// Returns false if this combination was already reported and should be skipped
+func (mgr *Manager) isNewDataRaceCombination(rep *report.Report) bool {
+	// Skip check if feature is disabled
+	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		return true
+	}
+
+	// Must have race information
+	if len(rep.ReportedRaces) == 0 {
+		return true
+	}
+
+	race := rep.ReportedRaces[0]
+	key := normalizeVarNameKey(race.VarName1, race.VarName2)
+
+	// Empty key means no valid VarNames
+	if key == "" {
+		return true
+	}
+
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+
+	// Check if combination already exists
+	if mgr.reportedDataRaceCombinations[key] {
+		mgr.skippedDataRaceCount++
+		return false
+	}
+
+	// Check memory limit and cleanup if needed
+	maxCombinations := mgr.cfg.Experimental.MaxDataRaceCombinations
+	if maxCombinations <= 0 {
+		maxCombinations = 10000 // Default limit
+	}
+
+	if len(mgr.reportedDataRaceCombinations) >= maxCombinations {
+		// Clear half of the combinations to make room
+		newMap := make(map[string]bool)
+		count := 0
+		for k, v := range mgr.reportedDataRaceCombinations {
+			if count < maxCombinations/2 {
+				newMap[k] = v
+				count++
+			}
+		}
+		mgr.reportedDataRaceCombinations = newMap
+		log.Logf(1, "Cleared old data race combinations, keeping %d out of %d",
+			len(newMap), maxCombinations)
+	}
+
+	// Mark this combination as reported
+	mgr.reportedDataRaceCombinations[key] = true
+	return true
+}
+
+// logDataRaceSkip logs when a duplicate data race is skipped
+func (mgr *Manager) logDataRaceSkip(race report.ReportedRace) {
+	mgr.stats.skippedDataRaces.add(1)
+	log.Logf(1, "skipping duplicate data race: VarName1=%s, VarName2=%s, total_skipped=%d",
+		race.VarName1, race.VarName2, mgr.skippedDataRaceCount)
+}
+
+// cleanupDataRaceCombinations periodically cleans up the data race combinations cache
+// This runs in a separate goroutine to prevent memory growth
+func (mgr *Manager) cleanupDataRaceCombinations() {
+	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		return
+	}
+
+	ticker := time.NewTicker(30 * time.Minute) // Cleanup every 30 minutes
+	defer ticker.Stop()
+
+	maxCombinations := mgr.cfg.Experimental.MaxDataRaceCombinations
+	if maxCombinations <= 0 {
+		maxCombinations = 10000
+	}
+
+	for {
+		select {
+		case <-ticker.C:
+			mgr.mu.Lock()
+			currentSize := len(mgr.reportedDataRaceCombinations)
+			if currentSize > maxCombinations*3/4 { // Clean when 75% full
+				// Keep only the most recent half
+				newMap := make(map[string]bool)
+				count := 0
+				for k, v := range mgr.reportedDataRaceCombinations {
+					if count < maxCombinations/2 {
+						newMap[k] = v
+						count++
+					}
+				}
+				oldSize := len(mgr.reportedDataRaceCombinations)
+				mgr.reportedDataRaceCombinations = newMap
+				log.Logf(1, "Periodic cleanup: reduced data race combinations from %d to %d",
+					oldSize, len(newMap))
+			}
+			mgr.mu.Unlock()
+		case <-mgr.vmStop:
+			return
+		}
+	}
+}
+
+// createMonitorConfig creates configuration for VM monitoring with duplicate data race filtering
+func (mgr *Manager) createMonitorConfig() *vm.MonitorConfig {
+	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		return nil
+	}
+
+	mgr.mu.RLock()
+	skipCombinations := make(map[string]bool, len(mgr.reportedDataRaceCombinations))
+	for key, value := range mgr.reportedDataRaceCombinations {
+		skipCombinations[key] = value
+	}
+	mgr.mu.RUnlock()
+
+	return &vm.MonitorConfig{
+		SkipDuplicateDataRaces:   true,
+		SkipDataRaceCombinations: skipCombinations,
+	}
 }
 
 // ===============DDRD====================

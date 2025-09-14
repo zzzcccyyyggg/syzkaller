@@ -14,10 +14,12 @@ import (
 	"io"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"sync/atomic"
 	"time"
 
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/report"
@@ -228,23 +230,52 @@ func (inst *Instance) MonitorExecution(outc <-chan []byte, errc <-chan error,
 	return inst.MonitorExecutionRaw(outc, errc, reporter, exit, 0).Report
 }
 
+// MonitorExecutionWithConfig is like MonitorExecution but accepts additional configuration
+func (inst *Instance) MonitorExecutionWithConfig(outc <-chan []byte, errc <-chan error,
+	reporter *report.Reporter, exit ExitCondition, config *MonitorConfig) (rep *report.Report) {
+	return inst.MonitorExecutionRawWithConfig(outc, errc, reporter, exit, 0, config).Report
+}
+
 type ExecutionResult struct {
 	Report    *report.Report
 	RawOutput []byte
 }
 
+// MonitorConfig contains configuration for VM execution monitoring
+type MonitorConfig struct {
+	SkipDuplicateDataRaces   bool
+	SkipDataRaceCombinations map[string]bool
+}
+
 func (inst *Instance) MonitorExecutionRaw(outc <-chan []byte, errc <-chan error,
 	reporter *report.Reporter, exit ExitCondition, beforeContextSize int) (res *ExecutionResult) {
+	return inst.MonitorExecutionRawWithConfig(outc, errc, reporter, exit, beforeContextSize, nil)
+}
+
+func (inst *Instance) MonitorExecutionRawWithConfig(outc <-chan []byte, errc <-chan error,
+	reporter *report.Reporter, exit ExitCondition, beforeContextSize int, config *MonitorConfig) (res *ExecutionResult) {
 	if beforeContextSize == 0 {
 		beforeContextSize = beforeContextDefault
 	}
+
+	skipConfig := false
+	skipCombinations := make(map[string]bool)
+	if config != nil {
+		skipConfig = config.SkipDuplicateDataRaces
+		if config.SkipDataRaceCombinations != nil {
+			skipCombinations = config.SkipDataRaceCombinations
+		}
+	}
+
 	mon := &monitor{
-		inst:          inst,
-		outc:          outc,
-		errc:          errc,
-		reporter:      reporter,
-		beforeContext: beforeContextSize,
-		exit:          exit,
+		inst:                         inst,
+		outc:                         outc,
+		errc:                         errc,
+		reporter:                     reporter,
+		beforeContext:                beforeContextSize,
+		exit:                         exit,
+		skipDuplicateDataRacesConfig: skipConfig,
+		skipDataRaceCombinations:     skipCombinations,
 	}
 	return &ExecutionResult{
 		Report:    mon.monitorExecution(),
@@ -253,14 +284,16 @@ func (inst *Instance) MonitorExecutionRaw(outc <-chan []byte, errc <-chan error,
 }
 
 type monitor struct {
-	inst          *Instance
-	outc          <-chan []byte
-	errc          <-chan error
-	reporter      *report.Reporter
-	exit          ExitCondition
-	output        []byte
-	beforeContext int
-	matchPos      int
+	inst                         *Instance
+	outc                         <-chan []byte
+	errc                         <-chan error
+	reporter                     *report.Reporter
+	exit                         ExitCondition
+	output                       []byte
+	beforeContext                int
+	matchPos                     int
+	skipDataRaceCombinations     map[string]bool // VarName combinations to skip
+	skipDuplicateDataRacesConfig bool            // Whether to skip duplicate data races
 }
 
 func (mon *monitor) monitorExecution() *report.Report {
@@ -305,6 +338,15 @@ func (mon *monitor) monitorExecution() *report.Report {
 				lastExecuteTime = time.Now()
 			}
 			if mon.reporter.ContainsCrash(mon.output[mon.matchPos:]) {
+				// Quick check for duplicate DATARACE before stopping VM
+				if mon.shouldSkipDuplicateDataRace(mon.output[mon.matchPos:]) {
+					// Reset match position and continue monitoring instead of stopping
+					mon.matchPos = len(mon.output) - maxErrorLength
+					if mon.matchPos < 0 {
+						mon.matchPos = 0
+					}
+					continue
+				}
 				return mon.extractError("unknown error")
 			}
 			if len(mon.output) > 2*mon.beforeContext {
@@ -434,3 +476,84 @@ var (
 	tickerPeriod         = 10 * time.Second
 	waitForOutputTimeout = 10 * time.Second
 )
+
+// shouldSkipDuplicateDataRace quickly checks if a detected data race should be skipped
+// because it's a duplicate VarName combination we've already seen
+func (mon *monitor) shouldSkipDuplicateDataRace(output []byte) bool {
+	// If feature is disabled, don't skip
+	if !mon.skipDuplicateDataRacesConfig {
+		// Debug: log that feature is disabled
+		log.Logf(2, "VM: skip duplicate data races feature is disabled")
+		return false
+	}
+
+	// Quick check if this looks like a DATARACE
+	if !bytes.Contains(output, []byte("============ DATARACE ============")) {
+		log.Logf(2, "VM: output doesn't contain DATARACE marker")
+		return false
+	}
+
+	log.Logf(1, "VM: detected DATARACE, checking for duplicates")
+
+	// Extract VarNames quickly using regex
+	varNames := mon.extractVarNamesQuickly(output)
+	if len(varNames) < 2 {
+		log.Logf(1, "VM: found %d VarNames, need at least 2", len(varNames))
+		return false
+	}
+
+	// Create normalized key
+	key := mon.normalizeVarNameKeyVM(varNames[0], varNames[1])
+	if key == "" {
+		log.Logf(1, "VM: empty key generated")
+		return false
+	}
+
+	log.Logf(1, "VM: checking VarName combination key: %s", key)
+
+	// Check if this combination should be skipped
+	shouldSkip := mon.skipDataRaceCombinations[key]
+	if shouldSkip {
+		log.Logf(0, "VM: skipping duplicate DATARACE with VarNames %s:%s", varNames[0], varNames[1])
+	} else {
+		log.Logf(1, "VM: new DATARACE combination, not skipping")
+	}
+	return shouldSkip
+}
+
+// extractVarNamesQuickly performs fast VarName extraction without full report parsing
+func (mon *monitor) extractVarNamesQuickly(output []byte) []string {
+	// Look for VarName patterns in DATARACE reports
+	varNamePattern := regexp.MustCompile(`VarName (\d+), BlockLineNumber`)
+	matches := varNamePattern.FindAllSubmatch(output, -1)
+
+	var varNames []string
+	for _, match := range matches {
+		if len(match) > 1 {
+			varNames = append(varNames, string(match[1]))
+		}
+		// We only need the first two
+		if len(varNames) >= 2 {
+			break
+		}
+	}
+	return varNames
+}
+
+// normalizeVarNameKeyVM creates a normalized key for VarName combinations (VM version)
+func (mon *monitor) normalizeVarNameKeyVM(var1, var2 string) string {
+	if var1 == "" && var2 == "" {
+		return ""
+	}
+	if var1 == "" {
+		return var2
+	}
+	if var2 == "" {
+		return var1
+	}
+	// Ensure consistent ordering
+	if var1 > var2 {
+		return var2 + ":" + var1
+	}
+	return var1 + ":" + var2
+}

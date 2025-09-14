@@ -227,6 +227,14 @@ type Experimental struct {
 	// "enabled": enable automatic race reproduction based on lock status analysis
 	// "disabled" (default): disable race reproduction
 	RaceReproduction string `json:"race_reproduction,omitempty"`
+
+	// Skip duplicate data race reports with same VarName combinations
+	// This helps reduce test interruptions from repeated harmless data races
+	SkipDuplicateDataRaces bool `json:"skip_duplicate_data_races,omitempty"`
+
+	// Maximum number of data race VarName combinations to remember (default: 10000)
+	// When this limit is reached, old combinations will be cleared to prevent memory growth
+	MaxDataRaceCombinations int `json:"max_data_race_combinations,omitempty"`
 	// ===============DDRD====================
 }
 
