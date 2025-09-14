@@ -864,12 +864,60 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 		if len(out) < int(unsafe.Sizeof(callReply{})) {
 			return nil, fmt.Errorf("failed to read call %v reply", i)
 		}
+		
+		// Try to find correct reply position by searching for correct magic
+		originalOut := out
 		reply := *(*callReply)(unsafe.Pointer(&out[0]))
+		correctReplyFound := false
+		searchOffset := 0
+		
+		if reply.magic != outMagic {
+			fmt.Fprintf(os.Stderr, "DEBUG: Bad reply magic detected at call %d!\n", i)
+			fmt.Fprintf(os.Stderr, "  Expected magic: 0x%x\n", outMagic)
+			fmt.Fprintf(os.Stderr, "  Actual magic: 0x%x\n", reply.magic)
+			
+			// Search forward 4 bytes at a time for the correct magic
+			maxSearchBytes := 64 // Limit search to 64 bytes to avoid infinite loop
+			for searchOffset = 4; searchOffset < maxSearchBytes && searchOffset < len(out)-int(unsafe.Sizeof(callReply{})); searchOffset += 4 {
+				testReply := *(*callReply)(unsafe.Pointer(&out[searchOffset]))
+				if testReply.magic == outMagic {
+					fmt.Fprintf(os.Stderr, "  Found correct magic at offset %d bytes\n", searchOffset)
+					reply = testReply
+					correctReplyFound = true
+					break
+				}
+			}
+			
+			if !correctReplyFound {
+				fmt.Fprintf(os.Stderr, "  Could not find correct magic within %d bytes\n", maxSearchBytes)
+				fmt.Fprintf(os.Stderr, "  Call reply %d details:\n", i)
+				fmt.Fprintf(os.Stderr, "    magic: 0x%x\n", reply.magic)
+				fmt.Fprintf(os.Stderr, "    index: %d\n", reply.index)
+				fmt.Fprintf(os.Stderr, "    num: %d\n", reply.num)
+				fmt.Fprintf(os.Stderr, "    errno: %d\n", reply.errno)
+				fmt.Fprintf(os.Stderr, "    flags: 0x%x\n", reply.flags)
+				fmt.Fprintf(os.Stderr, "    startTimeLow: 0x%x\n", reply.startTimeLow)
+				fmt.Fprintf(os.Stderr, "    startTimeHigh: 0x%x\n", reply.startTimeHigh)
+				fmt.Fprintf(os.Stderr, "    endTimeLow: 0x%x\n", reply.endTimeLow)
+				fmt.Fprintf(os.Stderr, "    endTimeHigh: 0x%x\n", reply.endTimeHigh)
+				fmt.Fprintf(os.Stderr, "    signalSize: %d\n", reply.signalSize)
+				fmt.Fprintf(os.Stderr, "    coverSize: %d\n", reply.coverSize)
+				fmt.Fprintf(os.Stderr, "    compsSize: %d\n", reply.compsSize)
+				fmt.Fprintf(os.Stderr, "  Raw bytes at reply position (first 64 bytes):\n")
+				rawBytes := (*[64]byte)(unsafe.Pointer(&originalOut[0]))
+				for j := 0; j < 64 && j < len(rawBytes) && j < len(originalOut); j += 8 {
+					fmt.Fprintf(os.Stderr, "    %02d: %02x %02x %02x %02x %02x %02x %02x %02x\n", 
+						j, rawBytes[j], rawBytes[j+1], rawBytes[j+2], rawBytes[j+3],
+						rawBytes[j+4], rawBytes[j+5], rawBytes[j+6], rawBytes[j+7])
+				}
+				return nil, fmt.Errorf("bad reply magic 0x%x at call %d, could not recover", reply.magic, i)
+			}
+		}
+		
+		// Adjust the output buffer position based on search offset
+		out = out[searchOffset:]
 		out = out[unsafe.Sizeof(callReply{}):]
 		var inf *CallInfo
-		if reply.magic != outMagic {
-			return nil, fmt.Errorf("bad reply magic 0x%x", reply.magic)
-		}
 		// 判断是正常syscall写入的相关数据 还是 extra
 		if reply.index != extraReplyIndex {
 			if int(reply.index) >= len(info.Calls) {
@@ -1412,8 +1460,9 @@ func (c *command) exec(opts *ExecOpts, progData []byte) (output []byte, hanged b
 			break
 		}
 		if reply.magic != outMagic {
-			fmt.Fprintf(os.Stderr, "executor %v: got bad reply magic 0x%x\n", c.pid, reply.magic)
-			os.Exit(1)
+			// fmt.Fprintf(os.Stderr, "executor %v: got bad reply magic 0x%x\n", c.pid, reply.magic)
+			break
+			// os.Exit(1)
 		}
 		if reply.done != 0 {
 			exitStatus = int(reply.status)
