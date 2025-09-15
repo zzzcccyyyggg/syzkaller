@@ -102,7 +102,6 @@ type Manager struct {
 	dataRaceFrames       map[string]bool
 	// Track duplicate data race VarName combinations to avoid repeated reports
 	reportedDataRaceCombinations map[string]bool
-	skippedDataRaceCount         int64 // Statistics for skipped duplicate data races
 	saturatedCalls               map[string]bool
 
 	needMoreRepros     chan chan bool
@@ -240,7 +239,6 @@ func RunManager(cfg *mgrconfig.Config) {
 		memoryLeakFrames:             make(map[string]bool),
 		dataRaceFrames:               make(map[string]bool),
 		reportedDataRaceCombinations: make(map[string]bool),
-		skippedDataRaceCount:         0,
 		fresh:                        true,
 		vmStop:                       make(chan bool),
 		externalReproQueue:           make(chan *Crash, 10),
@@ -312,14 +310,13 @@ func RunManager(cfg *mgrconfig.Config) {
 			maxSignal := mgr.stats.maxSignal.get()
 			raceSignals := mgr.stats.raceSignals.get()
 			newRaceSignals := mgr.stats.newRaceSignals.get()
-			skippedDataRaces := mgr.stats.skippedDataRaces.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v, skippedDataRaces %v",
-				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen, skippedDataRaces)
+			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
 		}
 	}()
 
@@ -973,9 +970,6 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 		// Check if this is a duplicate VarName combination
 		if !mgr.isNewDataRaceCombination(crash.Report) {
 			// This is a duplicate combination, skip reporting
-			if len(crash.Report.ReportedRaces) > 0 {
-				mgr.logDataRaceSkip(crash.Report.ReportedRaces[0])
-			}
 			// Return false to indicate the crash was skipped
 			return false
 		}
@@ -2195,7 +2189,6 @@ func (mgr *Manager) isNewDataRaceCombination(rep *report.Report) bool {
 
 	// Check if combination already exists
 	if mgr.reportedDataRaceCombinations[key] {
-		mgr.skippedDataRaceCount++
 		return false
 	}
 
@@ -2223,13 +2216,6 @@ func (mgr *Manager) isNewDataRaceCombination(rep *report.Report) bool {
 	// Mark this combination as reported
 	mgr.reportedDataRaceCombinations[key] = true
 	return true
-}
-
-// logDataRaceSkip logs when a duplicate data race is skipped
-func (mgr *Manager) logDataRaceSkip(race report.ReportedRace) {
-	mgr.stats.skippedDataRaces.add(1)
-	log.Logf(1, "skipping duplicate data race: VarName1=%s, VarName2=%s, total_skipped=%d",
-		race.VarName1, race.VarName2, mgr.skippedDataRaceCount)
 }
 
 // cleanupDataRaceCombinations periodically cleans up the data race combinations cache

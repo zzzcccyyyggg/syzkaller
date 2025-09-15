@@ -296,6 +296,65 @@ type monitor struct {
 	skipDuplicateDataRacesConfig bool            // Whether to skip duplicate data races
 }
 
+func (mon *monitor) isCompleteDataRaceReport(output []byte) bool {
+	// 检查是否包含DATARACE开始标记
+	hasStart := bytes.Contains(output, []byte("============ DATARACE ============"))
+
+	// 检查是否包含结束标记
+	hasEnd := bytes.Contains(output, []byte("=================END=============="))
+
+	return hasStart && hasEnd
+}
+
+func (mon *monitor) waitForCompleteDataRace() bool {
+	// 设置等待超时时间（比如2-5秒）
+	waitTimeout := 1 * time.Second
+	checkInterval := 1 * time.Millisecond
+
+	timer := time.NewTimer(waitTimeout)
+	ticker := time.NewTicker(checkInterval)
+	defer timer.Stop()
+	defer ticker.Stop()
+
+	initialOutputLen := len(mon.output)
+
+	for {
+		select {
+		case out, ok := <-mon.outc:
+			if !ok {
+				return false // 输出通道关闭
+			}
+			// 追加新的输出
+			mon.output = append(mon.output, out...)
+
+			// 检查是否已经获得完整的DATARACE报告
+			if mon.isCompleteDataRaceReport(mon.output[mon.matchPos:]) {
+				log.Logf(0, "VM-DEBUG: Complete DATARACE report received, proceeding with duplicate check")
+				return true
+			}
+
+		case <-ticker.C:
+			// 定期检查是否已经完整
+			if mon.isCompleteDataRaceReport(mon.output[mon.matchPos:]) {
+				return true
+			}
+
+		case <-timer.C:
+			// 超时了，可能报告确实不完整或者有问题
+			currentLen := len(mon.output)
+			if currentLen > initialOutputLen {
+				log.Logf(0, "VM-DEBUG: Timeout waiting for complete DATARACE, but got %d more bytes. Proceeding with what we have.", currentLen-initialOutputLen)
+				return true
+			}
+			log.Logf(0, "VM-DEBUG: Timeout waiting for complete DATARACE report, no new output received")
+			return false
+
+		case <-Shutdown:
+			return false
+		}
+	}
+}
+
 func (mon *monitor) monitorExecution() *report.Report {
 	ticker := time.NewTicker(tickerPeriod * mon.inst.timeouts.Scale)
 	defer ticker.Stop()
@@ -338,8 +397,21 @@ func (mon *monitor) monitorExecution() *report.Report {
 				lastExecuteTime = time.Now()
 			}
 			if mon.reporter.ContainsCrash(mon.output[mon.matchPos:]) {
+				log.Logf(0, "VM-DEBUG: ContainsCrash detected, checking shouldSkipDuplicateDataRace")
 				// Quick check for duplicate DATARACE before stopping VM
+				if !mon.isCompleteDataRaceReport(mon.output[mon.matchPos:]) {
+					log.Logf(0, "VM-DEBUG: Incomplete DATARACE report, waiting for complete report...")
+
+					if mon.waitForCompleteDataRace() {
+						log.Logf(0, "VM-DEBUG: Got complete DATARACE report, now checking for duplicates")
+						// 继续到重复性检查
+					} else {
+						log.Logf(0, "VM-DEBUG: Failed to get complete DATARACE report, treating as new")
+						return mon.extractError("unknown error")
+					}
+				}
 				if mon.shouldSkipDuplicateDataRace(mon.output[mon.matchPos:]) {
+					log.Logf(0, "VM-DEBUG: shouldSkipDuplicateDataRace returned TRUE, continuing monitoring")
 					// Reset match position and continue monitoring instead of stopping
 					mon.matchPos = len(mon.output) - maxErrorLength
 					if mon.matchPos < 0 {
@@ -347,6 +419,7 @@ func (mon *monitor) monitorExecution() *report.Report {
 					}
 					continue
 				}
+				log.Logf(0, "VM-RESTART: NEW data race detected, VM will restart (VarNames may be new or extraction failed)")
 				return mon.extractError("unknown error")
 			}
 			if len(mon.output) > 2*mon.beforeContext {
@@ -480,25 +553,33 @@ var (
 // shouldSkipDuplicateDataRace quickly checks if a detected data race should be skipped
 // because it's a duplicate VarName combination we've already seen
 func (mon *monitor) shouldSkipDuplicateDataRace(output []byte) bool {
+	log.Logf(1, "VM-DEBUG: shouldSkipDuplicateDataRace called, config enabled: %v", mon.skipDuplicateDataRacesConfig)
+
 	// If feature is disabled, don't skip
 	if !mon.skipDuplicateDataRacesConfig {
 		// Debug: log that feature is disabled
-		log.Logf(2, "VM: skip duplicate data races feature is disabled")
+		log.Logf(1, "VM-DEBUG: skip duplicate data races feature is DISABLED in config")
 		return false
 	}
 
 	// Quick check if this looks like a DATARACE
 	if !bytes.Contains(output, []byte("============ DATARACE ============")) {
-		log.Logf(2, "VM: output doesn't contain DATARACE marker")
+		log.Logf(1, "VM-DEBUG: crash detected but NOT a DATARACE - output preview: %.200s", output)
 		return false
 	}
-
-	log.Logf(1, "VM: detected DATARACE, checking for duplicates")
 
 	// Extract VarNames quickly using regex
 	varNames := mon.extractVarNamesQuickly(output)
 	if len(varNames) < 2 {
 		log.Logf(1, "VM: found %d VarNames, need at least 2", len(varNames))
+
+		// For incomplete DATARACE reports (just panic, no VarNames yet),
+		// continue monitoring to allow the full report to come through
+		if bytes.Contains(output, []byte("Kernel panic: ============ DATARACE ============")) {
+			log.Logf(1, "VM-DEBUG: INCOMPLETE DATARACE detected (panic only), continuing to wait for full report")
+			return true // Skip restart, continue monitoring
+		}
+
 		return false
 	}
 
@@ -514,25 +595,40 @@ func (mon *monitor) shouldSkipDuplicateDataRace(output []byte) bool {
 	// Check if this combination should be skipped
 	shouldSkip := mon.skipDataRaceCombinations[key]
 	if shouldSkip {
-		log.Logf(0, "VM: skipping duplicate DATARACE with VarNames %s:%s", varNames[0], varNames[1])
+		log.Logf(1, "VM: skipping duplicate DATARACE with VarNames %s:%s (DUPLICATE FOUND)", varNames[0], varNames[1])
 	} else {
-		log.Logf(1, "VM: new DATARACE combination, not skipping")
+		log.Logf(1, "VM: new DATARACE combination %s:%s (NEW COMBINATION)", varNames[0], varNames[1])
 	}
 	return shouldSkip
 }
 
 // extractVarNamesQuickly performs fast VarName extraction without full report parsing
 func (mon *monitor) extractVarNamesQuickly(output []byte) []string {
-	// Look for VarName patterns in DATARACE reports
-	varNamePattern := regexp.MustCompile(`VarName (\d+), BlockLineNumber`)
-	matches := varNamePattern.FindAllSubmatch(output, -1)
+	log.Logf(1, "VM-DEBUG: extractVarNamesQuickly called, output: %s", output)
+	// Try multiple patterns that might match VarName formats
+	patterns := []string{
+		`VarName (\d+), BlockLineNumber`, // Original pattern
+	}
 
 	var varNames []string
-	for _, match := range matches {
-		if len(match) > 1 {
-			varNames = append(varNames, string(match[1]))
+	for _, pattern := range patterns {
+		varNamePattern := regexp.MustCompile(pattern)
+		matches := varNamePattern.FindAllSubmatch(output, -1)
+
+		log.Logf(1, "VM-DEBUG: pattern '%s' found %d matches", pattern, len(matches))
+
+		for _, match := range matches {
+			if len(match) > 1 {
+				varName := string(match[1])
+				log.Logf(1, "VM-DEBUG: extracted VarName: %s", varName)
+				varNames = append(varNames, varName)
+			}
+			// We only need the first two
+			if len(varNames) >= 2 {
+				return varNames
+			}
 		}
-		// We only need the first two
+
 		if len(varNames) >= 2 {
 			break
 		}

@@ -39,7 +39,6 @@ type Stats struct {
 	raceSignals      Stat
 	newRaceSignals   Stat
 	racePrograms     Stat
-	skippedDataRaces Stat // Count of skipped duplicate data races
 
 	mu         sync.Mutex
 	namedStats map[string]uint64
