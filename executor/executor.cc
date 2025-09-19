@@ -785,7 +785,7 @@ int main(int argc, char** argv)
 	// Initialize UKC controller
 	ukc_controller = ukc_ctl_init("/dev/" DEVICE_NAME);
 	if (ukc_controller) {
-		if (ukc_ctl_start_monitor(ukc_controller) == 0) {
+		if (ukc_ctl_turn_off(ukc_controller) == 0) {
 			debug("UKC controller initialized successfully\n");
 		} else {
 			debug("UKC controller initialized but failed to start monitor\n");

@@ -1,13 +1,13 @@
 # Copyright 2018 syzkaller project authors. All rights reserved.
 # Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
-
 include <uapi/linux/mount.h>
 include <linux/fs.h>
 include <linux/fcntl.h>
-
 mount(src ptr[in, blockdev_filename], dst ptr[in, filename], type ptr[in, string[filesystem]], flags flags[mount_flags], data ptr[in, string, opt])
 umount2(path ptr[in, filename], flags flags[umount_flags])
-
+umount2$kccwf(path ptr[in, string["/mnt/kccwf"]], flags flags[umount_flags])
+mount$btrfs(src ptr[in, string["/dev/sdb"]], dst ptr[in, string["/mnt/kccwf"]], type ptr[in, string["btrfs"]], flags flags[mount_flags], opts ptr[in, fs_options[btrfs_options]])
+mount$f2fs(src ptr[in, string["/dev/sdb"]], dst ptr[in, string["/mnt/kccwf"]], type ptr[in, string["f2fs"]], flags flags[mount_flags], opts ptr[in, fs_options[f2fs_options]])
 mount$bpf(src const[0], dst ptr[in, filename], type ptr[in, string["bpf"]], flags flags[mount_flags], opts ptr[in, fs_options[bpf_options]])
 mount$overlay(src const[0], dst ptr[in, filename], type ptr[in, string["overlay"]], flags flags[mount_flags], opts ptr[in, fs_options[overlay_options]])
 mount$binder(src const[0], dst ptr[in, filename], type ptr[in, string["binder"]], flags flags[mount_flags], opts ptr[in, fs_options[binder_options]])
