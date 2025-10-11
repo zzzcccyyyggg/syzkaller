@@ -32,10 +32,16 @@ LockRecord parse_lock_line(const char* line)
 		}
 	}
 
-	// 解析ptr=0x...
+	// 解析ptr=...（可能没有0x前缀，需要强制按十六进制解析）
 	const char* ptr_pos = strstr(content, "ptr=");
 	if (ptr_pos) {
-		lock.ptr = strtoull(ptr_pos + 4, NULL, 0);
+		const char* ptr_value = ptr_pos + 4;
+		// 如果有0x前缀，自动检测；否则强制十六进制
+		if (strncmp(ptr_value, "0x", 2) == 0 || strncmp(ptr_value, "0X", 2) == 0) {
+			lock.ptr = strtoull(ptr_value, NULL, 0);
+		} else {
+			lock.ptr = strtoull(ptr_value, NULL, 16);
+		}
 	}
 
 	// 解析attr=...

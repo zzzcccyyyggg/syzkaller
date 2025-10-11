@@ -21,6 +21,7 @@ AccessRecord access_record_init_from_line(const char* line)
 	}
 
 	// 查找 "[KCCWF] log access:" 标记
+	// 注意：实际日志中可能有 "handle_log_mode: [KCCWF] log access:" 格式
 	const char* marker = "[KCCWF] log access:";
 	const char* content = strstr(line, marker);
 	if (!content) {
@@ -94,7 +95,8 @@ AccessRecord access_record_init_from_line(const char* line)
 	}
 
 	// 检查是否解析到有效数据
-	if (record.tid > 0 && record.var_name > 0) {
+	// 注意：tid 可以是 0（主线程或特殊线程），所以用 >= 0 检查
+	if (record.tid >= 0 && record.var_name > 0) {
 		record.valid = true;
 		record.lock_count = 0; // 初始化锁计数
 		// 添加调试输出
