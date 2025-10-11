@@ -12,13 +12,15 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 	int record_count = 0;
 	int free_count = 0;
 	
-	// 初始化线程历史
+	// 初始化线程历史（仅当功能启用且内存已分配时）
 	record_ctx->thread_count = 0;
-	for (int i = 0; i < MAX_THREADS; i++) {
-		record_ctx->thread_histories[i].tid = -1;
-		record_ctx->thread_histories[i].access_count = 0;
-		record_ctx->thread_histories[i].access_index = 0;
-		record_ctx->thread_histories[i].buffer_full = false;
+	if (record_ctx->enable_history && record_ctx->thread_histories) {
+		for (int i = 0; i < MAX_THREADS; i++) {
+			record_ctx->thread_histories[i].tid = -1;
+			record_ctx->thread_histories[i].access_count = 0;
+			record_ctx->thread_histories[i].access_index = 0;
+			record_ctx->thread_histories[i].buffer_full = false;
+		}
 	}
 	
 	char* buffer_copy = my_strdup(buffer);

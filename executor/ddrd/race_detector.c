@@ -195,26 +195,32 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
     if (!detector->context.records) {
         detector->context.records = malloc(sizeof(AccessRecord) * max_records);
         if (!detector->context.records) {
+            debug("Failed to allocate memory for records\n");
             free(buffer);
             return 0;
         }
+        debug("Allocated memory for %d access records\n", max_records);
     }
     
     if (!detector->context.free_records) {
         detector->context.free_records = malloc(sizeof(AccessRecord) * max_frees);
         if (!detector->context.free_records) {
+            debug("Failed to allocate memory for free_records\n");
             free(buffer);
             return 0;
         }
+        debug("Allocated memory for %d free records\n", max_frees);
     }
     
     if (!detector->context.thread_histories && detector->context.enable_history) {
         detector->context.thread_histories = calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
         if (!detector->context.thread_histories) {
+            debug("Failed to allocate memory for thread_histories\n");
             free(buffer);
             return 0;
         }
         detector->context.max_threads = MAX_THREADS;
+        debug("Allocated memory for %d thread histories\n", MAX_THREADS);
     }
     
     // 解析 buffer 到 AccessContext
