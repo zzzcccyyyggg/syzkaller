@@ -39,9 +39,9 @@ type RPCServer struct {
 	corpusSignal signal.Signal
 	corpusCover  cover.Cover
 	// ===============DDRD====================
-	// Race signal management
-	maxRaceSignal    ddrd.Signal
-	corpusRaceSignal ddrd.Signal
+	// UAF signal management
+	maxUAFSignal    ddrd.UAFSignal
+	corpusUAFSignal ddrd.UAFSignal
 	// ===============DDRD====================
 	rotator       *prog.Rotator
 	rnd           *rand.Rand
@@ -55,9 +55,9 @@ type Fuzzer struct {
 	newMaxSignal  signal.Signal
 	rotatedSignal signal.Signal
 	// ===============DDRD====================
-	// Race signal tracking per fuzzer
-	newMaxRaceSignal  ddrd.Signal
-	rotatedRaceSignal ddrd.Signal
+	// UAF signal tracking per fuzzer
+	newMaxUAFSignal  ddrd.UAFSignal
+	rotatedUAFSignal ddrd.UAFSignal
 	// ===============DDRD====================
 	machineInfo []byte
 	instModules *cover.CanonicalizerInstance
@@ -77,8 +77,8 @@ type RPCManagerView interface {
 	candidateBatch(size int) []rpctype.Candidate
 	rotateCorpus() bool
 	// ===============DDRD====================
-	// Process new race pair discoveries with full Manager integration
-	newRacePair(args *rpctype.NewRacePairArgs) bool
+	// Process new UAF pair discoveries with full Manager integration
+	newUAFPair(args *rpctype.NewUAFPairArgs) bool
 	// Get all current candidates for fuzzer
 	getAllCandidates() []rpctype.Candidate
 	// Get batch of pair candidates for fuzzer with priority
@@ -391,29 +391,43 @@ func (serv *RPCServer) Poll(a *rpctype.PollArgs, r *rpctype.PollRes) error {
 	}
 
 	// ===============DDRD====================
-	// Process race signal updates
-	if len(a.MaxRaceSignal) > 0 {
-		// Deserialize race signal from fuzzer
-		if raceSignal, err := deserializeRaceSignal(a.MaxRaceSignal); err == nil && raceSignal != nil {
-			newRaceSignal := serv.maxRaceSignal.Diff(*raceSignal)
-			if !newRaceSignal.Empty() {
-				serv.maxRaceSignal.Merge(newRaceSignal)
-				serv.stats.raceSignals.set(len(serv.maxRaceSignal))
-				// Distribute new race signal to other fuzzers
+	// Process UAF signal updates
+	if len(a.MaxUAFSignal) > 0 {
+		// Deserialize UAF signal from fuzzer (comes as race signal format)
+		if uafSignal, err := deserializeRaceSignal(a.MaxUAFSignal); err == nil && uafSignal != nil {
+			// Convert to UAF signal format
+			rawSignal := uafSignal.ToRawUint64()
+			uafOnlySignal := ddrd.FromRawUAF(rawSignal, 0)
+
+			newUAFSignal := serv.maxUAFSignal.Diff(uafOnlySignal)
+			if !newUAFSignal.Empty() {
+				serv.maxUAFSignal.Merge(newUAFSignal)
+				// Update UAF statistics
+				serv.stats.uafSignals.add(len(uafOnlySignal))
+				serv.stats.newUAFSignals.add(len(newUAFSignal))
+
+				// Distribute new UAF signal to other fuzzers
 				for _, f1 := range serv.fuzzers {
 					if f1 == f || f1.rotated {
 						continue
 					}
-					f1.newMaxRaceSignal.Merge(newRaceSignal)
+					f1.newMaxUAFSignal.Merge(newUAFSignal)
 				}
-				log.Logf(2, "[DDRD-DEBUG] Poll: Race signal updated from %v: new size=%d",
-					a.Name, len(newRaceSignal))
+				log.Logf(2, "[DDRD-DEBUG] Poll: UAF signal updated from %v: new size=%d",
+					a.Name, len(newUAFSignal))
 			}
 		}
 	}
 
-	// Send updated race signal to fuzzer
-	r.MaxRaceSignal = serializeRaceSignal(f.newMaxRaceSignal.Split(2000))
+	// Send updated UAF signal to fuzzer
+	if !f.newMaxUAFSignal.Empty() {
+		// For UAF signals, we serialize directly to JSON
+		if uafData, err := serializeUAFSignal(f.newMaxUAFSignal); err == nil {
+			r.MaxUAFSignal = uafData
+		}
+		// Clear the signal after sending
+		f.newMaxUAFSignal = make(ddrd.UAFSignal)
+	}
 
 	// ===============DDRD====================
 	r.MaxSignal = f.newMaxSignal.Split(2000).Serialize()
@@ -483,20 +497,23 @@ func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.Ch
 	return nil
 }
 
-// NewRacePair handles race pair data from fuzzer
-func (serv *RPCServer) NewRacePair(a *rpctype.NewRacePairArgs, r *rpctype.NewRacePairRes) error {
-	log.Logf(1, "NewRacePair from %v: pairID=%v, signal len=%d",
+// NewUAFPair handles UAF pair data from fuzzer
+func (serv *RPCServer) NewUAFPair(a *rpctype.NewUAFPairArgs, r *rpctype.NewUAFPairRes) error {
+	log.Logf(1, "NewUAFPair from %v: pairID=%v, signal len=%d",
 		a.Name, a.Pair.PairID, len(a.Pair.Signal))
 
 	// Now using Manager interface for complex processing
-	accepted := serv.mgr.newRacePair(a)
+	accepted := serv.mgr.newUAFPair(a)
+
+	// Update UAF program statistics when UAF pair is processed
+	serv.stats.uafPrograms.inc()
 
 	// Set response fields based on processing results
 	r.Accepted = accepted
 	if accepted {
-		log.Logf(2, "Race pair %x was accepted by Manager", a.Pair.PairID)
+		log.Logf(2, "UAF pair %x was accepted by Manager", a.Pair.PairID)
 	} else {
-		log.Logf(2, "Race pair %x was rejected by Manager", a.Pair.PairID)
+		log.Logf(2, "UAF pair %x was rejected by Manager", a.Pair.PairID)
 	}
 
 	return nil
@@ -593,15 +610,15 @@ func (serv *RPCServer) initializeRaceSignalsFromCorpus(mgr *Manager) {
 	totalSignals := 0
 	processedItems := 0
 
-	// Initialize empty race signals if not already done
-	if serv.maxRaceSignal == nil {
-		serv.maxRaceSignal = make(ddrd.Signal)
+	// Initialize empty UAF signals if not already done
+	if serv.maxUAFSignal == nil {
+		serv.maxUAFSignal = make(ddrd.UAFSignal)
 	}
-	if serv.corpusRaceSignal == nil {
-		serv.corpusRaceSignal = make(ddrd.Signal)
+	if serv.corpusUAFSignal == nil {
+		serv.corpusUAFSignal = make(ddrd.UAFSignal)
 	}
 
-	// Process each race corpus item
+	// Process each race corpus item and convert to UAF signals
 	for pairID, item := range mgr.raceCorpus {
 		if len(item.RaceSignal) == 0 {
 			continue // Skip items without race signal
@@ -615,22 +632,26 @@ func (serv *RPCServer) initializeRaceSignalsFromCorpus(mgr *Manager) {
 		}
 
 		if raceSignal != nil && !raceSignal.Empty() {
-			// Merge into both corpus and max race signals
-			serv.corpusRaceSignal.Merge(*raceSignal)
-			serv.maxRaceSignal.Merge(*raceSignal)
+			// Convert race signal to UAF signal
+			rawSignal := raceSignal.ToRawUint64()
+			uafSignal := ddrd.FromRawUAF(rawSignal, 0)
 
-			totalSignals += len(*raceSignal)
+			// Merge into both corpus and max UAF signals
+			serv.corpusUAFSignal.Merge(uafSignal)
+			serv.maxUAFSignal.Merge(uafSignal)
+
+			totalSignals += len(rawSignal)
 			processedItems++
 
-			log.Logf(2, "Loaded race signal from pair %v: %d signals",
-				pairID, len(*raceSignal))
+			log.Logf(2, "Loaded UAF signal from pair %v: %d signals",
+				pairID, len(rawSignal))
 		}
 	}
 
-	log.Logf(0, "Race signal initialization complete: processed %d items, loaded %d total signals",
+	log.Logf(0, "UAF signal initialization complete: processed %d items, loaded %d total signals",
 		processedItems, totalSignals)
-	log.Logf(1, "Final race signal sizes: corpus=%d, max=%d",
-		len(serv.corpusRaceSignal), len(serv.maxRaceSignal))
+	log.Logf(1, "Final UAF signal sizes: corpus=%d, max=%d",
+		len(serv.corpusUAFSignal), len(serv.maxUAFSignal))
 }
 
 // ===============DDRD====================

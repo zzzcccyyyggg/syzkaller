@@ -1,5 +1,5 @@
 // ===============DDRD====================
-// RacePairWorkQueue methods for race pair mode
+// UAFPairWorkQueue methods for UAF pair mode
 // ===============DDRD====================
 package main
 
@@ -21,6 +21,7 @@ type ProgPair struct {
 type PairWorkTriage struct {
 	progPair *ProgPair
 	info     *ipc.PairProgInfo
+	output   []byte // Execution output for logging
 }
 
 // PairWorkValuable represents a valuable work item for race pair execution
@@ -29,87 +30,87 @@ type PairWorkValuable struct {
 	score    int
 }
 
-// RacePairWorkQueue holds race pair work items for RACE PAIR mode
+// UAFPairWorkQueue holds UAF pair work items for UAF PAIR mode
 // This queue is completely separate from normal mode queue
-type RacePairWorkQueue struct {
+type UAFPairWorkQueue struct {
 	mu sync.RWMutex
 
-	// Two types of race pair work items
+	// Two types of UAF pair work items
 	candidates []*ProgPair       // pairs from corpus combinations
-	triage     []*PairWorkTriage // pairs that bring new race coverage
+	triage     []*PairWorkTriage // pairs that bring new UAF coverage
 	valuable   []*PairWorkValuable
 	procs      int
 }
 
-// NewRacePairWorkQueue creates a new race pair work queue
-func NewRacePairWorkQueue(procs int) *RacePairWorkQueue {
-	return &RacePairWorkQueue{
+// NewUAFPairWorkQueue creates a new UAF pair work queue
+func NewUAFPairWorkQueue(procs int) *UAFPairWorkQueue {
+	return &UAFPairWorkQueue{
 		procs: procs,
 	}
 }
 
 // enqueue adds work items to the appropriate queues based on item type
-func (rpwq *RacePairWorkQueue) enqueue(item interface{}) {
-	rpwq.mu.Lock()
-	defer rpwq.mu.Unlock()
+func (upwq *UAFPairWorkQueue) enqueue(item interface{}) {
+	upwq.mu.Lock()
+	defer upwq.mu.Unlock()
 
-	switch item := item.(type) {
+	switch v := item.(type) {
 	case *ProgPair:
-		rpwq.candidates = append(rpwq.candidates, item)
+		upwq.candidates = append(upwq.candidates, v)
 	case *PairWorkTriage:
-		rpwq.triage = append(rpwq.triage, item)
+		upwq.triage = append(upwq.triage, v)
 	case *PairWorkValuable:
-		rpwq.valuable = append(rpwq.valuable, item)
+		upwq.valuable = append(upwq.valuable, v)
 	default:
-		panic("unknown work type for RacePairWorkQueue")
+		panic("unknown work type for UAFPairWorkQueue")
 	}
 }
 
-func (rpwq *RacePairWorkQueue) enqueueCandidate(progPair *ProgPair) {
-	rpwq.enqueue(progPair)
+func (upwq *UAFPairWorkQueue) enqueueCandidate(progPair *ProgPair) {
+	upwq.enqueue(progPair)
 }
 
-func (rpwq *RacePairWorkQueue) enqueueTriage(triage *PairWorkTriage) {
-	rpwq.enqueue(triage)
+func (upwq *UAFPairWorkQueue) enqueueTriage(triage *PairWorkTriage) {
+	upwq.enqueue(triage)
 }
 
-func (rpwq *RacePairWorkQueue) enqueueValuable(valuable *PairWorkValuable) {
-	rpwq.enqueue(valuable)
+func (upwq *UAFPairWorkQueue) enqueueValuable(valuable *PairWorkValuable) {
+	upwq.enqueue(valuable)
 }
 
 // dequeue returns the next work item (candidates first, then triage)
-func (rpwq *RacePairWorkQueue) dequeue() interface{} {
-	rpwq.mu.RLock()
-	if len(rpwq.candidates) == 0 && len(rpwq.triage) == 0 && len(rpwq.valuable) == 0 {
-		rpwq.mu.RUnlock()
+func (upwq *UAFPairWorkQueue) dequeue() interface{} {
+	upwq.mu.RLock()
+	if len(upwq.candidates) == 0 && len(upwq.triage) == 0 && len(upwq.valuable) == 0 {
+		upwq.mu.RUnlock()
 		return nil
 	}
-	rpwq.mu.RUnlock()
+	upwq.mu.RUnlock()
 
-	rpwq.mu.Lock()
-	defer rpwq.mu.Unlock()
+	upwq.mu.Lock()
+	defer upwq.mu.Unlock()
 
-	// Then triage
-	if len(rpwq.triage) != 0 {
-		last := len(rpwq.triage) - 1
-		item := rpwq.triage[last]
-		rpwq.triage = rpwq.triage[:last]
+	// Triage first
+	if len(upwq.triage) != 0 {
+		last := len(upwq.triage) - 1
+		item := upwq.triage[last]
+		upwq.triage = upwq.triage[:last]
 		return item
 	}
 
-	// Prioritize candidates first
-	if len(rpwq.candidates) != 0 {
-		last := len(rpwq.candidates) - 1
-		item := rpwq.candidates[last]
-		rpwq.candidates = rpwq.candidates[:last]
+	// Prioritize candidates second
+	if len(upwq.candidates) != 0 {
+		last := len(upwq.candidates) - 1
+		item := upwq.candidates[last]
+		upwq.candidates = upwq.candidates[:last]
 		return item
 	}
 
 	// Finally valuable
-	if len(rpwq.valuable) != 0 {
-		last := len(rpwq.valuable) - 1
-		item := rpwq.valuable[last]
-		rpwq.valuable = rpwq.valuable[:last]
+	if len(upwq.valuable) != 0 {
+		last := len(upwq.valuable) - 1
+		item := upwq.valuable[last]
+		upwq.valuable = upwq.valuable[:last]
 		return item
 	}
 
@@ -117,43 +118,44 @@ func (rpwq *RacePairWorkQueue) dequeue() interface{} {
 }
 
 // getQueueStats returns statistics about all queues
-func (rpwq *RacePairWorkQueue) getQueueStats() (candidatesCount, triageCount, valuableCount int) {
-	rpwq.mu.RLock()
-	defer rpwq.mu.RUnlock()
-	return len(rpwq.candidates), len(rpwq.triage), len(rpwq.valuable)
+func (upwq *UAFPairWorkQueue) getQueueStats() (candidatesCount, triageCount, valuableCount int) {
+	upwq.mu.RLock()
+	defer upwq.mu.RUnlock()
+	return len(upwq.candidates), len(upwq.triage), len(upwq.valuable)
 }
 
-// enqueueCorpusPair adds a race pair derived from corpus combinations
-func (rpwq *RacePairWorkQueue) enqueueCorpusPair(p1, p2 *prog.Prog) {
+// enqueueCorpusPair adds a UAF pair derived from corpus combinations
+func (upwq *UAFPairWorkQueue) enqueueCorpusPair(p1, p2 *prog.Prog) {
 	pair := &ProgPair{
 		p1: p1,
 		p2: p2,
 	}
-	rpwq.enqueue(pair)
+	upwq.enqueue(pair)
 }
 
-// enqueueNewCoverPair adds a race pair that potentially brings new race coverage
-func (rpwq *RacePairWorkQueue) enqueueNewCoverPair(p1, p2 *prog.Prog, pairID string, races []*ddrd.MayRacePair) {
+// enqueueNewCoverPair adds a UAF pair that potentially brings new UAF coverage
+func (upwq *UAFPairWorkQueue) enqueueNewCoverPair(p1, p2 *prog.Prog, pairID string, uafs []*ddrd.MayUAFPair) {
 	pair := &ProgPair{
 		p1: p1,
 		p2: p2,
 	}
 	// Create PairProgInfo from the provided data
 	info := &ipc.PairProgInfo{
-		PairCount:    uint32(len(races)),
-		MayRacePairs: make([]ddrd.MayRacePair, len(races)),
+		PairCount:   uint32(len(uafs)),
+		MayUAFPairs: make([]ddrd.MayUAFPair, len(uafs)),
 	}
-	// Copy races to the proper format (dereference pointers)
-	for i, race := range races {
-		if race != nil {
-			info.MayRacePairs[i] = *race
+	// Copy UAFs to the proper format (dereference pointers)
+	for i, uaf := range uafs {
+		if uaf != nil {
+			info.MayUAFPairs[i] = *uaf
 		}
 	}
+
 	triage := &PairWorkTriage{
 		progPair: pair,
 		info:     info,
 	}
-	rpwq.enqueue(triage)
+	upwq.enqueue(triage)
 }
 
 // ===============DDRD====================

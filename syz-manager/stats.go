@@ -36,9 +36,13 @@ type Stats struct {
 	corpusSignal        Stat
 	maxSignal           Stat
 	// Race覆盖率统计
-	raceSignals      Stat
-	newRaceSignals   Stat
-	racePrograms     Stat
+	raceSignals    Stat
+	newRaceSignals Stat
+	racePrograms   Stat
+	// UAF覆盖率统计
+	uafSignals    Stat
+	newUAFSignals Stat
+	uafPrograms   Stat
 
 	mu         sync.Mutex
 	namedStats map[string]uint64
@@ -85,6 +89,9 @@ func (stats *Stats) all() map[string]uint64 {
 		"race signals":      stats.raceSignals.get(),
 		"new race signals":  stats.newRaceSignals.get(),
 		"race programs":     stats.racePrograms.get(),
+		"uaf signals":       stats.uafSignals.get(),
+		"new uaf signals":   stats.newUAFSignals.get(),
+		"uaf programs":      stats.uafPrograms.get(),
 	}
 	if stats.haveHub {
 		m["hub: send prog add"] = stats.hubSendProgAdd.get()

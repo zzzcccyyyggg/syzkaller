@@ -29,6 +29,7 @@ import (
 	"github.com/google/syzkaller/pkg/rpctype"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/pkg/tool"
+	"github.com/google/syzkaller/pkg/vmexec"
 	"github.com/google/syzkaller/prog"
 	_ "github.com/google/syzkaller/sys"
 	"github.com/google/syzkaller/sys/targets"
@@ -48,7 +49,7 @@ type Fuzzer struct {
 
 	// ===============DDRD====================
 	// Separate race pair work queue for race pair mode
-	racePairWorkQueue *RacePairWorkQueue
+	uafPairWorkQueue *UAFPairWorkQueue
 
 	// 模式标志位 (在启动时一次性确定，整个生命周期保持不变)
 	isTestPairMode bool
@@ -84,11 +85,26 @@ type Fuzzer struct {
 	maxRaceCover    ddrd.RaceCover // max race coverage ever observed
 	newRaceCover    ddrd.RaceCover // new race coverage since last sync
 
+	// UAF coverage tracking
+	uafCoverMu     sync.RWMutex
+	corpusUAFCover ddrd.UAFCover // UAF coverage of inputs in corpus
+	maxUAFCover    ddrd.UAFCover // max UAF coverage ever observed
+	newUAFCover    ddrd.UAFCover // new UAF coverage since last sync
+
 	// Race signal tracking (similar to coverage signals)
 	raceSignalMu     sync.RWMutex
 	corpusRaceSignal ddrd.Signal // race signals from corpus pairs
-	maxRaceSignal    ddrd.Signal // max race signal ever observed
+	maxUAFSignal     ddrd.Signal // max UAF signal ever observed
 	newRaceSignal    ddrd.Signal // new race signals since last sync
+
+	// UAF signal tracking
+	uafSignalMu      sync.RWMutex
+	corpusUAFSignal  ddrd.UAFSignal // UAF signals from corpus pairs
+	maxUAFOnlySignal ddrd.UAFSignal // max UAF-only signal ever observed
+	newUAFSignal     ddrd.UAFSignal // new UAF signals since last sync
+
+	// VM execution sequence buffer for UAF context analysis
+	vmExecBuffer *vmexec.VMExecutionSequenceBuffer
 	// ===============DDRD====================
 	checkResult *rpctype.CheckArgs
 	logMu       sync.Mutex
@@ -332,7 +348,9 @@ func main() {
 		resetAccState:     *flagResetAccState,
 		// ===============DDRD====================
 		// Initialize separate race pair work queue
-		racePairWorkQueue: NewRacePairWorkQueue(*flagProcs),
+		uafPairWorkQueue: NewUAFPairWorkQueue(*flagProcs),
+		// Initialize VM execution sequence buffer (keep last 1000 executions)
+		vmExecBuffer: vmexec.NewVMExecutionSequenceBuffer(1000),
 		// ===============DDRD====================
 	}
 	gateCallback := fuzzer.useBugFrames(r, *flagProcs)
@@ -519,7 +537,7 @@ func (fuzzer *Fuzzer) poll(needCandidates bool, stats map[string]uint64) bool {
 		NeedCandidates: needCandidates,
 		MaxSignal:      fuzzer.grabNewSignal().Serialize(),
 		// ===============DDRD====================
-		MaxRaceSignal: serializeRaceSignal(fuzzer.grabNewRaceSignal()),
+		MaxUAFSignal: serializeRaceSignal(fuzzer.grabNewRaceSignal()),
 		// ===============DDRD====================
 		Stats: stats,
 	}
@@ -534,10 +552,10 @@ func (fuzzer *Fuzzer) poll(needCandidates bool, stats map[string]uint64) bool {
 
 	// ===============DDRD====================
 	// Process race signal from manager
-	if len(r.MaxRaceSignal) > 0 {
-		if raceSignal := deserializeRaceSignal(r.MaxRaceSignal); raceSignal != nil {
-			log.Logf(2, "[DDRD-DEBUG] Poll: Received race signal from manager: size=%d", len(*raceSignal))
-			fuzzer.addMaxRaceSignal(*raceSignal)
+	if len(r.MaxUAFSignal) > 0 {
+		if uafSignal := deserializeRaceSignal(r.MaxUAFSignal); uafSignal != nil {
+			log.Logf(2, "[DDRD-DEBUG] Poll: Received UAF signal from manager: size=%d", len(*uafSignal))
+			fuzzer.addMaxUAFSignal(*uafSignal)
 		}
 	}
 
@@ -699,6 +717,18 @@ func (fuzzer *Fuzzer) grabNewRaceSignal() ddrd.Signal {
 	return sign
 }
 
+// grabNewUAFSignal returns new UAF signals since last poll and clears them
+func (fuzzer *Fuzzer) grabNewUAFSignal() ddrd.UAFSignal {
+	fuzzer.uafSignalMu.Lock()
+	defer fuzzer.uafSignalMu.Unlock()
+	sign := fuzzer.newUAFSignal
+	if sign.Empty() {
+		return nil
+	}
+	fuzzer.newUAFSignal = nil
+	return sign
+}
+
 // addRaceSignal adds race signal to fuzzer's tracking
 func (fuzzer *Fuzzer) addRaceSignal(sign ddrd.Signal) {
 	if sign.Empty() {
@@ -706,8 +736,19 @@ func (fuzzer *Fuzzer) addRaceSignal(sign ddrd.Signal) {
 	}
 	fuzzer.raceSignalMu.Lock()
 	defer fuzzer.raceSignalMu.Unlock()
-	fuzzer.maxRaceSignal.Merge(sign)
+	fuzzer.maxUAFSignal.Merge(sign)
 	fuzzer.newRaceSignal.Merge(sign)
+}
+
+// addUAFSignal adds UAF signal to fuzzer's tracking
+func (fuzzer *Fuzzer) addUAFSignal(sign ddrd.UAFSignal) {
+	if sign.Empty() {
+		return
+	}
+	fuzzer.uafSignalMu.Lock()
+	defer fuzzer.uafSignalMu.Unlock()
+	fuzzer.maxUAFOnlySignal.Merge(sign)
+	fuzzer.newUAFSignal.Merge(sign)
 }
 
 // corpusRaceSignalDiff returns diff between race signal and corpus race signals
@@ -717,14 +758,31 @@ func (fuzzer *Fuzzer) corpusRaceSignalDiff(sign ddrd.Signal) ddrd.Signal {
 	return fuzzer.corpusRaceSignal.Diff(sign)
 }
 
-// addMaxRaceSignal merges new race signals from manager
-func (fuzzer *Fuzzer) addMaxRaceSignal(sign ddrd.Signal) {
+// corpusUAFSignalDiff returns diff between UAF signal and corpus UAF signals
+func (fuzzer *Fuzzer) corpusUAFSignalDiff(sign ddrd.UAFSignal) ddrd.UAFSignal {
+	fuzzer.uafSignalMu.RLock()
+	defer fuzzer.uafSignalMu.RUnlock()
+	return fuzzer.corpusUAFSignal.Diff(sign)
+}
+
+// addMaxUAFSignal merges new UAF signals from manager
+func (fuzzer *Fuzzer) addMaxUAFSignal(sign ddrd.Signal) {
 	if sign.Empty() {
 		return
 	}
 	fuzzer.raceSignalMu.Lock()
 	defer fuzzer.raceSignalMu.Unlock()
-	fuzzer.maxRaceSignal.Merge(sign)
+	fuzzer.maxUAFSignal.Merge(sign)
+}
+
+// addMaxUAFOnlySignal merges new UAF-only signals from manager
+func (fuzzer *Fuzzer) addMaxUAFOnlySignal(sign ddrd.UAFSignal) {
+	if sign.Empty() {
+		return
+	}
+	fuzzer.uafSignalMu.Lock()
+	defer fuzzer.uafSignalMu.Unlock()
+	fuzzer.maxUAFOnlySignal.Merge(sign)
 }
 
 // ===============DDRD====================
@@ -845,6 +903,64 @@ func (fuzzer *Fuzzer) updateRaceCoverage(races []*ddrd.MayRacePair) {
 	// ===============DDRD====================
 }
 
+func (fuzzer *Fuzzer) updateUAFCoverage(uafs []*ddrd.MayUAFPair) {
+	if len(uafs) == 0 {
+		return
+	}
+
+	fuzzer.uafCoverMu.Lock()
+	defer fuzzer.uafCoverMu.Unlock()
+
+	// 初始化UAF coverage如果需要
+	if fuzzer.corpusUAFCover == nil {
+		fuzzer.corpusUAFCover = make(ddrd.UAFCover)
+	}
+	if fuzzer.maxUAFCover == nil {
+		fuzzer.maxUAFCover = make(ddrd.UAFCover)
+	}
+	if fuzzer.newUAFCover == nil {
+		fuzzer.newUAFCover = make(ddrd.UAFCover)
+	}
+
+	// ===============DDRD====================
+	// Update max UAF coverage and detect new UAFs (uafs already as pointers)
+	newUAFs := fuzzer.maxUAFCover.MergeDiff(uafs)
+	if len(newUAFs) > 0 {
+		log.Logf(1, "discovered %d new UAF pairs", len(newUAFs))
+		// Add to new UAF coverage for manager sync
+		fuzzer.newUAFCover.Merge(newUAFs)
+	}
+	// ===============DDRD====================
+}
+
+// grabNewUAFCoverage returns new UAF coverage since last sync and clears it
+func (fuzzer *Fuzzer) grabNewUAFCoverage() ddrd.UAFCover {
+	fuzzer.uafCoverMu.Lock()
+	defer fuzzer.uafCoverMu.Unlock()
+	cover := fuzzer.newUAFCover
+	if len(cover) == 0 {
+		return nil
+	}
+	fuzzer.newUAFCover = make(ddrd.UAFCover)
+	return cover
+}
+
+// addUAFCoverageFromManager merges UAF coverage from manager
+func (fuzzer *Fuzzer) addUAFCoverageFromManager(cover ddrd.UAFCover) {
+	if len(cover) == 0 {
+		return
+	}
+	fuzzer.uafCoverMu.Lock()
+	defer fuzzer.uafCoverMu.Unlock()
+
+	// Convert cover map to slice for Merge method
+	var uafPairs []*ddrd.MayUAFPair
+	for _, uaf := range cover {
+		uafPairs = append(uafPairs, uaf)
+	}
+	fuzzer.maxUAFCover.Merge(uafPairs)
+}
+
 // checkForNewRaceCoverage checks if a pair potentially brings new race coverage
 func (fuzzer *Fuzzer) checkForNewRaceCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) bool {
 	if len(races) == 0 {
@@ -864,6 +980,25 @@ func (fuzzer *Fuzzer) checkForNewRaceCoverage(p1, p2 *prog.Prog, races []*ddrd.M
 	return false
 }
 
+// checkForNewUAFCoverage checks if a pair potentially brings new UAF coverage
+func (fuzzer *Fuzzer) checkForNewUAFCoverage(p1, p2 *prog.Prog, uafs []*ddrd.MayUAFPair) bool {
+	if len(uafs) == 0 {
+		return false
+	}
+
+	fuzzer.uafCoverMu.RLock()
+	defer fuzzer.uafCoverMu.RUnlock()
+
+	// Check if any of the UAFs are new
+	for _, uaf := range uafs {
+		if !fuzzer.maxUAFCover.Contains(uaf) {
+			return true
+		}
+	}
+
+	return false
+}
+
 // maintainRacePairQueues ensures race pair queues have sufficient work
 func (fuzzer *Fuzzer) maintainRacePairQueues() {
 	// ===============DDRD====================
@@ -871,8 +1006,8 @@ func (fuzzer *Fuzzer) maintainRacePairQueues() {
 	// ===============DDRD====================
 
 	// Check if race pair work queue needs more pairs
-	if fuzzer.racePairWorkQueue == nil {
-		log.Logf(0, "maintainRacePairQueues: racePairWorkQueue is nil")
+	if fuzzer.uafPairWorkQueue == nil {
+		log.Logf(0, "maintainUAFPairQueues: uafPairWorkQueue is nil")
 		return
 	}
 
@@ -900,12 +1035,10 @@ func (fuzzer *Fuzzer) maintainRacePairQueues() {
 		}
 
 		// Add to race pair work queue
-		// Using PairID as string identifier
-		pairIDStr := fmt.Sprintf("mgr_%x", pairCandidate.PairID)
-		fuzzer.racePairWorkQueue.enqueueCorpusPair(prog1, prog2)
+		fuzzer.uafPairWorkQueue.enqueueCorpusPair(prog1, prog2)
 		added++
 
-		log.Logf(2, "maintainRacePairQueues: added pair %s from manager", pairIDStr)
+		// log.Logf(2, "maintainRacePairQueues: added pair %s from manager", pairIDStr)
 	}
 
 	if added > 0 {
@@ -917,9 +1050,38 @@ func (fuzzer *Fuzzer) addRacePairWithNewCoverage(p1, p2 *prog.Prog, races []*ddr
 	pairID := fmt.Sprintf("newcover_%d_%d", time.Now().UnixNano(), len(races))
 	// ===============DDRD====================
 	// Use race pair work queue instead of normal work queue
-	fuzzer.racePairWorkQueue.enqueueNewCoverPair(p1, p2, pairID, races)
+	// Convert races to UAFs (this might need to be changed based on your UAF detection logic)
+	var uafs []*ddrd.MayUAFPair
+	for _, race := range races {
+		// This is a placeholder conversion - you might need to adjust this
+		// based on how you want to handle the race to UAF conversion
+		if race != nil {
+			uaf := &ddrd.MayUAFPair{
+				// Map race fields to UAF fields as appropriate
+				FreeAccessName: race.VarName1,
+				UseAccessName:  race.VarName2,
+				FreeCallStack:  race.CallStack1,
+				UseCallStack:   race.CallStack2,
+				Signal:         race.Signal,
+				TimeDiff:       race.TimeDiff,
+				// Add other field mappings as needed
+			}
+			uafs = append(uafs, uaf)
+		}
+	}
+	fuzzer.uafPairWorkQueue.enqueueNewCoverPair(p1, p2, pairID, uafs)
 	// ===============DDRD====================
 	log.Logf(1, "added race pair with %d new races to queue", len(races))
+}
+
+// addUAFPairWithNewCoverage adds a program pair that brings new UAF coverage
+func (fuzzer *Fuzzer) addUAFPairWithNewCoverage(p1, p2 *prog.Prog, uafs []*ddrd.MayUAFPair) {
+	pairID := fmt.Sprintf("newuaf_%d_%d", time.Now().UnixNano(), len(uafs))
+	// ===============DDRD====================
+	// Use UAF pair work queue for UAF pairs
+	fuzzer.uafPairWorkQueue.enqueueNewCoverPair(p1, p2, pairID, uafs)
+	// ===============DDRD====================
+	log.Logf(1, "added UAF pair with %d new UAFs to queue", len(uafs))
 }
 
 // ===============DDRD====================
@@ -949,6 +1111,34 @@ func serializeRaceSignal(sig ddrd.Signal) []byte {
 	data, err := json.Marshal(serial)
 	if err != nil {
 		log.Logf(0, "Failed to serialize race signal: %v", err)
+		return []byte{}
+	}
+	return data
+}
+
+// deserializeUAFSignal deserializes UAF signal from byte array
+func deserializeUAFSignal(data []byte) *ddrd.UAFSignal {
+	if len(data) == 0 {
+		return nil
+	}
+	var rawSignal []uint64
+	if err := json.Unmarshal(data, &rawSignal); err != nil {
+		log.Logf(0, "Failed to deserialize UAF signal: %v", err)
+		return nil
+	}
+	sig := ddrd.DeserializeUAFSignal(rawSignal)
+	return &sig
+}
+
+// serializeUAFSignal serializes UAF signal to byte array
+func serializeUAFSignal(sig ddrd.UAFSignal) []byte {
+	if sig.Empty() {
+		return []byte{}
+	}
+	rawSignal := sig.Serialize()
+	data, err := json.Marshal(rawSignal)
+	if err != nil {
+		log.Logf(0, "Failed to serialize UAF signal: %v", err)
 		return []byte{}
 	}
 	return data

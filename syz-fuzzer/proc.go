@@ -21,6 +21,7 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/rpctype"
 	"github.com/google/syzkaller/pkg/signal"
+	"github.com/google/syzkaller/pkg/vmexec"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -139,40 +140,10 @@ func (proc *Proc) handleRacePairMode() {
 	// First, ensure race pair queues are maintained
 	proc.fuzzer.maintainRacePairQueues()
 
-	// Configuration for load balancing
-	const maxConsecutiveCandidates = 30
-
-	// Check if we should prioritize triage over candidates
-	shouldPrioritizeTriage := proc.candidateCounter >= maxConsecutiveCandidates
-
-	// Get queue statistics for decision making
-	candidatesCount, triageCount, _ := proc.fuzzer.racePairWorkQueue.getQueueStats()
-
-	// Process race pair work from queue with load balancing
+	// Process UAF pair work from queue with load balancing
 	var item interface{}
 
-	if shouldPrioritizeTriage && triageCount > 0 {
-		// Force triage execution if we've done too many candidates
-		log.Logf(2, "proc %d: forcing triage execution (candidates=%d, triage=%d, consecutive_candidates=%d)",
-			proc.pid, candidatesCount, triageCount, proc.candidateCounter)
-
-		// Try to get a triage item specifically
-		item = proc.fuzzer.racePairWorkQueue.dequeue()
-		if item != nil {
-			switch item.(type) {
-			case *PairWorkTriage:
-				// Reset counter when we execute triage
-				proc.candidateCounter = 0
-			case *ProgPair:
-				// If we got a candidate instead, put it back and try to get triage
-				// This is a simple implementation - in practice you might want a more sophisticated queue
-				log.Logf(3, "proc %d: got candidate when expecting triage, continuing with it", proc.pid)
-			}
-		}
-	} else {
-		// Normal dequeue behavior
-		item = proc.fuzzer.racePairWorkQueue.dequeue()
-	}
+	item = proc.fuzzer.uafPairWorkQueue.dequeue()
 
 	if item == nil {
 		// No work available - add a small sleep to prevent busy-waiting
@@ -527,6 +498,48 @@ func (proc *Proc) logProgram(_ *ipc.ExecOpts, p *prog.Prog) {
 	}
 }
 
+// logProgramPair logs execution of a program pair for race/UAF detection
+// Output format is compatible with syz-execprog for later reproduction
+func (proc *Proc) logProgramPair(p1, p2 *prog.Prog) {
+	if proc.fuzzer.outputType == OutputNone {
+		return
+	}
+
+	data1 := p1.Serialize()
+	data2 := p2.Serialize()
+
+	// Format similar to syz-execprog for compatibility
+	switch proc.fuzzer.outputType {
+	case OutputStdout:
+		now := time.Now()
+		proc.fuzzer.logMu.Lock()
+		fmt.Printf("%02v:%02v:%02v executing program pair %v:\n",
+			now.Hour(), now.Minute(), now.Second(), proc.pid)
+		fmt.Printf("Program 1:\n%s\n", data1)
+		fmt.Printf("Program 2:\n%s\n", data2)
+		proc.fuzzer.logMu.Unlock()
+	case OutputDmesg:
+		fd, err := syscall.Open("/dev/kmsg", syscall.O_WRONLY, 0)
+		if err == nil {
+			buf := new(bytes.Buffer)
+			fmt.Fprintf(buf, "syzkaller: executing program pair %v:\n", proc.pid)
+			fmt.Fprintf(buf, "Program 1:\n%s\n", data1)
+			fmt.Fprintf(buf, "Program 2:\n%s\n", data2)
+			syscall.Write(fd, buf.Bytes())
+			syscall.Close(fd)
+		}
+	case OutputFile:
+		f, err := os.Create(fmt.Sprintf("%v-%v-pair.prog", proc.fuzzer.name, proc.pid))
+		if err == nil {
+			fmt.Fprintf(f, "Program 1:\n%s\n", data1)
+			fmt.Fprintf(f, "Program 2:\n%s\n", data2)
+			f.Close()
+		}
+	default:
+		log.SyzFatalf("unknown output type: %v", proc.fuzzer.outputType)
+	}
+}
+
 func (proc *Proc) resetAccState() {
 	if !proc.fuzzer.resetAccState {
 		return
@@ -554,6 +567,9 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 		return nil
 	}
 
+	// Log program pair execution (similar to syz-execprog)
+	// proc.logProgramPair(p1, p2)
+
 	// Always use local options to ensure proper flags are set
 	if opts1 == nil {
 		opts1 = &ipc.ExecOpts{}
@@ -561,10 +577,6 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 	if opts2 == nil {
 		opts2 = &ipc.ExecOpts{}
 	}
-
-	// Force enable race collection and pair sync flags (critical for pair execution)
-	opts1.Flags |= ipc.FlagCollectRace | ipc.FlagTestPairSync
-	opts2.Flags |= ipc.FlagCollectRace | ipc.FlagTestPairSync
 
 	// Reset executor state if needed
 	proc.resetAccState()
@@ -613,49 +625,84 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 
 	log.Logf(2, "proc %d: pair execution completed, output length: %d", proc.pid, len(output))
 
-	// ===============DDRD====================
-	// Process race detection results from pair execution
-	if info != nil && len(info.MayRacePairs) > 0 {
-		// Update race coverage in fuzzer - use slice directly without copy
-		// proc.fuzzer.updateRaceCoverage(info.MayRacePairs)
+	// Record execution to VM sequence buffer for UAF context analysis
+	if proc.fuzzer.vmExecBuffer != nil {
+		prog1Data := p1.Serialize()
+		prog2Data := p2.Serialize()
+		proc.fuzzer.vmExecBuffer.AddExecution(prog1Data, prog2Data)
+		log.Logf(2, "proc %d: recorded execution to VM buffer (seqID: %d)",
+			proc.pid, proc.fuzzer.vmExecBuffer.GetLatestSeqID())
 
-		// Generate race signals from detected pairs
-		raceSignalData := make([]uint64, 0, len(info.MayRacePairs))
-		for _, pair := range info.MayRacePairs {
-			// Use the race signal from executor (truncate to uint32)
-			raceSignalData = append(raceSignalData, uint64(pair.Signal))
+	}
+
+	// ===============DDRD====================
+	// Process UAF detection results from pair execution
+	if info != nil && len(info.MayUAFPairs) > 0 {
+		log.Logf(1, "proc %d: detected %d UAF pairs - processing immediately", proc.pid, len(info.MayUAFPairs))
+
+		// Generate pair ID for identification
+		prog1Data := p1.Serialize()
+		prog2Data := p2.Serialize()
+		pairID := ddrd.GeneratePairID(prog1Data, prog2Data)
+
+		// Get recent execution sequence context before sending to manager
+		var executionContext []vmexec.ExecutionRecord
+		if proc.fuzzer.vmExecBuffer != nil {
+			executionContext = proc.fuzzer.vmExecBuffer.GetRecentExecutions(100) // Last 100 executions
+			log.Logf(2, "proc %d: gathered %d execution records for UAF %x context",
+				proc.pid, len(executionContext), pairID)
 		}
 
-		// [!todo] 不应该直接的使用syzkaller的signal 使用race cover 中的signal替代即可
-		if len(raceSignalData) > 0 {
-			// Create signal from race data
-			raceSignal := ddrd.FromRaw(raceSignalData, 0)
+		// Generate UAF signals from detected pairs
+		uafSignalData := make([]uint64, 0, len(info.MayUAFPairs))
+		for _, pair := range info.MayUAFPairs {
+			uafSignalData = append(uafSignalData, uint64(pair.Signal))
+		}
 
-			// // Check if this is new race coverage
-			// if !proc.fuzzer.corpusRaceSignalDiff(raceSignal).Empty() {
-			// 	log.Logf(1, "proc %d: detected %d potential race pairs, adding to triage queue",
-			// 		proc.pid, len(info.MayRacePairs))
+		// Create UAF signal for fuzzer tracking
+		if len(uafSignalData) > 0 {
+			uafSignal := ddrd.FromRawUAF(uafSignalData, 0)
+			proc.fuzzer.addUAFSignal(uafSignal)
 
-			// 	// Instead of immediately reporting, add to triage queue for verification
-			// 	proc.enqueueRacePairTriage(p1, p2, info.MayRacePairs, raceSignal)
-			// }
-			proc.enqueueRacePairTriage(p1, p2, info.MayRacePairs, raceSignal)
+			// Update UAF coverage - convert slice to pointer slice
+			uafPairPtrs := make([]*ddrd.MayUAFPair, len(info.MayUAFPairs))
+			for i := range info.MayUAFPairs {
+				uafPairPtrs[i] = &info.MayUAFPairs[i]
+			}
+			proc.fuzzer.updateUAFCoverage(uafPairPtrs)
+		}
+
+		// Send UAF pair directly to manager with execution context
+		// No triage needed - detected UAF is considered valid
+		genericSignal := ddrd.FromRaw(uafSignalData, 0)
+		res, err := proc.sendUAFPairsToManagerWithContext(p1, p2, info.MayUAFPairs,
+			genericSignal, output, executionContext)
+
+		if err != nil {
+			log.Logf(0, "proc %d: failed to send UAF pair to manager: %v", proc.pid, err)
+		} else if res != nil && res.Accepted {
+			log.Logf(1, "proc %d: UAF pair %x accepted by manager", proc.pid, pairID)
+			// Add to valuable queue for further mutation
+			proc.fuzzer.uafPairWorkQueue.enqueue(&PairWorkValuable{&ProgPair{p1, p2}, len(info.MayUAFPairs)})
+		} else {
+			log.Logf(1, "proc %d: UAF pair %x rejected by manager", proc.pid, pairID)
 		}
 	} else {
-		log.Logf(2, "proc %d: no race pairs detected", proc.pid)
+		log.Logf(3, "proc %d: no UAF pairs detected", proc.pid)
 	}
 	// ===============DDRD====================
 
 	return info
 }
 
-func (proc *Proc) sendRacePairsToManager(
+func (proc *Proc) sendUAFPairsToManagerWithContext(
 	p1, p2 *prog.Prog,
-	racePairs []ddrd.MayRacePair,
-	raceSignal ddrd.Signal,
-	_ []byte,
-) (*rpctype.NewRacePairRes, error) {
-	if len(racePairs) == 0 {
+	uafPairs []ddrd.MayUAFPair,
+	uafSignal ddrd.Signal,
+	output []byte,
+	executionContext []vmexec.ExecutionRecord,
+) (*rpctype.NewUAFPairRes, error) {
+	if len(uafPairs) == 0 {
 		return nil, nil
 	}
 
@@ -663,29 +710,52 @@ func (proc *Proc) sendRacePairsToManager(
 	prog2Data := p2.Serialize()
 	pairIDHash := ddrd.GeneratePairID(prog1Data, prog2Data)
 
-	racePairsData, err := json.Marshal(racePairs)
+	uafPairsData, err := json.Marshal(uafPairs)
 	if err != nil {
-		return nil, fmt.Errorf("failed to serialize race pairs: %v", err)
+		return nil, fmt.Errorf("failed to serialize UAF pairs: %v", err)
 	}
 
-	racePairInput := rpctype.RacePairInput{
-		PairID: pairIDHash,
-		Prog1:  prog1Data,
-		Prog2:  prog2Data,
-		Signal: serializeRaceSignal(raceSignal),
-		Races:  racePairsData,
+	// Serialize execution context
+	executionContextData, err := json.Marshal(executionContext)
+	if err != nil {
+		log.Logf(1, "proc %d: failed to serialize execution context: %v", proc.pid, err)
+		executionContextData = nil // Continue without context if serialization fails
 	}
 
-	args := &rpctype.NewRacePairArgs{
+	uafPairInput := rpctype.UAFPairInput{
+		PairID:           pairIDHash,
+		Prog1:            prog1Data,
+		Prog2:            prog2Data,
+		Signal:           serializeRaceSignal(uafSignal),
+		UAFs:             uafPairsData,
+		Output:           output,
+		ExecutionContext: executionContextData, // Include execution sequence context
+	}
+
+	args := &rpctype.NewUAFPairArgs{
 		Name: proc.fuzzer.name,
-		Pair: racePairInput,
+		Pair: uafPairInput,
 	}
 
-	res := &rpctype.NewRacePairRes{}
-	if err := proc.fuzzer.manager.Call("Manager.NewRacePair", args, res); err != nil {
+	res := &rpctype.NewUAFPairRes{}
+	if err := proc.fuzzer.manager.Call("Manager.NewUAFPair", args, res); err != nil {
 		return nil, err
 	}
+
+	log.Logf(1, "proc %d: sent UAF pair %x to manager with %d execution records, accepted=%v",
+		proc.pid, pairIDHash, len(executionContext), res.Accepted)
+
 	return res, nil
+}
+
+func (proc *Proc) sendUAFPairsToManager(
+	p1, p2 *prog.Prog,
+	uafPairs []ddrd.MayUAFPair,
+	uafSignal ddrd.Signal,
+	output []byte,
+) (*rpctype.NewUAFPairRes, error) {
+	// Use the new function with empty execution context for backward compatibility
+	return proc.sendUAFPairsToManagerWithContext(p1, p2, uafPairs, uafSignal, output, nil)
 }
 
 // ===============DDRD====================
@@ -699,10 +769,10 @@ func (proc *Proc) executePairFromCandidate(item *ProgPair) {
 
 	// Use race collection options for candidates
 	opts1 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
+		Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF,
 	}
 	opts2 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
+		Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF,
 	}
 
 	info := proc.executeTestPair(opts1, opts2, item.p1, item.p2, ProgNormal)
@@ -712,67 +782,23 @@ func (proc *Proc) executePairFromCandidate(item *ProgPair) {
 }
 
 // executePairFromTriage executes a program pair from the triage queue
+// Simplified: UAF detection is now handled directly in executeTestPair
 func (proc *Proc) executePairFromTriage(item *PairWorkTriage) {
 	if item == nil || item.progPair == nil {
 		log.Logf(0, "proc %d: executePairFromTriage called with invalid item", proc.pid)
 		return
 	}
 
-	log.Logf(1, "proc %d: ===== PROCESSING RACE PAIR TRIAGE ITEM =====", proc.pid)
-	log.Logf(1, "proc %d: starting race pair triage with initial %d race pairs", proc.pid, len(item.info.MayRacePairs))
-
-	// Perform race pair triage: multiple executions to verify stability
-	triageResult := proc.performRacePairTriage(item)
-	if triageResult == nil {
-		log.Logf(1, "proc %d: ===== TRIAGE ITEM REJECTED =====", proc.pid)
-		log.Logf(1, "proc %d: race pair triage failed or found no stable races", proc.pid)
-		return
+	// Simply execute the pair - UAF detection and reporting is handled in executeTestPair
+	opts1 := &ipc.ExecOpts{
+		Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF,
+	}
+	opts2 := &ipc.ExecOpts{
+		Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF,
 	}
 
-	log.Logf(1, "proc %d: ===== TRIAGE ITEM ACCEPTED =====", proc.pid)
-	// Output detailed information about verified stable race pairs
-	proc.outputRacePairDetails(triageResult.stableRaces, item.progPair.p1, item.progPair.p2)
-
-	// Add stable race pairs to corpus if they bring new coverage
-	// [!todo]: 这底下的逻辑有点问问题
-	if len(triageResult.stableRaces) > 0 {
-		log.Logf(1, "proc %d: checking if %d stable races provide new coverage", proc.pid, len(triageResult.stableRaces))
-
-		if proc.fuzzer.checkForNewRaceCoverage(item.progPair.p1, item.progPair.p2, triageResult.stableRaces) {
-			// proc.fuzzer.addRacePairWithNewCoverage(item.progPair.p1, item.progPair.p2, triageResult.stableRaces)
-			proc.fuzzer.updateRaceCoverage(triageResult.stableRaces)
-
-			// Now that races are verified as stable, add to fuzzer's race signals
-			raceSignalData := make([]uint64, 0, len(triageResult.stableRaces))
-			for _, race := range triageResult.stableRaces {
-				raceSignalData = append(raceSignalData, uint64(race.Signal))
-			}
-
-			if len(raceSignalData) > 0 {
-				log.Logf(1, "proc %d: adding %d race signals to fuzzer", proc.pid, len(raceSignalData))
-				raceSignal := ddrd.FromRaw(raceSignalData, 0)
-				proc.fuzzer.addRaceSignal(raceSignal)
-
-				// Only now send verified stable race pairs to manager
-				stableRacePairs := make([]ddrd.MayRacePair, len(triageResult.stableRaces))
-				for i, race := range triageResult.stableRaces {
-					stableRacePairs[i] = *race
-				}
-
-				log.Logf(1, "proc %d: sending %d verified race pairs to manager", proc.pid, len(stableRacePairs))
-				res, _ := proc.sendRacePairsToManager(item.progPair.p1, item.progPair.p2, stableRacePairs, raceSignal, nil)
-				if res.Accepted {
-					proc.fuzzer.racePairWorkQueue.enqueue(&PairWorkValuable{item.progPair, len(stableRacePairs)})
-				}
-			} else {
-				log.Logf(1, "proc %d: no valid race signals generated", proc.pid)
-			}
-		} else {
-			log.Logf(1, "proc %d: ✗ NO NEW COVERAGE - skipping corpus and manager", proc.pid)
-		}
-	} else {
-		log.Logf(1, "proc %d: no stable race pairs found after triage", proc.pid)
-	}
+	log.Logf(2, "proc %d: executing triage pair (simplified - no complex verification)", proc.pid)
+	proc.executeTestPair(opts1, opts2, item.progPair.p1, item.progPair.p2, ProgNormal)
 }
 
 // executePairFromValuable executes a program pair from the valuable queue
@@ -782,13 +808,13 @@ func (proc *Proc) executePairFromValuable(item *PairWorkValuable) {
 		fuzzerSnapshot := proc.fuzzer.snapshot()
 		p := item.progPair.p1.Clone()
 		p.Mutate(proc.rnd, prog.RecommendedCalls, proc.fuzzer.choiceTable, proc.fuzzer.noMutate, fuzzerSnapshot.corpus)
-		proc.fuzzer.racePairWorkQueue.enqueue(&ProgPair{p, item.progPair.p2})
+		proc.fuzzer.uafPairWorkQueue.enqueue(&ProgPair{p, item.progPair.p2})
 	}
 	for i := 0; i < item.score; i++ {
 		fuzzerSnapshot := proc.fuzzer.snapshot()
 		p := item.progPair.p2.Clone()
 		p.Mutate(proc.rnd, prog.RecommendedCalls, proc.fuzzer.choiceTable, proc.fuzzer.noMutate, fuzzerSnapshot.corpus)
-		proc.fuzzer.racePairWorkQueue.enqueue(&ProgPair{item.progPair.p1, p})
+		proc.fuzzer.uafPairWorkQueue.enqueue(&ProgPair{item.progPair.p1, p})
 	}
 }
 
@@ -843,237 +869,28 @@ func (proc *Proc) isExecuting() bool {
 	return false
 }
 
-// ===============DDRD Race Pair Triage Methods====================
-
-// RacePairTriageResult holds the results of race pair triage verification
-type RacePairTriageResult struct {
-	initialRaces   []*ddrd.MayRacePair   // Original race pairs to verify
-	execResults    [][]*ddrd.MayRacePair // Results from multiple executions
-	stableRaces    []*ddrd.MayRacePair   // Race pairs that appeared consistently
-	totalRuns      int                   // Total number of triage runs performed
-	successfulRuns int                   // Number of runs that produced race pairs
-}
-
-// performRacePairTriage performs multiple executions to verify race pair stability
-func (proc *Proc) performRacePairTriage(item *PairWorkTriage) *RacePairTriageResult {
-	// Triage configuration
-	const (
-		maxTriageRuns = 2 // Maximum number of triage runs
-	)
-
-	log.Logf(1, "proc %d: ===== STARTING RACE PAIR TRIAGE =====", proc.pid)
-	// Log details of initial race pairs
-	for i, race := range item.info.MayRacePairs {
-		log.Logf(2, "proc %d: initial race %d: syscalls(%d,%d) nums(%d,%d) signal=0x%x",
-			proc.pid, i, race.Syscall1Idx, race.Syscall2Idx, race.Syscall1Num, race.Syscall2Num, race.Signal)
-	}
-
-	result := &RacePairTriageResult{
-		initialRaces: make([]*ddrd.MayRacePair, len(item.info.MayRacePairs)),
-		execResults:  make([][]*ddrd.MayRacePair, 0, maxTriageRuns),
-	}
-
-	// Copy initial race pairs
-	for i := range item.info.MayRacePairs {
-		result.initialRaces[i] = &item.info.MayRacePairs[i]
-	}
-
-	// Perform multiple executions
-	opts1 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
-	}
-	opts2 := &ipc.ExecOpts{
-		Flags: ipc.FlagCollectRace | ipc.FlagTestPairSync,
-	}
-
-	for run := 0; run < maxTriageRuns; run++ {
-		startTime := time.Now()
-		info := proc.executeTestPair(opts1, opts2, item.progPair.p1, item.progPair.p2, ProgNormal)
-		execTime := time.Since(startTime)
-
-		result.totalRuns++
-		log.Logf(2, "proc %d: triage run %d completed in %v", proc.pid, run+1, execTime)
-
-		if info != nil && len(info.MayRacePairs) > 0 {
-			result.successfulRuns++
-
-			// Convert to pointer slice
-			runRaces := make([]*ddrd.MayRacePair, len(info.MayRacePairs))
-			for i := range info.MayRacePairs {
-				runRaces[i] = &info.MayRacePairs[i]
-			}
-			result.execResults = append(result.execResults, runRaces)
-
-			log.Logf(1, "proc %d: triage run %d SUCCESS - produced %d race pairs",
-				proc.pid, run+1, len(runRaces))
-
-			// Log detailed race pair info for this run
-			for i, race := range runRaces {
-				if race != nil {
-					log.Logf(2, "proc %d: run %d race %d: syscalls(%d,%d) nums(%d,%d) vars(0x%x,0x%x) signal=0x%x",
-						proc.pid, run+1, i, race.Syscall1Idx, race.Syscall2Idx,
-						race.Syscall1Num, race.Syscall2Num, race.VarName1, race.VarName2, race.Signal)
-				}
-			}
-		} else {
-			log.Logf(1, "proc %d: triage run %d FAILED - produced no race pairs", proc.pid, run+1)
-			return nil // Abort triage if any run fails
-		}
-	}
-
-	// Analyze consistency and identify stable race pairs
-	log.Logf(1, "proc %d: analyzing race pair stability...", proc.pid)
-	result.stableRaces = proc.findStableRacePairs(result)
-
-	// Only return result if it meets minimum quality criteria
-	if len(result.stableRaces) > 0 {
-		log.Logf(1, "proc %d: ===== TRIAGE PASSED =====", proc.pid)
-		log.Logf(1, "proc %d: returning %d verified stable race pairs", proc.pid, len(result.stableRaces))
-		return result
-	}
-	return nil
-}
-
-// findStableRacePairs identifies race pairs that appear consistently across multiple runs
-func (proc *Proc) findStableRacePairs(result *RacePairTriageResult) []*ddrd.MayRacePair {
-	if len(result.execResults) == 0 {
-		log.Logf(2, "proc %d: no execution results to analyze", proc.pid)
-		return nil
-	}
-
-	log.Logf(2, "proc %d: analyzing stability across %d execution results", proc.pid, len(result.execResults))
-
-	// Count occurrences of each race pair based on key identifying fields
-	type raceKey struct {
-		varName1   uint64
-		varName2   uint64
-		callStack1 uint64
-		callStack2 uint64
-	}
-
-	raceCount := make(map[raceKey]*ddrd.MayRacePair)
-	occurrences := make(map[raceKey]int)
-
-	// Analyze each execution result
-	for _, runRaces := range result.execResults {
-		seen := make(map[raceKey]bool) // Track what we've seen in this run
-		for _, race := range runRaces {
-			if race == nil {
-				continue
-			}
-			key := raceKey{
-				varName1:   race.VarName1,
-				varName2:   race.VarName2,
-				callStack1: race.CallStack1,
-				callStack2: race.CallStack2,
-			}
-			// Only count once per run to avoid duplicate counting
-			if !seen[key] {
-				seen[key] = true
-				occurrences[key]++
-				raceCount[key] = race // Keep the most recent instance
-			}
-		}
-	}
-
-	var stableRaces []*ddrd.MayRacePair
-	totalCandidates := len(raceCount)
-	validCandidates := 0
-
-	log.Logf(2, "proc %d: evaluating %d unique race pair candidates", proc.pid, totalCandidates)
-
-	for key, race := range raceCount {
-		count := occurrences[key]
-		if count >= result.successfulRuns {
-			validCandidates++
-			// Verify this is a valid race pair with required fields
-			if proc.isValidRacePair(race) {
-				stableRaces = append(stableRaces, race)
-				log.Logf(1, "proc %d: ✓ STABLE RACE FOUND: syscalls(%d,%d) nums(%d,%d) count=%d/%d - ACCEPTED",
-					proc.pid, race.Syscall1Idx, race.Syscall2Idx,
-					race.Syscall1Num, race.Syscall2Num, count, result.successfulRuns)
-			} else {
-				log.Logf(1, "proc %d: ✗ INVALID RACE: syscalls(%d,%d) nums(%d,%d) count=%d/%d - REJECTED (invalid fields)",
-					proc.pid, race.Syscall1Idx, race.Syscall2Idx,
-					race.Syscall1Num, race.Syscall2Num, count, result.successfulRuns)
-			}
-		} else {
-			log.Logf(3, "proc %d: ✗ UNSTABLE RACE: syscalls(%d,%d) nums(%d,%d) count=%d/%d - REJECTED (insufficient occurrences)",
-				proc.pid, race.Syscall1Idx, race.Syscall2Idx,
-				race.Syscall1Num, race.Syscall2Num, count, result.successfulRuns)
-		}
-	}
-
-	log.Logf(1, "proc %d: stability analysis complete: %d/%d candidates met frequency threshold, %d passed validation",
-		proc.pid, validCandidates, totalCandidates, len(stableRaces))
-
-	return stableRaces
-}
-
-// [!todo]: isValidRacePair checks if a race pair has valid required fields
-func (proc *Proc) isValidRacePair(race *ddrd.MayRacePair) bool {
-	if race == nil {
-		return false
-	}
-	return true
-}
-
-// outputRacePairDetails outputs detailed information about verified race pairs
-func (proc *Proc) outputRacePairDetails(stableRaces []*ddrd.MayRacePair, p1, p2 *prog.Prog) {
-	if len(stableRaces) == 0 {
-		return
-	}
-
-	log.Logf(0, "=== VERIFIED RACE PAIRS (proc %d) ===", proc.pid)
-	log.Logf(0, "Program 1: %s", p1.String())
-	log.Logf(0, "Program 2: %s", p2.String())
-	log.Logf(0, "Found %d stable race pairs:", len(stableRaces))
-
-	for i, race := range stableRaces {
-		if race == nil {
-			continue
-		}
-
-		// Only output if the key syscall fields have values
-		if race.Syscall1Idx >= 0 && race.Syscall2Idx >= 0 &&
-			race.Syscall1Num != 0 && race.Syscall2Num != 0 {
-
-			log.Logf(0, "--- Race Pair %d ---", i+1)
-			log.Logf(0, "  Syscall Indices: %d <-> %d", race.Syscall1Idx, race.Syscall2Idx)
-			log.Logf(0, "  Syscall Numbers: %d <-> %d", race.Syscall1Num, race.Syscall2Num)
-			log.Logf(0, "  Variable Names: 0x%x <-> 0x%x", race.VarName1, race.VarName2)
-			log.Logf(0, "  Call Stacks: 0x%x <-> 0x%x", race.CallStack1, race.CallStack2)
-			log.Logf(0, "  Signal: 0x%x", race.Signal)
-			log.Logf(0, "  Access Types: %d <-> %d", race.AccessType1, race.AccessType2)
-			log.Logf(0, "  Lock Type: %d", race.LockType)
-			log.Logf(0, "  Time Diff: %d ns", race.TimeDiff)
-			log.Logf(0, "  Sequence Numbers: %d <-> %d", race.Sn1, race.Sn2)
-		}
-	}
-	log.Logf(0, "=== END RACE PAIRS ===")
-}
-
-// enqueueRacePairTriage adds detected race pairs to the triage queue for verification
-func (proc *Proc) enqueueRacePairTriage(p1, p2 *prog.Prog, racePairs []ddrd.MayRacePair, _ ddrd.Signal) {
+// enqueueUAFPairTriage adds detected UAF pair race pairs to the triage queue for verification
+func (proc *Proc) enqueueUAFPairTriage(p1, p2 *prog.Prog, racePairs []ddrd.MayUAFPair, _ ddrd.Signal, output []byte) {
 	// Create PairProgInfo from the race pairs
 	info := &ipc.PairProgInfo{
-		PairCount:    uint32(len(racePairs)),
-		MayRacePairs: make([]ddrd.MayRacePair, len(racePairs)),
+		PairCount:   uint32(len(racePairs)),
+		MayUAFPairs: make([]ddrd.MayUAFPair, len(racePairs)),
 	}
 
 	// Copy races to the proper format
 	for i, race := range racePairs {
-		info.MayRacePairs[i] = race
+		info.MayUAFPairs[i] = race
 	}
 
 	// Create triage work item
 	triage := &PairWorkTriage{
 		progPair: &ProgPair{p1: p1, p2: p2},
 		info:     info,
+		output:   append([]byte{}, output...), // Copy output to avoid reference issues
 	}
 
 	// Add to triage queue
-	proc.fuzzer.racePairWorkQueue.enqueueTriage(triage)
+	proc.fuzzer.uafPairWorkQueue.enqueueTriage(triage)
 
-	log.Logf(1, "proc %d: enqueued race pair triage with %d pairs", proc.pid, len(racePairs))
+	log.Logf(1, "proc %d: enqueued UAF pair triage with %d pairs", proc.pid, len(racePairs))
 }

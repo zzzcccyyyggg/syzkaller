@@ -245,6 +245,7 @@ type ExecutionResult struct {
 type MonitorConfig struct {
 	SkipDuplicateDataRaces   bool
 	SkipDataRaceCombinations map[string]bool
+	WorkDir                  string // Working directory for saving outputs
 }
 
 func (inst *Instance) MonitorExecutionRaw(outc <-chan []byte, errc <-chan error,
@@ -260,11 +261,13 @@ func (inst *Instance) MonitorExecutionRawWithConfig(outc <-chan []byte, errc <-c
 
 	skipConfig := false
 	skipCombinations := make(map[string]bool)
+	var workDir string
 	if config != nil {
 		skipConfig = config.SkipDuplicateDataRaces
 		if config.SkipDataRaceCombinations != nil {
 			skipCombinations = config.SkipDataRaceCombinations
 		}
+		workDir = config.WorkDir
 	}
 
 	mon := &monitor{
@@ -276,6 +279,7 @@ func (inst *Instance) MonitorExecutionRawWithConfig(outc <-chan []byte, errc <-c
 		exit:                         exit,
 		skipDuplicateDataRacesConfig: skipConfig,
 		skipDataRaceCombinations:     skipCombinations,
+		workDir:                      workDir,
 	}
 	return &ExecutionResult{
 		Report:    mon.monitorExecution(),
@@ -294,6 +298,7 @@ type monitor struct {
 	matchPos                     int
 	skipDataRaceCombinations     map[string]bool // VarName combinations to skip
 	skipDuplicateDataRacesConfig bool            // Whether to skip duplicate data races
+	workDir                      string          // Working directory for saving outputs
 }
 
 func (mon *monitor) isCompleteDataRaceReport(output []byte) bool {
@@ -653,3 +658,17 @@ func (mon *monitor) normalizeVarNameKeyVM(var1, var2 string) string {
 	}
 	return var1 + ":" + var2
 }
+
+// handleUAFSaveSignal handles UAF save signal requests from manager
+//
+// Method B: Direct saving to final location
+// Monitor's responsibility:
+// 1. Receive signal with target UAF directory path and rotation index
+// 2. Save current VM output buffer directly to uafpairs/uaf_<pairID>/log<N>
+// 3. Send response to manager (no file transfer needed)
+//
+// This approach:
+// - Eliminates temporary files and file copying
+// - Monitor saves directly to final destination
+// - Manager only needs to save metadata files
+// - More efficient file I/O

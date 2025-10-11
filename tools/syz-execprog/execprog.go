@@ -88,38 +88,6 @@ func main() {
 		log.Fatalf("%v", err)
 	}
 
-	// Handle race validation mode early - use specialized loading
-	if *flagRaceValidation {
-		if len(flag.Args()) != 2 {
-			log.Fatalf("race validation mode requires exactly 2 program files, got %d", len(flag.Args()))
-		}
-		if *flagRaceSignal == 0 {
-			log.Fatalf("race validation mode requires -race-signal parameter")
-		}
-
-		// Load program pair from two separate files
-		prog1, prog2, err := loadRaceValidationPrograms(target, flag.Args()[0], flag.Args()[1])
-		if err != nil {
-			log.Fatalf("failed to load race validation programs: %v", err)
-		}
-
-		features, err := host.Check(target)
-		if err != nil {
-			log.Fatalf("%v", err)
-		}
-
-		config, _ := createConfig(target, features, featuresFlags)
-		if err = host.Setup(target, features, featuresFlags, config.Executor); err != nil {
-			log.Fatal(err)
-		}
-
-		sysTarget := targets.Get(*flagOS, *flagArch)
-
-		// Execute race validation
-		executeRaceValidation(prog1, prog2, config, sysTarget)
-		return
-	}
-
 	progs := loadPrograms(target, flag.Args())
 	if len(progs) == 0 {
 		return
@@ -249,6 +217,49 @@ func (ctx *Context) execute(pid int, env *ipc.Env, p *prog.Prog, progIndex int) 
 			log.Logf(1, "RESULT: no calls executed")
 		}
 		break
+	}
+}
+
+func (ctx *Context) executeProgPair(pid int, env *ipc.Env, prog1, prog2 *prog.Prog) {
+	// Limit concurrency window.
+	ticket := ctx.gate.Enter()
+	defer ctx.gate.Leave(ticket)
+
+	if *flagOutput {
+		log.Logf(0, "Program 1:\n%s", prog1.Serialize())
+		log.Logf(0, "Program 2:\n%s", prog2.Serialize())
+	}
+
+	// Setup race validation options
+	opts := &ipc.RaceValidationOpts{
+		Opts1:      &ipc.ExecOpts{},
+		Opts2:      &ipc.ExecOpts{},
+		RaceSignal: *flagRaceSignal,
+		VarName1:   *flagVarName1,
+		VarName2:   *flagVarName2,
+		CallStack1: *flagCallStack1,
+		CallStack2: *flagCallStack2,
+		Sn1:        *flagSn1,
+		Sn2:        *flagSn2,
+		LockStatus: uint32(*flagLockStatus),
+		Attempts:   *flagAttempts,
+	}
+
+	log.Logf(0, "Executing race validation with %d attempts...", *flagAttempts)
+
+	// Execute race validation
+	output, hanged, err := env.RaceValidation(opts, prog1, prog2)
+
+	// Report results
+	log.Logf(0, "Race validation completed.")
+	if err != nil {
+		log.Logf(0, "Error: %v", err)
+	}
+	if hanged {
+		log.Logf(0, "Warning: Execution hanged")
+	}
+	if len(output) > 0 {
+		log.Logf(0, "Output:\n%s", output)
 	}
 }
 

@@ -2,7 +2,7 @@
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
 // +build
-
+#include "ddrd/types.h"
 #include <algorithm>
 #include <cstdint>
 #include <errno.h>
@@ -26,8 +26,8 @@
 #include "defs.h"
 
 #if GOOS_linux
-#include <sys/syscall.h>
 #include "ukc_ctl.h"
+#include <sys/syscall.h>
 static ukc_ctl_t* ukc_controller = NULL;
 #endif
 
@@ -107,7 +107,6 @@ static NORETURN void doexit_thread(int status);
 // This function does not add \n at the end of msg as opposed to the previous functions.
 static PRINTF(1, 2) void debug(const char* msg, ...);
 void debug_dump_data(const char* data, int length);
-void sync_with_test_pair();
 
 #if 0
 #define debug_verbose(...) debug(__VA_ARGS__)
@@ -116,8 +115,8 @@ void sync_with_test_pair();
 #endif
 
 static void reply_execute(int status);
-
 // ===============DDRD====================
+static void reply_execute_pair(int status);
 static int receive_execute_dispatch();
 // ===============DDRD====================
 
@@ -147,7 +146,9 @@ const int kMaxOutputCoverage = 6 << 20; // coverage is needed in ~ up to 1/3 of 
 const int kMaxOutputSignal = 4 << 20;
 const int kMinOutput = 256 << 10; // if we don't need to send signal, the output is rather short.
 const int kInitialOutput = kMinOutput; // the minimal size to be allocated in the parent process
-const int kMaxOutputMayRacePair = 80 << 21;
+// ===============DDRD====================
+const int kMaxOutputMayRacePair = 64 << 20;
+// ===============DDRD====================
 #else
 // We don't fork and allocate the memory only once, so prepare for the worst case.
 const int kInitialOutput = 14 << 20;
@@ -192,12 +193,17 @@ static bool flag_delay_kcov_mmap;
 
 static bool flag_collect_cover;
 static bool flag_collect_signal;
+// ===============DDRD====================
 static bool flag_collect_race;
+static bool flag_collect_uaf;
+static bool flag_collect_extended; // collect extend race/uaf data
+// ===============DDRD====================
 static bool flag_dedup_cover;
 static bool flag_threaded;
 static bool flag_coverage_filter;
-static bool flag_test_pair_sync;
+
 // ===============DDRD====================
+static bool flag_test_pair_sync;
 static long long last_test_pair_id = -1; // Track test pair for race detector reset
 // ===============DDRD====================
 
@@ -224,7 +230,7 @@ static bool in_execute_one = false;
 
 #include "common.h"
 
-const int kMaxInput = 4 << 20; // keep in sync with prog.ExecBufferSize
+const int kMaxInput = 32 << 20; // keep in sync with prog.ExecBufferSize
 const int kMaxCommands = 1000; // prog package knows about this constant (prog.execMaxCommands)
 
 const uint64 instr_eof = -1;
@@ -308,8 +314,8 @@ struct thread_t {
 	bool soft_fail_state;
 
 	// ===============DDRD====================
-	uint64 call_start_time; // syscall 开始执行时间 NS
-	uint64 call_end_time; // syscall 结束执行时间 NS
+	uint64 call_start_time; // syscall start time NS
+	uint64 call_end_time; // syscall end times NS
 	// ===============DDRD====================
 };
 
@@ -323,8 +329,9 @@ static __thread struct thread_t* current_thread;
 #include <sys/mman.h>
 #include <sys/wait.h>
 
+// Record each syscall timing for each program in the pair, for match the pair to specific syscall
+// ===============DDRD====================
 #define MAX_PAIR_SYSCALLS 1024
-
 struct PairSyscallTiming {
 	int call_index; // syscall index in program
 	int call_num; // syscall number
@@ -355,27 +362,28 @@ static PairSyscallSharedData* pair_shared_data = nullptr;
 static bool is_pair_prog1 = false; // flag to identify which program is running
 static bool is_pair_prog2 = false; // flag to identify which program is running
 
-// Function to create shared memory for pair syscall timing
+
+// Function to create shared memory for pair syscall timing and for bind the the pair to syscall pair if the pair is not backround
 static void create_pair_syscall_shared_memory()
 {
 	if (pair_shared_data != nullptr) {
 		return; // Already created
 	}
-
+	
 	// Create shared memory mapping
 	pair_shared_data = (PairSyscallSharedData*)mmap(nullptr, sizeof(PairSyscallSharedData),
-							PROT_READ | PROT_WRITE,
-							MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	PROT_READ | PROT_WRITE,
+	MAP_SHARED | MAP_ANONYMOUS, -1, 0);
 	if (pair_shared_data == MAP_FAILED) {
 		fail("Failed to create shared memory for pair syscall timing");
 	}
-
+	
 	// Initialize shared memory
 	memset(pair_shared_data, 0, sizeof(PairSyscallSharedData));
 	pair_shared_data->prog1_syscall_count = 0;
 	pair_shared_data->prog2_syscall_count = 0;
 	pair_shared_data->initialized = true;
-
+	
 	debug("Created shared memory for pair syscall timing at %p\n", pair_shared_data);
 }
 
@@ -401,7 +409,7 @@ static void clear_pair_syscall_timing()
 	if (pair_shared_data == nullptr) {
 		create_pair_syscall_shared_memory();
 	}
-
+	
 	memset(pair_shared_data->prog1_syscalls, 0, sizeof(pair_shared_data->prog1_syscalls));
 	memset(pair_shared_data->prog2_syscalls, 0, sizeof(pair_shared_data->prog2_syscalls));
 	pair_shared_data->prog1_syscall_count = 0;
@@ -415,10 +423,15 @@ static void clear_pair_syscall_timing()
 static void record_pair_syscall_timing(int call_index, int call_num, uint64 start_time, uint64 end_time, int thread_id)
 {
 	if (pair_shared_data == nullptr) {
-		debug("Warning: shared memory not initialized for syscall timing\n");
-		return;
+		// 延迟初始化共享内存
+		create_pair_syscall_shared_memory();
+		if (pair_shared_data == nullptr) {
+			debug("Warning: failed to initialize shared memory for syscall timing\n");
+			return;
+		}
+		debug("Pair syscall shared memory initialized on demand\n");
 	}
-
+	
 	if (is_pair_prog1) {
 		int count = __sync_fetch_and_add(&pair_shared_data->prog1_syscall_count, 1);
 		if (count < MAX_PAIR_SYSCALLS) {
@@ -430,24 +443,24 @@ static void record_pair_syscall_timing(int call_index, int call_num, uint64 star
 			record->thread_id = thread_id;
 			record->valid = true;
 			debug("Recorded prog1 syscall %d: call_num=%d, duration=%llu ns\n",
-			      call_index, call_num, end_time - start_time);
-		}
-	} else if (is_pair_prog2) {
-		int count = __sync_fetch_and_add(&pair_shared_data->prog2_syscall_count, 1);
-		if (count < MAX_PAIR_SYSCALLS) {
-			PairSyscallTiming* record = &pair_shared_data->prog2_syscalls[count];
-			record->call_index = call_index;
-			record->call_num = call_num;
-			record->start_time_ns = start_time;
-			record->end_time_ns = end_time;
-			record->thread_id = thread_id;
-			record->valid = true;
-			debug("Recorded prog2 syscall %d: call_num=%d, duration=%llu ns\n",
-			      call_index, call_num, end_time - start_time);
-		}
-	}
+				call_index, call_num, end_time - start_time);
+			}
+		} else if (is_pair_prog2) {
+			int count = __sync_fetch_and_add(&pair_shared_data->prog2_syscall_count, 1);
+			if (count < MAX_PAIR_SYSCALLS) {
+				PairSyscallTiming* record = &pair_shared_data->prog2_syscalls[count];
+				record->call_index = call_index;
+				record->call_num = call_num;
+				record->start_time_ns = start_time;
+				record->end_time_ns = end_time;
+				record->thread_id = thread_id;
+				record->valid = true;
+				debug("Recorded prog2 syscall %d: call_num=%d, duration=%llu ns\n",
+					call_index, call_num, end_time - start_time);
+				}
+			}
+		
 }
-
 // Function to print pair syscall timing statistics
 static void print_pair_syscall_statistics()
 {
@@ -455,30 +468,30 @@ static void print_pair_syscall_statistics()
 		debug("No shared memory available for pair syscall statistics\n");
 		return;
 	}
-
+	
 	debug("=== PAIR SYSCALL TIMING STATISTICS ===\n");
 	debug("Program 1 executed %d syscalls:\n", pair_shared_data->prog1_syscall_count);
 	for (int i = 0; i < pair_shared_data->prog1_syscall_count && i < MAX_PAIR_SYSCALLS; i++) {
 		PairSyscallTiming* record = &pair_shared_data->prog1_syscalls[i];
 		if (record->valid) {
 			debug("  [%d] call_num=%d, thread=%d, duration=%llu ns, start=%llu, end=%llu\n",
-			      record->call_index, record->call_num, record->thread_id,
-			      record->end_time_ns - record->start_time_ns,
-			      record->start_time_ns, record->end_time_ns);
+				record->call_index, record->call_num, record->thread_id,
+				record->end_time_ns - record->start_time_ns,
+				record->start_time_ns, record->end_time_ns);
+			}
 		}
-	}
-
-	debug("Program 2 executed %d syscalls:\n", pair_shared_data->prog2_syscall_count);
-	for (int i = 0; i < pair_shared_data->prog2_syscall_count && i < MAX_PAIR_SYSCALLS; i++) {
-		PairSyscallTiming* record = &pair_shared_data->prog2_syscalls[i];
-		if (record->valid) {
-			debug("  [%d] call_num=%d, thread=%d, duration=%llu ns, start=%llu, end=%llu\n",
-			      record->call_index, record->call_num, record->thread_id,
-			      record->end_time_ns - record->start_time_ns,
-			      record->start_time_ns, record->end_time_ns);
-		}
-	}
-	debug("=== END PAIR SYSCALL TIMING STATISTICS ===\n");
+		
+		debug("Program 2 executed %d syscalls:\n", pair_shared_data->prog2_syscall_count);
+		for (int i = 0; i < pair_shared_data->prog2_syscall_count && i < MAX_PAIR_SYSCALLS; i++) {
+			PairSyscallTiming* record = &pair_shared_data->prog2_syscalls[i];
+			if (record->valid) {
+				debug("  [%d] call_num=%d, thread=%d, duration=%llu ns, start=%llu, end=%llu\n",
+					record->call_index, record->call_num, record->thread_id,
+					record->end_time_ns - record->start_time_ns,
+					record->start_time_ns, record->end_time_ns);
+				}
+			}
+			debug("=== END PAIR SYSCALL TIMING STATISTICS ===\n");
 }
 // ===============DDRD====================
 
@@ -495,6 +508,8 @@ const uint64 kInMagic = 0xbadc0ffeebadface;
 const uint32 kOutMagic = 0xbadf00d;
 // ===============DDRD====================
 const uint32 kOutPairMagic = 0xbadfeed;
+const uint32 kOutUAFMagic = 0xbadfaad;
+const uint32 kOutExtendedUAFMagic = 0xbadf00d; // 扩展UAF信息魔数
 const uint64 kInPairMagic = 0xbadc0ffeebadfa0e; // Different magic for pair requests
 const uint64 kRaceValidationInMagic = 0xbadc0ffeebadfade;
 // const uint32 kRaceValidationOutMagic = 0xbadfa1d;
@@ -539,21 +554,20 @@ struct execute_pair_req {
 
 // Function declarations that depend on execute_pair_req
 static void execute_pair(const execute_pair_req& req);
-void receive_execute_pair_internal(const execute_pair_req& req);
 
 struct race_validation_req {
-    uint64 magic;
-    uint64 prog1_size;
-    uint64 prog2_size;
-    uint64 race_signal;
-    uint64 var_name1;
+	uint64 magic;
+	uint64 prog1_size;
+	uint64 prog2_size;
+	uint64 race_signal;
+	uint64 var_name1;
 	uint64 var_name2;
 	uint64 call_stack1;
 	uint64 call_stack2;
 	uint64 sn1;
 	uint64 sn2;
-    uint32 lock_status;
-    uint32 attempt_count;
+	uint32 lock_status;
+	uint32 attempt_count;
 };
 
 static void race_validate(const race_validation_req);
@@ -586,7 +600,6 @@ struct call_reply {
 	uint32 comps_size;
 	uint32 race_signal_size;
 	uint32 race_mapping_size;
-	// signal/cover/comps/race_signal/race_mapping follow
 };
 
 enum {
@@ -636,7 +649,10 @@ static void copyin(char* addr, uint64 val, uint64 size, uint64 bf, uint64 bf_off
 static bool copyout(char* addr, uint64 size, uint64* res);
 static void setup_control_pipes();
 static void setup_features(char** enable, int n);
-
+// ===============DDRD====================
+static void collect_and_output_race_data();
+static void collect_and_output_uaf_data();
+// ===============DDRD====================
 #include "syscalls.h"
 
 #if GOOS_linux
@@ -659,7 +675,8 @@ static void setup_features(char** enable, int n);
 
 #include "cov_filter.h"
 
-#include "race_detector.h"
+#include "ddrd/race_detector.h"
+RaceDetector race_detector;
 
 #include "test.h"
 
@@ -775,14 +792,13 @@ int main(int argc, char** argv)
 	}
 
 	// ===============DDRD====================
-	init_race_detector();
-	if (!is_race_detector_available()) {
+	race_detector_init(&race_detector);
+	if (!race_detector_is_available(&race_detector)) {
 		fail("race detector init fail\n");
 	}
-
 	// ===============DDRD====================
 #if GOOS_linux
-	// Initialize UKC controller
+	// ===============DDRD====================
 	ukc_controller = ukc_ctl_init("/dev/" DEVICE_NAME);
 	if (ukc_controller) {
 		if (ukc_ctl_turn_off(ukc_controller) == 0) {
@@ -793,6 +809,7 @@ int main(int argc, char** argv)
 	} else {
 		debug("UKC controller initialization failed\n");
 	}
+	// ===============DDRD====================
 #endif
 	int status = 0;
 	if (flag_sandbox_none)
@@ -812,11 +829,7 @@ int main(int argc, char** argv)
 	else
 		fail("unknown sandbox type");
 #if GOOS_linux
-	// Clean up UKC controller before exit
-	if (ukc_controller) {
-		ukc_ctl_cleanup(ukc_controller);
-		ukc_controller = NULL;
-	}
+
 #endif
 
 #if SYZ_EXECUTOR_USES_FORK_SERVER
@@ -832,14 +845,13 @@ int main(int argc, char** argv)
 	reply_execute(status);
 
 	// ===============DDRD====================
-	// 清理race检测器
 
-	cleanup_race_detector();
+	if (ukc_controller) {
+		ukc_ctl_cleanup(ukc_controller);
+		ukc_controller = NULL;
+	}
 	// ===============DDRD====================
 	doexit(status);
-
-	// Unreachable.
-	return 1;
 #else
 	reply_execute(status);
 
@@ -878,8 +890,8 @@ static void mmap_output(int size)
 
 	if (result != mmap_at) {
 		int mmap_errno = errno;
-		failmsg("mmap of output file failed", "want %p, got %p, errno=%d (%s)",
-			mmap_at, result, mmap_errno, strerror(mmap_errno));
+		failmsg("mmap of output file failed", "want %lx, got %p, errno=%d (%s)",
+			mmap_size, result, mmap_errno, strerror(mmap_errno));
 	}
 	output_size = size;
 }
@@ -1004,8 +1016,8 @@ int receive_execute_dispatch()
 		if (read(kInPipeFd, req_ptr, remaining_size) != (ssize_t)remaining_size)
 			fail("failed to read race validation request");
 		debug("Race validation request: prog1_size=%llu, prog2_size=%llu, race_signal=%llx, var_name1=%llx, var_name2=%llx\n",
-			  req.prog1_size, req.prog2_size, req.race_signal, req.var_name1, req.var_name2);
-		
+		      req.prog1_size, req.prog2_size, req.race_signal, req.var_name1, req.var_name2);
+
 		// Process the race validation request
 		receive_race_validation_internal(req);
 		race_validate(req);
@@ -1033,16 +1045,18 @@ void receive_execute_internal(const execute_req& req)
 	flag_comparisons = req.exec_flags & (1 << 3);
 	flag_threaded = req.exec_flags & (1 << 4);
 	flag_coverage_filter = req.exec_flags & (1 << 5);
+	// Reserved slots for future expansion: bits 6, 7
+	flag_collect_uaf = req.exec_flags & (1 << 8);
 
 	// ===============DDRD====================
 	flag_collect_race = false;
 	flag_test_pair_sync = false;
 	// ===============DDRD====================
 
-	debug("[%llums] exec opts: procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d"
+	debug("[%llums] exec opts: procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d uaf=%d"
 	      " timeouts=%llu/%llu/%llu prog=%llu filter=%d\n",
 	      current_time_ms() - start_time_ms, procid, flag_threaded, flag_collect_cover,
-	      flag_comparisons, flag_dedup_cover, flag_collect_signal, syscall_timeout_ms,
+	      flag_comparisons, flag_dedup_cover, flag_collect_signal, flag_collect_uaf, syscall_timeout_ms,
 	      program_timeout_ms, slowdown_scale, req.prog_size, flag_coverage_filter);
 	if (syscall_timeout_ms == 0 || program_timeout_ms <= syscall_timeout_ms || slowdown_scale == 0)
 		failmsg("bad timeouts", "syscall=%llu, program=%llu, scale=%llu",
@@ -1075,18 +1089,6 @@ void receive_execute_internal(const execute_req& req)
 
 void receive_execute_pair_internal(const execute_pair_req& req)
 {
-	// Debug: Print all fields of the received structure
-	// debug("DEBUG execute_pair_req received:\n");
-	// debug("  magic=0x%llx\n", req.magic);
-	// debug("  env_flags=0x%llx\n", req.env_flags);
-	// debug("  exec_flags1=0x%llx\n", req.exec_flags1);
-	// debug("  exec_flags2=0x%llx\n", req.exec_flags2);
-	// debug("  pid=0x%llx\n", req.pid);
-	// debug("  syscall_timeout_ms=0x%llx\n", req.syscall_timeout_ms);
-	// debug("  program_timeout_ms=0x%llx\n", req.program_timeout_ms);
-	// debug("  slowdown_scale=0x%llx\n", req.slowdown_scale);
-	// debug("  prog1_size=0x%llx (%llu)\n", req.prog1_size, req.prog1_size);
-	// debug("  prog2_size=0x%llx (%llu)\n", req.prog2_size, req.prog2_size);
 
 	if (req.magic != kInPairMagic)
 		failmsg("bad execute pair request magic", "magic=0x%llx", req.magic);
@@ -1108,11 +1110,12 @@ void receive_execute_pair_internal(const execute_pair_req& req)
 	flag_coverage_filter = false;
 	flag_collect_race = req.exec_flags1 & (1 << 6);
 	flag_test_pair_sync = req.exec_flags1 & (1 << 7);
+	flag_collect_uaf = req.exec_flags1 & (1 << 8);   
 
-	debug("[%llums] pair exec opts: procid=%llu prog1=%llu prog2=%llu race=%d sync=%d"
+	debug("[%llums] pair exec opts: procid=%llu prog1=%llu prog2=%llu race=%d sync=%d extended=%d uaf=%d"
 	      " timeouts=%llu/%llu/%llu mode=%s\n",
 	      current_time_ms() - start_time_ms, procid, req.prog1_size, req.prog2_size,
-	      flag_collect_race, flag_test_pair_sync, syscall_timeout_ms,
+	      flag_collect_race, flag_test_pair_sync, flag_collect_extended, flag_collect_uaf, syscall_timeout_ms,
 	      program_timeout_ms, slowdown_scale,
 	      SYZ_EXECUTOR_USES_SHMEM ? "SHMEM" : "PIPE");
 
@@ -1188,7 +1191,6 @@ void execute_pair(const execute_pair_req& req)
 	output_pos = output_data;
 #endif
 
-	// ===============DDRD====================
 	// Initialize shared memory only once (lazy initialization to avoid performance loss)
 	if (pair_shared_data == nullptr) {
 		create_pair_syscall_shared_memory();
@@ -1196,10 +1198,8 @@ void execute_pair(const execute_pair_req& req)
 	}
 	// Clear previous pair syscall timing records for this execution
 	clear_pair_syscall_timing();
-	// ===============DDRD====================
-
-	static int pair_execution_count = 0;
-	pair_execution_count++;
+	race_detector_reset(&race_detector);
+	cleanup_pair_syscall_shared_memory();
 
 	// For true race detection, we need concurrent execution using fork()
 	// This allows both programs to run simultaneously and potentially interact
@@ -1303,20 +1303,6 @@ void execute_pair(const execute_pair_req& req)
 		} else {
 			fail("unexpected child");
 		}
-
-		// 可打印“某子进程已结束”的即时日志，但不要收集/清理/回复
-		if (got1) {
-			if (WIFEXITED(status1))
-				debug("prog1 exited code=%d\n", WEXITSTATUS(status1));
-			else if (WIFSIGNALED(status1))
-				debug("prog1 signaled sig=%d\n", WTERMSIG(status1));
-		}
-		if (got2) {
-			if (WIFEXITED(status2))
-				debug("prog2 exited code=%d\n", WEXITSTATUS(status2));
-			else if (WIFSIGNALED(status2))
-				debug("prog2 signaled sig=%d\n", WTERMSIG(status2));
-		}
 	}
 	int final_status = 0;
 	auto to_exit_code = [](int st) {
@@ -1331,106 +1317,16 @@ void execute_pair(const execute_pair_req& req)
 	final_status = (code1 != 0) ? code1 : code2;
 	// Collect and output race data once after pair execution completes
 	if (flag_collect_race) {
-
-		// 生成 may_race_pair 信息 - using static allocation to avoid large stack frame
-		enum { MAX_MAY_RACE_PAIRS_OUT = 0x200 }; // 与 analyze 一致：最多 512
-
-		// Check output buffer space before writing race data
-		char* current_pos = (char*)output_pos;
-		char* buffer_end = (char*)output_data + output_size;
-		size_t remaining_space = buffer_end - current_pos;
-
-		// Estimate space needed: magic(4) + count(4) + max_pairs * pair_size
-		size_t estimated_needed = 8 + (MAX_MAY_RACE_PAIRS_OUT * 84);
-		if (remaining_space < estimated_needed) {
-			debug("[%llums] WARNING: insufficient buffer space for race data (%zu < %zu)\n",
-			      current_time_ms() - start_time_ms, remaining_space, estimated_needed);
-		}
-
-		write_output(kOutPairMagic); // 魔数
-		uint32* pair_count_pos = write_output(0); // 占位：pair 数量
-
-		debug("[%llums] DEBUG: Writing race data with kOutPairMagic=0x%x\n",
-		      current_time_ms() - start_time_ms, kOutPairMagic);
-
-		static may_race_pair_t pairs_out[MAX_MAY_RACE_PAIRS_OUT];
-		int pair_count = analyze_and_generate_may_race_infos(
-		    pairs_out, MAX_MAY_RACE_PAIRS_OUT);
-		    
-		debug("[%llums] DEBUG: Generated %d race pairs, sizeof(may_race_pair_t)=%zu\n",
-		      current_time_ms() - start_time_ms, pair_count, sizeof(may_race_pair_t));
-		// 逐个写出
-		for (int i = 0; i < pair_count; i++) {
-			const may_race_pair_t* pr = &pairs_out[i];
-
-			debug("[%llums] DEBUG: Writing pair %d: syscall1_idx=%d, syscall2_idx=%d, syscall1_num=%d, syscall2_num=%d\n",
-			      current_time_ms() - start_time_ms, i, pr->syscall1_idx, pr->syscall2_idx, pr->syscall1_num, pr->syscall2_num);
-			debug("[%llums] DEBUG: Writing pair %d: varName1=0x%lx, varName2=0x%lx, signal=0x%lx\n",
-			      current_time_ms() - start_time_ms, i, pr->varName1, pr->varName2, pr->signal);
-			debug("[%llums] DEBUG: Writing pair %d: lock_type=%u, access_type1=%u, access_type2=%u, time_diff=%lu\n",
-			      current_time_ms() - start_time_ms, i, pr->lock_type, pr->access_type1, pr->access_type2, pr->time_diff);
-
-			// Record start position of this pair in output buffer
-			char* pair_start_pos = (char*)output_pos;
-			
-			// 固定头部（全部用 32/64 位字段，易于解析）
-			write_output((uint32)pr->syscall1_idx); // 4
-			write_output((uint32)pr->syscall2_idx); // 4
-			write_output((uint32)pr->syscall1_num); // 4
-			write_output((uint32)pr->syscall2_num); // 4
-			write_output_64((uint64)pr->varName1); // 8
-			write_output_64((uint64)pr->varName2); // 8
-			write_output_64((uint64)pr->call_stack1); // 8
-			write_output_64((uint64)pr->call_stack2); // 8
-			write_output((uint32)pr->sn1); // 4
-			write_output((uint32)pr->sn2); // 4
-			write_output_64((uint64)pr->signal); // 8
-			write_output((uint32)pr->lock_type); // 4
-			write_output((uint32)pr->access_type1); // 4
-			write_output((uint32)pr->access_type2); // 4
-			write_output_64((uint64)pr->time_diff); // 8
-			
-			// Output the raw bytes we just wrote for this pair
-			char* pair_end_pos = (char*)output_pos;
-			int pair_size = pair_end_pos - pair_start_pos;
-			debug("[%llums] DEBUG: Pair %d raw bytes written (size=%d): ", 
-			      current_time_ms() - start_time_ms, i, pair_size);
-			for (int j = 0; j < pair_size; j++) {
-				debug("%02x ", (unsigned char)pair_start_pos[j]);
-				if ((j + 1) % 16 == 0) debug("\n[%llums] DEBUG: ", current_time_ms() - start_time_ms);
-			}
-			debug("\n");
-		}
-
-		*pair_count_pos = (uint32)pair_count;
-
-		// Output complete buffer for debugging
-		char* buffer_start = (char*)output_data;
-		char* buffer_current = (char*)output_pos;
-		int total_written = buffer_current - buffer_start;
-		debug("[%llums] DEBUG: Complete race buffer written (total_size=%d):\n", 
-		      current_time_ms() - start_time_ms, total_written);
-		debug("[%llums] DEBUG: Magic + Count: ", current_time_ms() - start_time_ms);
-		for (int i = 0; i < 8; i++) {
-			debug("%02x ", (unsigned char)buffer_start[i]);
-		}
-		debug("\n");
-		
-		// Show first 32 bytes for comparison with Go side
-		debug("[%llums] DEBUG: First 32 bytes of complete buffer: ", current_time_ms() - start_time_ms);
-		for (int i = 0; i < 32 && i < total_written; i++) {
-			debug("%02x ", (unsigned char)buffer_start[i]);
-		}
-		debug("\n");
-
-		debug("[%llums] race data collection completed: %d signals\n",
-		      current_time_ms() - start_time_ms, pair_count);
+		collect_and_output_race_data();
 	}
-	if (flag_collect_race || flag_debug) {
+
+	// =============== UAF Data Collection ===============
+	if (flag_collect_uaf) {
+		collect_and_output_uaf_data();
+	}
+	if (flag_collect_race || flag_collect_uaf || flag_debug) {
 		print_pair_syscall_statistics();
 	}
-	cleanup_pair_syscall_shared_memory();
-	// Send completion signal with unified race results
 
 #if GOOS_linux
 	// Switch back to MONITOR mode after execution
@@ -1442,34 +1338,170 @@ void execute_pair(const execute_pair_req& req)
 		}
 	}
 #endif
-	reply_execute(final_status);
+	reply_execute_pair(final_status);
+}
+
+static void collect_and_output_race_data(){
+	return;
+}
+
+// Collect and output UAF data
+static void collect_and_output_uaf_data()
+{
+	debug("[%llums] Starting UAF data collection...\n", current_time_ms() - start_time_ms);
+
+	enum { MAX_MAY_UAF_PAIRS_OUT = 0x200 }; // 与race保持一致：最多 512
+
+	write_output(kOutUAFMagic); // 使用相同的魔数，通过数据结构区分
+	uint32* uaf_count_pos = write_output(0); // 占位：UAF pair 数量
+
+	debug("[%llums] DEBUG: Writing UAF data with kOutUAFMagic=0x%x\n",
+	      current_time_ms() - start_time_ms, kOutUAFMagic);
+
+	static may_uaf_pair_t uaf_pairs_out[MAX_MAY_UAF_PAIRS_OUT];
+	static extended_uaf_pair_t ext_uaf_pairs_out[MAX_MAY_UAF_PAIRS_OUT];
+	
+	// 优化：使用组合函数一次性生成基本和扩展信息
+	AccessContext* record_ctx = NULL;
+	int uaf_count;
+	
+	if (flag_collect_extended) {
+		// 如果需要扩展信息，使用组合函数
+		uaf_count = race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(
+		&race_detector, uaf_pairs_out,MAX_MAY_UAF_PAIRS_OUT,
+		    ext_uaf_pairs_out, MAX_MAY_UAF_PAIRS_OUT);
+	} else {
+		// 如果只需要基本信息，使用原函数
+		uaf_count = race_detector_analyze_and_generate_uaf_infos(&race_detector,
+		    uaf_pairs_out, MAX_MAY_UAF_PAIRS_OUT);
+		record_ctx = NULL;
+	}
+
+	debug("[%llums] DEBUG: Final UAF count: %d pairs, sizeof(may_uaf_pair_t)=%zu\n",
+	      current_time_ms() - start_time_ms, uaf_count, sizeof(may_uaf_pair_t));
+
+	// 逐个写出UAF pairs
+	for (int i = 0; i < uaf_count; i++) {
+		const may_uaf_pair_t* uaf = &uaf_pairs_out[i];
+
+		debug("[%llums] DEBUG: Writing UAF pair %d: free_syscall_idx=%d, use_syscall_idx=%d\n",
+		      current_time_ms() - start_time_ms, i, uaf->free_syscall_idx, uaf->use_syscall_idx);
+		debug("[%llums] DEBUG: Writing UAF pair %d: free_access=0x%lx, signal=0x%lx, time_diff=%lu\n",
+		      current_time_ms() - start_time_ms, i, uaf->free_access_name, uaf->signal, uaf->time_diff);
+
+		// keep same with the pkg/ddrd/types.go:MayUAFPair struct
+		write_output_64((uint64)uaf->free_access_name); // 0
+		write_output_64((uint64)uaf->use_access_name); // 8
+		write_output_64((uint64)uaf->free_call_stack); // 16
+		write_output_64((uint64)uaf->use_call_stack); // 24
+		write_output_64((uint64)uaf->signal); // 32
+		write_output_64((uint64)uaf->time_diff); // 40
+		write_output((uint32)uaf->free_syscall_idx); // 48
+		write_output((uint32)uaf->use_syscall_idx); // 52
+		write_output((uint32)uaf->free_syscall_num); // 56
+		write_output((uint32)uaf->use_syscall_num); // 60
+		write_output((uint32)uaf->free_sn); // 64
+		write_output((uint32)uaf->use_sn); // 68
+		write_output((uint32)uaf->lock_type); // 72
+		write_output((uint32)uaf->use_access_type); // 76
+
+	}
+
+	*uaf_count_pos = (uint32)uaf_count;
+
+	debug("[%llums] UAF data collection completed: %d signals\n",
+	      current_time_ms() - start_time_ms, uaf_count);
+
+	// =============== Extended UAF Data Collection ===============
+	if (flag_collect_extended && uaf_count > 0) {
+		debug("[%llums] Starting extended UAF data collection...\n", current_time_ms() - start_time_ms);
+
+		write_output(kOutExtendedUAFMagic); // 扩展UAF信息魔数
+		uint32* ext_uaf_count_pos = write_output(0); // 占位：扩展UAF pair数量
+
+		// 扩展信息已经在组合函数中生成，直接使用
+		int ext_uaf_count = uaf_count; // 扩展信息与基本信息一一对应
+
+		debug("[%llums] DEBUG: Using %d pre-generated extended UAF pairs\n",
+		      current_time_ms() - start_time_ms, ext_uaf_count);
+
+		// 输出扩展UAF pairs - 只输出扩展信息，不重复基础信息
+		for (int i = 0; i < ext_uaf_count; i++) {
+			const extended_uaf_pair_t* ext_uaf = &ext_uaf_pairs_out[i];
+
+			debug("[%llums] DEBUG: Writing extended UAF pair %d with %u + %u history records\n",
+			      current_time_ms() - start_time_ms, i, 
+			      ext_uaf->use_thread_history_count, ext_uaf->free_thread_history_count);
+
+			// 只写入扩展UAF信息，不重复基础信息
+			// 扩展信息头部
+			write_output((uint32)ext_uaf->use_thread_history_count);
+			write_output((uint32)ext_uaf->free_thread_history_count);
+			write_output_64((uint64)ext_uaf->use_target_time);
+			write_output_64((uint64)ext_uaf->free_target_time);
+
+			// 直接输出历史访问记录数据
+			uint32 total_records = ext_uaf->use_thread_history_count + ext_uaf->free_thread_history_count;
+			for (uint32 j = 0; j < total_records; j++) {
+				const serialized_access_record_t* record = &ext_uaf->access_history[j];
+				write_output_64(record->var_name);
+				write_output_64(record->call_stack_hash);
+				write_output_64(record->access_time);
+				write_output((uint32)record->sn);
+				write_output((uint32)record->access_type);
+			}
+
+			// 路径距离信息
+			uint64 path_dist_use, path_dist_free;
+			memcpy(&path_dist_use, &ext_uaf->path_distance_use, sizeof(uint64));
+			memcpy(&path_dist_free, &ext_uaf->path_distance_free, sizeof(uint64));
+			write_output_64(path_dist_use);
+			write_output_64(path_dist_free);
+		}
+
+		*ext_uaf_count_pos = (uint32)ext_uaf_count;
+		debug("[%llums] extended UAF data collection completed: %d signals\n",
+		      current_time_ms() - start_time_ms, ext_uaf_count);
+	}
+	
+	// 清理record_set（如果有的话）
+	if (record_ctx) {
+		// 注意：不要释放records和free_records，它们仍在ext_uaf_pairs_out中被引用
+		// 只释放thread_histories和record_set本身
+		if (record_ctx->thread_histories) {
+			free(record_ctx->thread_histories);
+			record_ctx->thread_histories = NULL; // 防止重复释放
+		}
+		free(record_ctx);
+		record_ctx = NULL; // 防止重复释放
+	}
 }
 
 // ===============DDRD Race Validation====================
 void receive_race_validation_internal(const race_validation_req& req)
 {
-	debug("Race validation internal: prog1_size=%llu, prog2_size=%llu\n", 
-		  req.prog1_size, req.prog2_size);
-	
+	debug("Race validation internal: prog1_size=%llu, prog2_size=%llu\n",
+	      req.prog1_size, req.prog2_size);
+
 	if (req.magic != kRaceValidationInMagic)
 		failmsg("bad race validation request magic", "magic=0x%llx", req.magic);
 	if (req.prog1_size > kMaxInput || req.prog2_size > kMaxInput)
-		failmsg("bad race validation prog size", "size1=0x%llx size2=0x%llx", 
-				req.prog1_size, req.prog2_size);
-	
+		failmsg("bad race validation prog size", "size1=0x%llx size2=0x%llx",
+			req.prog1_size, req.prog2_size);
+
 	// 设置基本参数
 	procid = 1; // 固定procid用于race validation
-	syscall_timeout_ms = 5000;  // 默认5秒超时
+	syscall_timeout_ms = 5000; // 默认5秒超时
 	program_timeout_ms = 10000; // 默认10秒程序超时
 	slowdown_scale = 1;
-	
+
 	// 设置race validation相关flags
 	flag_collect_signal = false;
 	flag_collect_cover = false;
-	flag_collect_race = true;  // 启用race collection
-	flag_debug = true;         // 启用调试输出
+	flag_collect_race = true; // 启用race collection
+	flag_debug = true; // 启用调试输出
 	flag_test_pair_sync = true; // 启用同步执行
-	
+
 	// 调用race validation逻辑
 	race_validate(req);
 }
@@ -1477,7 +1509,7 @@ void receive_race_validation_internal(const race_validation_req& req)
 static void race_validate(const race_validation_req req)
 {
 	debug("Starting race validation: race_signal=0x%llx, var_name1=0x%llx, var_name2=0x%llx\n",
-		  req.race_signal, req.var_name1, req.var_name2);
+	      req.race_signal, req.var_name1, req.var_name2);
 	debug("Lock status: %u, attempt_count: %u\n", req.lock_status, req.attempt_count);
 
 #if SYZ_EXECUTOR_USES_SHMEM
@@ -1489,43 +1521,43 @@ static void race_validate(const race_validation_req req)
 	// 执行多次尝试race validation
 	int successful_attempts = 0;
 	debug("Starting %u validation attempts\n", req.attempt_count);
-	
+
 	for (uint32_t attempt = 0; attempt < req.attempt_count; attempt++) {
 		debug("Race validation attempt %u/%u\n", attempt + 1, req.attempt_count);
-		
+
 		// 清理之前的状态
 		if (pair_shared_data == nullptr) {
 			create_pair_syscall_shared_memory();
 		}
 		clear_pair_syscall_timing();
-		
+
 		// 重置输出缓冲区位置
 		output_pos = output_data;
-		
+
 		// 执行同步的race validation（参考execute_pair的逻辑）
 		bool race_reproduced = execute_race_validation_attempt(req);
-		
+
 		if (race_reproduced) {
 			successful_attempts++;
 			debug("Race validation attempt %u: SUCCESS\n", attempt + 1);
 		} else {
 			debug("Race validation attempt %u: FAILED\n", attempt + 1);
 		}
-		
+
 		// 短暂延时避免系统负载过高
 		if (attempt < req.attempt_count - 1) {
 			usleep(1000); // 1ms延时
 		}
 	}
-	
+
 	// 计算成功率
 	double success_rate = (double)successful_attempts / req.attempt_count;
-	debug("Race validation completed: %d/%u successful (%.2f%%)\n", 
-		  successful_attempts, req.attempt_count, success_rate * 100.0);
+	debug("Race validation completed: %d/%u successful (%.2f%%)\n",
+	      successful_attempts, req.attempt_count, success_rate * 100.0);
 
 	// 清理资源
 	cleanup_pair_syscall_shared_memory();
-	
+
 	// 发送completion信号（简化版，不需要详细结果）
 	reply_execute(0);
 }
@@ -1536,7 +1568,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	// 创建线程信息收集管道 - 子进程向父进程报告线程号
 	int tid_pipe1[2], tid_pipe2[2]; // 用于子进程报告线程号
 	int start_pipe1[2], start_pipe2[2]; // 用于父进程通知子进程开始执行
-	
+
 	if (pipe(tid_pipe1) || pipe(tid_pipe2) || pipe(start_pipe1) || pipe(start_pipe2)) {
 		debug("Failed to create communication pipes\n");
 		return false;
@@ -1549,10 +1581,14 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	if (pid1 < 0) {
 		debug("Failed to fork for prog1\n");
 		// 关闭所有管道
-		close(tid_pipe1[0]); close(tid_pipe1[1]);
-		close(tid_pipe2[0]); close(tid_pipe2[1]);
-		close(start_pipe1[0]); close(start_pipe1[1]);
-		close(start_pipe2[0]); close(start_pipe2[1]);
+		close(tid_pipe1[0]);
+		close(tid_pipe1[1]);
+		close(tid_pipe2[0]);
+		close(tid_pipe2[1]);
+		close(start_pipe1[0]);
+		close(start_pipe1[1]);
+		close(start_pipe2[0]);
+		close(start_pipe2[1]);
 		return false;
 	}
 
@@ -1563,9 +1599,11 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 
 		// 关闭不需要的管道端
 		close(tid_pipe1[0]); // 关闭读端
-		close(tid_pipe2[0]); close(tid_pipe2[1]); // 关闭prog2的管道
+		close(tid_pipe2[0]);
+		close(tid_pipe2[1]); // 关闭prog2的管道
 		close(start_pipe1[1]); // 关闭写端
-		close(start_pipe2[0]); close(start_pipe2[1]); // 关闭prog2的管道
+		close(start_pipe2[0]);
+		close(start_pipe2[1]); // 关闭prog2的管道
 
 		// 获取并发送线程号给父进程
 		pid_t my_tid = gettid();
@@ -1575,7 +1613,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			doexit(1);
 		}
 		close(tid_pipe1[1]);
-		
+
 		debug("Child1: Sent TID %d to parent, waiting for start signal\n", my_tid);
 
 		// 等待父进程的开始信号
@@ -1586,7 +1624,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			doexit(1);
 		}
 		close(start_pipe1[0]);
-		
+
 		debug("Child1: Received start signal, beginning execution\n");
 
 		execute_one();
@@ -1596,17 +1634,21 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	// 记录子进程1信息
 	child1_info.pid = pid1;
 
-	// Fork第二个子进程执行程序2  
+	// Fork第二个子进程执行程序2
 	pid_t pid2 = fork();
 	if (pid2 < 0) {
 		debug("Failed to fork for prog2\n");
 		kill(pid1, SIGKILL);
 		waitpid(pid1, nullptr, 0);
 		// 关闭剩余管道
-		close(tid_pipe1[0]); close(tid_pipe1[1]);
-		close(tid_pipe2[0]); close(tid_pipe2[1]);
-		close(start_pipe1[0]); close(start_pipe1[1]);
-		close(start_pipe2[0]); close(start_pipe2[1]);
+		close(tid_pipe1[0]);
+		close(tid_pipe1[1]);
+		close(tid_pipe2[0]);
+		close(tid_pipe2[1]);
+		close(start_pipe1[0]);
+		close(start_pipe1[1]);
+		close(start_pipe2[0]);
+		close(start_pipe2[1]);
 		return false;
 	}
 
@@ -1617,9 +1659,11 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 
 		// 关闭不需要的管道端
 		close(tid_pipe2[0]); // 关闭读端
-		close(tid_pipe1[0]); close(tid_pipe1[1]); // 关闭prog1的管道
+		close(tid_pipe1[0]);
+		close(tid_pipe1[1]); // 关闭prog1的管道
 		close(start_pipe2[1]); // 关闭写端
-		close(start_pipe1[0]); close(start_pipe1[1]); // 关闭prog1的管道
+		close(start_pipe1[0]);
+		close(start_pipe1[1]); // 关闭prog1的管道
 
 		// 获取并发送线程号给父进程
 		pid_t my_tid = gettid();
@@ -1629,7 +1673,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			doexit(1);
 		}
 		close(tid_pipe2[1]);
-		
+
 		debug("Child2: Sent TID %d to parent, waiting for start signal\n", my_tid);
 
 		// 等待父进程的开始信号
@@ -1640,7 +1684,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			doexit(1);
 		}
 		close(start_pipe2[0]);
-		
+
 		debug("Child2: Received start signal, beginning execution\n");
 
 		// 切换到程序2的数据
@@ -1656,20 +1700,22 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 
 	// 父进程：收集两个子进程的线程号
 	// 关闭不需要的管道端
-	close(tid_pipe1[1]); close(tid_pipe2[1]); // 关闭写端
-	close(start_pipe1[0]); close(start_pipe2[0]); // 关闭读端
+	close(tid_pipe1[1]);
+	close(tid_pipe2[1]); // 关闭写端
+	close(start_pipe1[0]);
+	close(start_pipe2[0]); // 关闭读端
 
 	debug("Parent: Waiting for thread info from both children\n");
 
 	bool success = true;
-	
+
 	// 收集子进程1的线程信息
 	if (read(tid_pipe1[0], &child1_info, sizeof(child1_info)) != sizeof(child1_info)) {
 		debug("Parent: Failed to receive thread info from child1\n");
 		success = false;
 	}
 	close(tid_pipe1[0]);
-	
+
 	if (success) {
 		debug("Parent: Received child1 info - PID:%d, TID:%d\n", child1_info.pid, child1_info.tid);
 
@@ -1680,7 +1726,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 		}
 	}
 	close(tid_pipe2[0]);
-	
+
 	if (success) {
 		debug("Parent: Received child2 info - PID:%d, TID:%d\n", child2_info.pid, child2_info.tid);
 	}
@@ -1691,7 +1737,8 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 		kill(pid2, SIGKILL);
 		waitpid(pid1, nullptr, 0);
 		waitpid(pid2, nullptr, 0);
-		close(start_pipe1[1]); close(start_pipe2[1]);
+		close(start_pipe1[1]);
+		close(start_pipe2[1]);
 		return false;
 	}
 
@@ -1701,33 +1748,31 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 		if (req.lock_status == 0) { // NO_LOCKS
 			debug("Parent: Setting no-lock reproduction mode with TID %d\n", child1_info.tid);
 			nolockreproduce_info_t info = {
-				.var_name = req.var_name1,
-				.stack_hash = req.call_stack1, 
-				.tid = child1_info.tid, // 使用实际的线程ID
-				.sn = (int)req.sn1
-			};
+			    .var_name = req.var_name1,
+			    .stack_hash = req.call_stack1,
+			    .tid = child1_info.tid, // 使用实际的线程ID
+			    .sn = (int)req.sn1};
 			if (ukc_ctl_set_nolockrepro_info(ukc_controller, info) != 0) {
 				debug("Parent: Failed to set no-lock repro info\n");
 			} else {
 				debug("Parent: Successfully set no-lock repro info\n");
 			}
-		} else if (req.lock_status == 1) { // ONE_SIDED_LOCK  
-			debug("Parent: Setting one-sided lock reproduction mode with TIDs %d and %d\n", 
-				  child1_info.tid, child2_info.tid);
+		} else if (req.lock_status == 1) { // ONE_SIDED_LOCK
+			debug("Parent: Setting one-sided lock reproduction mode with TIDs %d and %d\n",
+			      child1_info.tid, child2_info.tid);
 			onesidedreproduce_info_t info = {
-				.var_name = req.var_name1,
-				.stack_hash = req.call_stack1,
-				.no_lock_tid = child1_info.tid,   // 使用实际的线程ID
-				.with_lock_tid = child2_info.tid, // 使用实际的线程ID
-				.sn = (int)req.sn1
-			};
+			    .var_name = req.var_name1,
+			    .stack_hash = req.call_stack1,
+			    .no_lock_tid = child1_info.tid, // 使用实际的线程ID
+			    .with_lock_tid = child2_info.tid, // 使用实际的线程ID
+			    .sn = (int)req.sn1};
 			if (ukc_ctl_set_onesidedrepro_info(ukc_controller, info) != 0) {
-				debug("Parent: Failed to set one-sided lock repro info\n");  
+				debug("Parent: Failed to set one-sided lock repro info\n");
 			} else {
 				debug("Parent: Successfully set one-sided lock repro info\n");
 			}
 		}
-		
+
 		// 根据lock_status启动相应的reproduction模式进行race validation
 		if (req.lock_status == 0) { // NO_LOCKS
 			if (ukc_ctl_start_nolockreproduce(ukc_controller) == 0) {
@@ -1755,13 +1800,13 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 	// UKC设置完成后，根据不同模式采用不同的执行策略
 	debug("Parent: UKC setup complete, applying execution strategy based on lock_status=%u\n", req.lock_status);
 	char start_signal = 1;
-	
+
 	if (req.lock_status == 0) { // NO_LOCKS: 轮流先运行prog1或prog2
 		// 使用attempt编号来决定顺序，实现轮流
 		static uint32_t attempt_counter = 0;
 		bool prog1_first = (attempt_counter % 2 == 0);
 		attempt_counter++;
-		
+
 		if (prog1_first) {
 			debug("Parent: NO_LOCKS mode - prog1 runs first, prog2 sleeps 1s\n");
 			// 先启动prog1
@@ -1770,7 +1815,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 				debug("Parent: Failed to send start signal to child1\n");
 				goto cleanup_children;
 			}
-			
+
 			// 等待1秒后启动prog2
 			sleep(1);
 			ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
@@ -1786,7 +1831,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 				debug("Parent: Failed to send start signal to child2\n");
 				goto cleanup_children;
 			}
-			
+
 			// 等待1秒后启动prog1
 			sleep(1);
 			ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
@@ -1803,7 +1848,7 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 			debug("Parent: Failed to send start signal to no_lock child\n");
 			goto cleanup_children;
 		}
-		
+
 		// 等待1秒后启动有锁侧（child2对应with_lock_tid）
 		sleep(1);
 		ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
@@ -1816,13 +1861,13 @@ static bool execute_race_validation_attempt(const race_validation_req& req)
 		// 同时发送开始信号给两个子进程
 		ssize_t write_result1 = write(start_pipe1[1], &start_signal, 1);
 		ssize_t write_result2 = write(start_pipe2[1], &start_signal, 1);
-		
+
 		if (write_result1 != 1 || write_result2 != 1) {
 			debug("Parent: Failed to send start signals to children\n");
 			goto cleanup_children;
 		}
 	}
-	
+
 	close(start_pipe1[1]);
 	close(start_pipe2[1]);
 
@@ -1888,11 +1933,20 @@ void reply_execute(int status)
 		fail("control pipe write failed");
 }
 
+void reply_execute_pair(int status)
+{
+	execute_reply reply = {};
+	reply.magic = kOutPairMagic;
+	reply.done = true;
+	reply.status = status;
+	if (write(kOutPipeFd, &reply, sizeof(reply)) != sizeof(reply))
+		fail("control pipe write failed");
+}
 #if SYZ_EXECUTOR_USES_SHMEM
 void realloc_output_data()
 {
 #if SYZ_EXECUTOR_USES_FORK_SERVER
-	if (flag_collect_race) {
+	if (flag_collect_race || flag_collect_uaf) {
 		mmap_output(kMaxOutputMayRacePair);
 	}
 	if (flag_comparisons)
@@ -1916,10 +1970,10 @@ void execute_one()
 {
 	in_execute_one = true;
 #if SYZ_EXECUTOR_USES_SHMEM
-	if (!flag_collect_race)
+	if (!flag_collect_race && !flag_collect_uaf)
 		realloc_output_data();
 	output_pos = output_data;
-	if (!flag_collect_race) {
+	if (!flag_collect_race && !flag_collect_uaf) {
 		write_output(0); // Number of executed syscalls (updated later).
 	}
 #endif // if SYZ_EXECUTOR_USES_SHMEM
@@ -1930,8 +1984,8 @@ void execute_one()
 		// Reset race detector only once per test pair
 		// Use procid/2 to identify the test pair, reset only when entering a new pair
 		long long current_test_pair_id = procid / 2;
-		if (flag_collect_race && current_test_pair_id != last_test_pair_id) {
-			reset_race_detector();
+		if ((flag_collect_race || flag_collect_uaf) && current_test_pair_id != last_test_pair_id) {
+			race_detector_reset(&race_detector);
 			last_test_pair_id = current_test_pair_id;
 		}
 	}
@@ -1949,22 +2003,6 @@ void execute_one()
 			cover_reset(&extra_cov);
 	}
 
-	// ===============DDRD====================
-	// Race detector reset logic:
-	// - For test pair mode: reset only at the start of pair execution
-	// - For normal mode: no reset, accumulate race data across programs
-	if (flag_collect_race) {
-		if (flag_test_pair_sync) {
-			// In test pair mode, we want to collect race data across both programs
-			// Reset only happens once per test pair, not per program
-			// The reset timing is controlled by the test pair manager
-			debug("Race detector: test pair mode, preserving state across programs\n");
-		} else {
-			// In normal mode, preserve race data across all program executions
-			// This allows accumulating race information over multiple programs
-			debug("Race detector: normal mode, preserving accumulated race data\n");
-		}
-	}
 	// ===============DDRD====================
 	int call_index = 0;
 	uint64 prog_extra_timeout = 0;
@@ -2330,7 +2368,7 @@ void write_call_output(thread_t* th, bool finished)
 			      (th->fault_injected ? call_flag_fault_injected : 0);
 	}
 #if SYZ_EXECUTOR_USES_SHMEM
-	if (!flag_collect_race) {
+	if (!flag_collect_race && !flag_collect_uaf) {
 		debug("write_call_output: writing magic 0x%x at output_pos=%p\n", kOutMagic, output_pos);
 		write_output(kOutMagic);
 		debug("write_call_output: after writing magic, output_pos=%p\n", output_pos);
@@ -2986,73 +3024,150 @@ void debug_dump_data(const char* data, int length)
 		debug("\n");
 }
 
-// Test pair同步机制 - 通过共享文件进行进程间同步
-void sync_with_test_pair()
-{
-	// 使用procid生成唯一的同步文件名
-	char sync_file_path[256];
-	snprintf(sync_file_path, sizeof(sync_file_path), "/tmp/syz_sync_%lld", procid / 2);
+// ===============DDRD Data Collection Functions====================
 
-	// 创建或打开同步文件
-	int sync_fd = open(sync_file_path, O_CREAT | O_RDWR, 0644);
-	if (sync_fd == -1) {
-		debug("failed to create sync file %s\n", sync_file_path);
-		return;
-	}
+// Collect and output race data
+// static void collect_and_output_race_data()
+// {
+// 	// 生成 may_race_pair 信息 - using static allocation to avoid large stack frame
+// 	enum { MAX_MAY_RACE_PAIRS_OUT = 0x200 }; // 与 analyze 一致：最多 512
 
-	// 文件锁定确保原子操作
-	struct flock lock;
-	lock.l_type = F_WRLCK;
-	lock.l_whence = SEEK_SET;
-	lock.l_start = 0;
-	lock.l_len = 0;
+// 	// Check output buffer space before writing race data
+// 	char* current_pos = (char*)output_pos;
+// 	char* buffer_end = (char*)output_data + output_size;
+// 	size_t remaining_space = buffer_end - current_pos;
 
-	if (fcntl(sync_fd, F_SETLKW, &lock) == -1) {
-		debug("failed to lock sync file\n");
-		close(sync_fd);
-		return;
-	}
+// 	// Estimate space needed: magic(4) + count(4) + max_pairs * pair_size
+// 	size_t estimated_needed = 8 + (MAX_MAY_RACE_PAIRS_OUT * 84);
+// 	if (remaining_space < estimated_needed) {
+// 		debug("[%llums] WARNING: insufficient buffer space for race data (%zu < %zu)\n",
+// 		      current_time_ms() - start_time_ms, remaining_space, estimated_needed);
+// 	}
 
-	// 读取当前计数
-	int count = 0;
-	lseek(sync_fd, 0, SEEK_SET);
-	ssize_t read_result = read(sync_fd, &count, sizeof(count));
-	(void)read_result; // 忽略未使用警告
+// 	write_output(kOutUAFMagic); // 魔数
+// 	uint32* pair_count_pos = write_output(0); // 占位：pair 数量
 
-	count++;
+// 	debug("[%llums] DEBUG: Writing race data with kOutPairMagic=0x%x\n",
+// 	      current_time_ms() - start_time_ms, kOutPairMagic);
 
-	// 写回更新的计数
-	lseek(sync_fd, 0, SEEK_SET);
-	ssize_t write_result = write(sync_fd, &count, sizeof(count));
-	(void)write_result; // 忽略未使用警告
+// 	static RacePair pairs_out[MAX_MAY_RACE_PAIRS_OUT];
+// 	int pair_count = race_detector_analyze_race_pairs(
+// 	    &race_detector, pairs_out, MAX_MAY_RACE_PAIRS_OUT);
 
-	// 解锁
-	lock.l_type = F_UNLCK;
-	fcntl(sync_fd, F_SETLK, &lock);
-	close(sync_fd);
+// 	debug("[%llums] DEBUG: Generated %d race pairs, sizeof(RacePair)=%zu\n",
+// 	      current_time_ms() - start_time_ms, pair_count, sizeof(RacePair));
+	
+// 	// 逐个写出
+// 	for (int i = 0; i < pair_count; i++) {
+// 		const RacePair* rp = &pairs_out[i];
 
-	// 等待另一个进程到达同步点
-	debug("test pair sync: waiting for partner (count=%d, procid=%lld)\n", count, procid);
+// 		// Record start position of this pair in output buffer
+// 		char* pair_start_pos = (char*)output_pos;
 
-	for (int i = 0; i < 1000; i++) { // 最多等待10秒
-		usleep(10000); // 10ms
+// 		// 固定头部（全部用 32/64 位字段，易于解析）
+// 		write_output((uint32)pr->syscall1_idx); // 4
+// 		write_output((uint32)pr->syscall2_idx); // 4
+// 		write_output((uint32)pr->syscall1_num); // 4
+// 		write_output((uint32)pr->syscall2_num); // 4
+// 		write_output_64((uint64)pr->varName1); // 8
+// 		write_output_64((uint64)pr->varName2); // 8
+// 		write_output_64((uint64)pr->call_stack1); // 8
+// 		write_output_64((uint64)pr->call_stack2); // 8
+// 		write_output((uint32)pr->sn1); // 4
+// 		write_output((uint32)pr->sn2); // 4
+// 		write_output_64((uint64)pr->signal); // 8
+// 		write_output((uint32)pr->lock_type); // 4
+// 		write_output((uint32)pr->access_type1); // 4
+// 		write_output((uint32)pr->access_type2); // 4
+// 		write_output_64((uint64)pr->time_diff); // 8
 
-		sync_fd = open(sync_file_path, O_RDONLY);
-		if (sync_fd != -1) {
-			int current_count = 0;
-			ssize_t read_result2 = read(sync_fd, &current_count, sizeof(current_count));
-			(void)read_result2; // 忽略未使用警告
-			close(sync_fd);
+// 		// Output the raw bytes we just wrote for this pair
+// 		char* pair_end_pos = (char*)output_pos;
+// 		int pair_size = pair_end_pos - pair_start_pos;
+// 		debug("[%llums] DEBUG: Pair %d raw bytes written (size=%d): ",
+// 		      current_time_ms() - start_time_ms, i, pair_size);
+// 		for (int j = 0; j < pair_size; j++) {
+// 			debug("%02x ", (unsigned char)pair_start_pos[j]);
+// 			if ((j + 1) % 16 == 0)
+// 				debug("\n[%llums] DEBUG: ", current_time_ms() - start_time_ms);
+// 		}
+// 		debug("\n");
+// 	}
 
-			if (current_count >= 2) {
-				debug("test pair sync: both processes ready, starting execution\n");
-				break;
-			}
-		}
-	}
+// 	*pair_count_pos = (uint32)pair_count;
 
-	// 如果是第二个到达的进程，清理同步文件
-	if (count == 2) {
-		unlink(sync_file_path);
-	}
-}
+// 	// Output complete buffer for debugging
+// 	char* buffer_start = (char*)output_data;
+// 	char* buffer_current = (char*)output_pos;
+// 	int total_written = buffer_current - buffer_start;
+// 	debug("[%llums] DEBUG: Complete race buffer written (total_size=%d):\n",
+// 	      current_time_ms() - start_time_ms, total_written);
+// 	debug("[%llums] DEBUG: Magic + Count: ", current_time_ms() - start_time_ms);
+// 	for (int i = 0; i < 8; i++) {
+// 		debug("%02x ", (unsigned char)buffer_start[i]);
+// 	}
+// 	debug("\n");
+
+// 	// Show first 32 bytes for comparison with Go side
+// 	debug("[%llums] DEBUG: First 32 bytes of complete buffer: ", current_time_ms() - start_time_ms);
+// 	for (int i = 0; i < 32 && i < total_written; i++) {
+// 		debug("%02x ", (unsigned char)buffer_start[i]);
+// 	}
+// 	debug("\n");
+
+// 	debug("[%llums] race data collection completed: %d signals\n",
+// 	      current_time_ms() - start_time_ms, pair_count);
+
+// 	// =============== Extended Race Data Collection ===============
+// 	if (flag_collect_extended && pair_count > 0) {
+// 		debug("[%llums] Starting extended race data collection...\n", current_time_ms() - start_time_ms);
+
+// 		write_output(kOutExtendedPairMagic); // 扩展race信息魔数
+// 		uint32* ext_race_count_pos = write_output(0); // 占位：扩展race pair数量
+
+// 		static extended_race_pair_t ext_race_pairs_out[MAX_MAY_RACE_PAIRS_OUT];
+// 		int ext_race_count = analyze_and_generate_extended_race_infos(
+// 		    pairs_out, pair_count, ext_race_pairs_out, MAX_MAY_RACE_PAIRS_OUT);
+
+// 		debug("[%llums] DEBUG: Generated %d extended race pairs\n",
+// 		      current_time_ms() - start_time_ms, ext_race_count);
+
+// 		// 输出扩展race pairs - 只输出扩展信息，不重复基础信息
+// 		for (int i = 0; i < ext_race_count; i++) {
+// 			const extended_race_pair_t* ext_race = &ext_race_pairs_out[i];
+
+// 			debug("[%llums] DEBUG: Writing extended race pair %d with %u + %u history records\n",
+// 			      current_time_ms() - start_time_ms, i, 
+// 			      ext_race->thread1_history_count, ext_race->thread2_history_count);
+
+// 			// 只写入扩展信息，不重复基础race信息
+// 			// 扩展信息头部
+// 			write_output((uint32)ext_race->thread1_history_count);
+// 			write_output((uint32)ext_race->thread2_history_count);
+// 			write_output_64((uint64)ext_race->thread1_target_time);
+// 			write_output_64((uint64)ext_race->thread2_target_time);
+
+// 			// 直接输出历史访问记录数据
+// 			uint32 total_records = ext_race->thread1_history_count + ext_race->thread2_history_count;
+// 			for (uint32 j = 0; j < total_records; j++) {
+// 				const serialized_access_record_t* record = &ext_race->access_history[j];
+// 				write_output_64(record->var_name);
+// 				write_output_64(record->call_stack_hash);
+// 				write_output_64(record->access_time);
+// 				write_output((uint32)record->sn);
+// 				write_output((uint32)record->access_type);
+// 			}
+
+// 			// 路径距离信息（double转换为uint64传输）
+// 			uint64 path_dist1, path_dist2;
+// 			memcpy(&path_dist1, &ext_race->path_distance1, sizeof(uint64));
+// 			memcpy(&path_dist2, &ext_race->path_distance2, sizeof(uint64));
+// 			write_output_64(path_dist1);
+// 			write_output_64(path_dist2);
+// 		}
+
+// 		*ext_race_count_pos = (uint32)ext_race_count;
+// 		debug("[%llums] extended race data collection completed: %d signals\n",
+// 		      current_time_ms() - start_time_ms, ext_race_count);
+// 	}
+// }

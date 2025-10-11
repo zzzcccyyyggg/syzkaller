@@ -18,7 +18,6 @@ import (
 	"sync"
 	"sync/atomic"
 	"time"
-	"unsafe"
 
 	"github.com/google/syzkaller/dashboard/dashapi"
 	"github.com/google/syzkaller/pkg/asset"
@@ -56,6 +55,7 @@ type Manager struct {
 	sysTarget      *targets.Target
 	reporter       *report.Reporter
 	crashdir       string
+	uafdir         string // Directory for storing UAF logs
 	serv           *RPCServer
 	corpusDB       *db.DB
 	startTime      time.Time
@@ -82,6 +82,22 @@ type Manager struct {
 		uniqueRaces  int64
 		lastSaveTime time.Time
 	}
+
+	// UAF corpus management
+	uafCorpusDB *db.DB
+	uafCorpus   map[uint64]*UAFCorpusItem
+	uafCorpusMu sync.RWMutex
+	uafStats    struct {
+		totalPairs   int64
+		uniqueUAFs   int64
+		lastSaveTime time.Time
+	}
+
+	// UAF Coverage and Signal tracking
+	maxUAFCover  ddrd.UAFCover
+	maxUAFSignal ddrd.UAFSignal
+	uafCoverMu   sync.RWMutex
+	uafSignalMu  sync.RWMutex
 	// ===============DDRD====================
 
 	dash *dashapi.Dashboard
@@ -147,8 +163,25 @@ type RaceCorpusItem struct {
 	Races       []byte    `json:"races"`       // serialized []ddrd.MayRacePair
 	FirstSeen   time.Time `json:"first_seen"`
 	LastUpdated time.Time `json:"last_updated"`
-	Source      string    `json:"source"` // source fuzzer name
-	Count       int       `json:"count"`  // discovery count
+	Source      string    `json:"source"`             // source fuzzer name
+	LogPath     string    `json:"log_path,omitempty"` // path to log file for reproduction
+	Count       int       `json:"count"`              // discovery count
+}
+
+// UAFCorpusItem represents a UAF pair item in the corpus
+type UAFCorpusItem struct {
+	PairID           string    `json:"pair_id"`
+	Prog1            []byte    `json:"prog1"`
+	Prog2            []byte    `json:"prog2"`
+	UAFSignal        []byte    `json:"uaf_signal"`        // serialized UAF signal
+	UAFs             []byte    `json:"uafs"`              // serialized []ddrd.MayUAFPair
+	Output           []byte    `json:"output"`            // execution output for debugging
+	ExecutionContext []byte    `json:"execution_context"` // serialized execution sequence context
+	FirstSeen        time.Time `json:"first_seen"`
+	LastUpdated      time.Time `json:"last_updated"`
+	Source           string    `json:"source"`             // source fuzzer name
+	LogPath          string    `json:"log_path,omitempty"` // path to log file for reproduction
+	Count            int       `json:"count"`              // discovery count
 }
 
 // ===============DDRD====================
@@ -219,6 +252,9 @@ func RunManager(cfg *mgrconfig.Config) {
 	crashdir := filepath.Join(cfg.Workdir, "crashes")
 	osutil.MkdirAll(crashdir)
 
+	uafdir := filepath.Join(cfg.Workdir, "uaf_logs")
+	osutil.MkdirAll(uafdir)
+
 	reporter, err := report.NewReporter(cfg)
 	if err != nil {
 		log.Fatalf("%v", err)
@@ -231,6 +267,7 @@ func RunManager(cfg *mgrconfig.Config) {
 		sysTarget:                    cfg.SysTarget,
 		reporter:                     reporter,
 		crashdir:                     crashdir,
+		uafdir:                       uafdir,
 		startTime:                    time.Now(),
 		stats:                        &Stats{haveHub: cfg.HubClient != ""},
 		crashTypes:                   make(map[string]bool),
@@ -251,6 +288,11 @@ func RunManager(cfg *mgrconfig.Config) {
 		fuzzScheduler: NewFuzzScheduler(FuzzMode(cfg.Experimental.FuzzMode)),
 		// Initialize race corpus
 		raceCorpus: make(map[uint64]*RaceCorpusItem),
+		// Initialize UAF corpus
+		uafCorpus: make(map[uint64]*UAFCorpusItem),
+		// Initialize UAF coverage and signals
+		maxUAFCover:  make(ddrd.UAFCover),
+		maxUAFSignal: make(ddrd.UAFSignal),
 		// ===============DDRD====================
 	}
 
@@ -262,7 +304,9 @@ func RunManager(cfg *mgrconfig.Config) {
 	mgr.preloadCorpus()
 	// ===============DDRD====================
 	// Initialize race corpus
-	mgr.initRaceCorpus()
+	// mgr.initRaceCorpus()
+	// Initialize UAF corpus
+	mgr.initUAFCorpus()
 	// ===============DDRD====================
 	mgr.initStats() // Initializes prometheus variables.
 
@@ -310,13 +354,15 @@ func RunManager(cfg *mgrconfig.Config) {
 			maxSignal := mgr.stats.maxSignal.get()
 			raceSignals := mgr.stats.raceSignals.get()
 			newRaceSignals := mgr.stats.newRaceSignals.get()
+			uafSignals := mgr.stats.uafSignals.get()
+			newUAFSignals := mgr.stats.newUAFSignals.get()
 			triageQLen := len(mgr.candidates)
 			mgr.mu.Unlock()
 			numReproducing := atomic.LoadUint32(&mgr.numReproducing)
 			numFuzzing := atomic.LoadUint32(&mgr.numFuzzing)
 
-			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, crashes %v, repro %v, triageQLen %v",
-				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, crashes, numReproducing, triageQLen)
+			log.Logf(0, "VMs %v, executed %v (normal %v, race %v), cover %v, signal %v/%v, raceSignal %v/%v, uafSignal %v/%v, crashes %v, repro %v, triageQLen %v",
+				numFuzzing, executed, execNormal, execRace, corpusCover, corpusSignal, maxSignal, newRaceSignals, raceSignals, newUAFSignals, uafSignals, crashes, numReproducing, triageQLen)
 		}
 	}()
 
@@ -328,9 +374,6 @@ func RunManager(cfg *mgrconfig.Config) {
 		go mgr.dashboardReporter()
 		go mgr.dashboardReproTasks()
 	}
-
-	// Start data race combination cleanup goroutine
-	go mgr.cleanupDataRaceCombinations()
 
 	osutil.HandleInterrupts(vm.Shutdown)
 	if mgr.vmPool == nil {
@@ -967,13 +1010,6 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 		mgr.mu.Unlock()
 	}
 	if crash.Type == crash_pkg.DataRace {
-		// Check if this is a duplicate VarName combination
-		if !mgr.isNewDataRaceCombination(crash.Report) {
-			// This is a duplicate combination, skip reporting
-			// Return false to indicate the crash was skipped
-			return false
-		}
-
 		mgr.mu.Lock()
 		mgr.dataRaceFrames[crash.Frame] = true
 		mgr.mu.Unlock()
@@ -1080,6 +1116,26 @@ func (mgr *Manager) saveCrash(crash *Crash) bool {
 	writeOrRemove("report", crash.Report.Report)
 	writeOrRemove("machineInfo", crash.machineInfo)
 	return mgr.needLocalRepro(crash)
+}
+
+// saveUAFPair saves UAF pair information to disk, similar to saveCrash
+//
+// Method B: Direct saving to final location
+// 1. This function (saveUAFPair): Create UAF directory + Signal monitor with target path + Save metadata
+// 2. Monitor process: Receive signal + Save VM output directly to target log file
+//
+// Workflow:
+// Step 1: Create UAF pair directory and determine log rotation index
+// Step 2: Send signal to VM monitor with target file path
+// Step 3: Monitor saves VM output directly to uafpairs/uaf_<pairID>/log<N>
+// saveUAFPair saves UAF pair information to database instead of files
+// This simplified version stores all UAF data including execution context in the database
+func (mgr *Manager) saveUAFPair(args *rpctype.NewUAFPairArgs) {
+	// Simply delegate to saveUAFCorpusItem for database storage
+	mgr.saveUAFCorpusItem(args)
+
+	log.Logf(1, "saved UAF pair %x to database (output: %d bytes, context: %t)",
+		args.Pair.PairID, len(args.Pair.Output), args.Pair.ExecutionContext != nil)
 }
 
 const maxReproAttempts = 3
@@ -1532,6 +1588,97 @@ func (mgr *Manager) initRaceCorpus() {
 		len(mgr.raceCorpus), len(mgr.raceCorpusCandidates))
 }
 
+func (mgr *Manager) initUAFCorpus() {
+	log.Logf(0, "loading UAF corpus...")
+	uafCorpusPath := filepath.Join(mgr.cfg.Workdir, "uaf-corpus.db")
+	uafCorpusDB, err := db.Open(uafCorpusPath, true)
+	if err != nil {
+		if uafCorpusDB == nil {
+			log.Fatalf("failed to open UAF corpus database: %v", err)
+		}
+		log.Errorf("UAF corpus db error: %v", err)
+	}
+
+	mgr.uafCorpusDB = uafCorpusDB
+	mgr.loadUAFCorpus()
+
+	log.Logf(0, "UAF corpus initialized: %d items loaded",
+		len(mgr.uafCorpus))
+}
+
+func (mgr *Manager) loadUAFCorpus() {
+	mgr.uafCorpusMu.Lock()
+	defer mgr.uafCorpusMu.Unlock()
+
+	log.Logf(0, "Loading UAF corpus from database...")
+	log.Logf(0, "Database has %d records", len(mgr.uafCorpusDB.Records))
+
+	broken := 0
+	for key, rec := range mgr.uafCorpusDB.Records {
+		log.Logf(1, "Loading UAF corpus item: %s (size: %d bytes)", key, len(rec.Val))
+
+		var item UAFCorpusItem
+		if err := json.Unmarshal(rec.Val, &item); err != nil {
+			log.Logf(0, "failed to unmarshal UAF corpus item %s: %v", key, err)
+			mgr.uafCorpusDB.Delete(key)
+			broken++
+			continue
+		}
+		keyNum, _ := strconv.ParseUint(key, 16, 64)
+		mgr.uafCorpus[keyNum] = &item
+
+		// Load UAF signal from this corpus item
+		if len(item.UAFSignal) > 0 {
+			log.Logf(1, "Processing UAF signal for item %s: signal size=%d bytes", key, len(item.UAFSignal))
+			if uafSignal, err := deserializeUAFSignal(item.UAFSignal); err == nil && uafSignal != nil {
+				mgr.uafSignalMu.Lock()
+				oldSignalLen := len(mgr.maxUAFSignal)
+				mgr.maxUAFSignal.Merge(*uafSignal)
+				newSignalLen := len(mgr.maxUAFSignal)
+				mgr.uafSignalMu.Unlock()
+				log.Logf(1, "Merged UAF signal for item %s: added %d signals (total: %d -> %d)", 
+					key, len(*uafSignal), oldSignalLen, newSignalLen)
+			} else {
+				log.Logf(0, "Failed to deserialize UAF signal for item %s: %v", key, err)
+			}
+		} else {
+			log.Logf(1, "Item %s has no UAF signal data", key)
+		}
+
+		// Load UAF coverage from this corpus item
+		if len(item.UAFs) > 0 {
+			var uafs []ddrd.MayUAFPair
+			if err := json.Unmarshal(item.UAFs, &uafs); err == nil {
+				var uafPairs []*ddrd.MayUAFPair
+				for i := range uafs {
+					uafPairs = append(uafPairs, &uafs[i])
+				}
+				mgr.uafCoverMu.Lock()
+				mgr.maxUAFCover.Merge(uafPairs)
+				mgr.uafCoverMu.Unlock()
+			}
+		}
+
+		log.Logf(0, "Loaded UAF pair: ID=%x, Count=%d, FirstSeen=%s, LastUpdated=%s",
+			item.PairID, item.Count, item.FirstSeen.Format("15:04:05"), item.LastUpdated.Format("15:04:05"))
+	}
+
+	if broken > 0 {
+		log.Logf(0, "removed %d broken UAF corpus items", broken)
+	}
+
+	// 初始化UAF信号统计（覆盖原有值）
+	mgr.uafSignalMu.RLock()
+	totalUAFSignals := len(mgr.maxUAFSignal)
+	mgr.uafSignalMu.RUnlock()
+	mgr.stats.uafSignals.set(totalUAFSignals)
+	mgr.stats.newUAFSignals.set(0)
+	log.Logf(0, "UAF signal statistics initialized: total signals=%d", totalUAFSignals)
+
+	mgr.uafStats.totalPairs = int64(len(mgr.uafCorpus))
+	log.Logf(0, "loaded %d UAF corpus items from database", len(mgr.uafCorpus))
+}
+
 func (mgr *Manager) loadRaceCorpus() {
 	mgr.raceCorpusMu.Lock()
 	defer mgr.raceCorpusMu.Unlock()
@@ -1575,46 +1722,122 @@ func (mgr *Manager) loadRaceCorpus() {
 		len(mgr.raceCorpus), broken)
 }
 
-func (mgr *Manager) saveRaceCorpusItem(args *rpctype.NewRacePairArgs) {
-	mgr.raceCorpusMu.Lock()
-	defer mgr.raceCorpusMu.Unlock()
+func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
+	mgr.uafCorpusMu.Lock()
+	defer mgr.uafCorpusMu.Unlock()
 
 	now := time.Now()
 
+	// ExecutionContext is already serialized as []byte from fuzzer, no need to serialize again
+	var executionContextData []byte
+	if args.Pair.ExecutionContext != nil {
+		executionContextData = args.Pair.ExecutionContext
+		log.Logf(2, "Using pre-serialized execution context for UAF pair %x (%d bytes)", 
+			args.Pair.PairID, len(executionContextData))
+	}
+
 	// Check if already exists
-	if existing, exists := mgr.raceCorpus[args.Pair.PairID]; exists {
+	if existing, exists := mgr.uafCorpus[args.Pair.PairID]; exists {
 		// Update existing item
 		existing.LastUpdated = now
 		existing.Count++
 
-		// Update race signal if provided
+		// Update UAF signal if provided
 		if len(args.Pair.Signal) > 0 {
-			existing.RaceSignal = args.Pair.Signal
+			existing.UAFSignal = args.Pair.Signal
+			// Merge new signal
+			if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+				mgr.uafSignalMu.Lock()
+				oldSignalSize := len(mgr.maxUAFSignal)
+				mgr.maxUAFSignal.Merge(*uafSignal)
+				newSignalSize := len(mgr.maxUAFSignal)
+				mgr.uafSignalMu.Unlock()
+
+				// Update UAF statistics - set to current total and track new signals
+				mgr.stats.uafSignals.set(newSignalSize)
+				if newSignalSize > oldSignalSize {
+					mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
+				}
+
+				log.Logf(2, "Merged UAF signal for existing pair %x (signal size: %d, new coverage: %d)",
+					args.Pair.PairID, len(*uafSignal), newSignalSize-oldSignalSize)
+			}
 		}
 
-		log.Logf(2, "Updated existing race pair %s (count: %d)", args.Pair.PairID, existing.Count)
+		// Update execution context if provided
+		if len(executionContextData) > 0 {
+			existing.ExecutionContext = executionContextData
+		}
+
+		// Update output if provided
+		if args.Pair.Output != nil {
+			existing.Output = args.Pair.Output
+		}
+
+		log.Logf(2, "Updated existing UAF pair %x (count: %d)", args.Pair.PairID, existing.Count)
 	} else {
 		// Create new item
-		item := &RaceCorpusItem{
-			PairID:      strconv.FormatUint(args.Pair.PairID, 16),
-			Prog1:       args.Pair.Prog1,
-			Prog2:       args.Pair.Prog2,
-			RaceSignal:  args.Pair.Signal,
-			Races:       args.Pair.Races,
-			FirstSeen:   now,
-			LastUpdated: now,
-			Source:      args.Name,
-			Count:       1,
+		item := &UAFCorpusItem{
+			PairID:           strconv.FormatUint(args.Pair.PairID, 16),
+			Prog1:            args.Pair.Prog1,
+			Prog2:            args.Pair.Prog2,
+			UAFSignal:        args.Pair.Signal,
+			UAFs:             args.Pair.UAFs,
+			Output:           args.Pair.Output,
+			ExecutionContext: executionContextData,
+			FirstSeen:        now,
+			LastUpdated:      now,
+			Source:           args.Name,
+			Count:            1,
 		}
 
-		mgr.raceCorpus[args.Pair.PairID] = item
-		mgr.raceStats.uniqueRaces++
+		mgr.uafCorpus[args.Pair.PairID] = item
 
-		log.Logf(2, "Added new race pair %s from %s", args.Pair.PairID, args.Name)
+		// Update UAF stats for new item
+		mgr.uafStats.uniqueUAFs++
+
+		// Update UAF signal if provided
+		if len(args.Pair.Signal) > 0 {
+			if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+				mgr.uafSignalMu.Lock()
+				oldSignalSize := len(mgr.maxUAFSignal)
+				mgr.maxUAFSignal.Merge(*uafSignal)
+				newSignalSize := len(mgr.maxUAFSignal)
+				mgr.uafSignalMu.Unlock()
+
+				// Update UAF statistics - set to current total and track new signals
+				mgr.stats.uafSignals.set(newSignalSize)
+				if newSignalSize > oldSignalSize {
+					mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
+				}
+
+				log.Logf(2, "Merged UAF signal for new pair %x (signal size: %d, new coverage: %d)",
+					args.Pair.PairID, len(*uafSignal), newSignalSize-oldSignalSize)
+			}
+		}
+
+		// Update UAF coverage if provided
+		if len(args.Pair.UAFs) > 0 {
+			var uafs []ddrd.MayUAFPair
+			if err := json.Unmarshal(args.Pair.UAFs, &uafs); err == nil {
+				var uafPairs []*ddrd.MayUAFPair
+				for i := range uafs {
+					uafPairs = append(uafPairs, &uafs[i])
+				}
+				mgr.uafCoverMu.Lock()
+				mgr.maxUAFCover.Merge(uafPairs)
+				mgr.uafCoverMu.Unlock()
+				log.Logf(2, "Merged UAF coverage for new pair %x (uaf count: %d)",
+					args.Pair.PairID, len(uafs))
+			}
+		}
+
+		log.Logf(2, "Added new UAF pair %x from %s (with execution context: %t)",
+			args.Pair.PairID, args.Name, len(executionContextData) > 0)
 	}
 
 	// Persist to database
-	mgr.persistRaceCorpusItem(args.Pair.PairID)
+	mgr.persistUAFCorpusItem(args.Pair.PairID)
 }
 
 func (mgr *Manager) persistRaceCorpusItem(pairID uint64) {
@@ -1640,6 +1863,32 @@ func (mgr *Manager) persistRaceCorpusItem(pairID uint64) {
 		log.Logf(0, "failed to flush race corpus database: %v", err)
 	} else {
 		log.Logf(1, "Successfully persisted race corpus item %x to disk", pairID)
+	}
+}
+
+func (mgr *Manager) persistUAFCorpusItem(pairID uint64) {
+	item, exists := mgr.uafCorpus[pairID]
+	if !exists {
+		log.Logf(1, "persistUAFCorpusItem: item %x not found in memory", pairID)
+		return
+	}
+
+	data, err := json.Marshal(item)
+	if err != nil {
+		log.Logf(0, "failed to marshal UAF corpus item %x: %v", pairID, err)
+		return
+	}
+
+	log.Logf(1, "Persisting UAF corpus item %x (%d bytes)", pairID, len(data))
+
+	// Save to database
+	mgr.uafCorpusDB.Save(strconv.FormatUint(pairID, 16), data, 0)
+
+	// Flush to ensure data is written to disk
+	if err := mgr.uafCorpusDB.Flush(); err != nil {
+		log.Logf(0, "failed to flush UAF corpus database: %v", err)
+	} else {
+		log.Logf(1, "Successfully persisted UAF corpus item %x to disk", pairID)
 	}
 }
 
@@ -1715,6 +1964,45 @@ func deserializeRaceSignal(data []byte) (*ddrd.Signal, error) {
 	}
 	sig := serial.Deserialize()
 	return &sig, nil
+}
+
+// deserializeUAFSignal deserializes UAF signal data from JSON.
+func deserializeUAFSignal(data []byte) (*ddrd.UAFSignal, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	
+	// First try to deserialize as ddrd.Serial (JSON object format)
+	var serial ddrd.Serial
+	if err := json.Unmarshal(data, &serial); err == nil {
+		// Successfully deserialized as Serial object
+		signal := serial.Deserialize()
+		// Convert ddrd.Signal to UAFSignal
+		rawSignal := signal.ToRawUint64()
+		uafSignal := ddrd.FromRawUAF(rawSignal, 0)
+		return &uafSignal, nil
+	}
+	
+	// Fallback: try to deserialize as []uint64 array (legacy format)
+	var rawSignal []uint64
+	if err := json.Unmarshal(data, &rawSignal); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal UAF signal as both Serial and []uint64: %v", err)
+	}
+	sig := ddrd.DeserializeUAFSignal(rawSignal)
+	return &sig, nil
+}
+
+// serializeUAFSignal serializes UAF signal to JSON.
+func serializeUAFSignal(sig ddrd.UAFSignal) ([]byte, error) {
+	if sig.Empty() {
+		return []byte{}, nil
+	}
+	rawSignal := sig.Serialize()
+	data, err := json.Marshal(rawSignal)
+	if err != nil {
+		return nil, fmt.Errorf("failed to serialize UAF signal: %v", err)
+	}
+	return data, nil
 }
 
 // ===============DDRD====================
@@ -2030,253 +2318,87 @@ func publicWebAddr(addr string) string {
 	return "http://" + addr
 }
 
-// processRaceMappingData processes serialized race-to-syscall mapping data
-func (mgr *Manager) processRaceMappingData(data []byte, callName string) {
-	if len(data) == 0 {
-		return
-	}
-
-	log.Logf(1, "=== RACE-SYSCALL MAPPING ANALYSIS ===")
-	log.Logf(1, "收到来自 %s 的race mapping数据，大小: %d bytes", callName, len(data))
-
-	// Parse the binary mapping data
-	mappings, err := mgr.parseRaceMappingData(data)
-	if err != nil {
-		log.Logf(0, "解析race mapping数据失败: %v", err)
-		return
-	}
-
-	if len(mappings) > 0 {
-		log.Logf(1, "成功解析 %d 个race-syscall映射", len(mappings))
-
-		// Process each mapping
-		for i, mapping := range mappings {
-			log.Logf(1, "映射 %d: race_id=%d, syscall1_index=%d, syscall2_index=%d, score=%.3f",
-				i, mapping.RaceID, mapping.Syscall1Index, mapping.Syscall2Index, mapping.Score)
-		}
-
-		// Export to CSV for analysis
-		filename := fmt.Sprintf("race_mappings_%s_%d.csv", callName, time.Now().Unix())
-		// TODO: implement exportRaceMappingsToCSV method if needed
-		log.Logf(1, "映射数据需要导出到: %s (功能待实现)", filename)
-	}
-
-	log.Logf(1, "=== END RACE-SYSCALL MAPPING ANALYSIS ===")
-}
-
-// RaceMappingEntry represents a parsed race-to-syscall mapping
-type RaceMappingEntry struct {
-	RaceID        int
-	Syscall1Index int
-	Syscall2Index int
-	Score         float64
-}
-
-// parseRaceMappingData parses binary race mapping data
-func (mgr *Manager) parseRaceMappingData(data []byte) ([]RaceMappingEntry, error) {
-	if len(data) < 4 {
-		return nil, fmt.Errorf("数据太短，无法包含映射计数")
-	}
-
-	// Read mapping count
-	count := int(*(*uint32)(unsafe.Pointer(&data[0])))
-	offset := 4
-
-	var mappings []RaceMappingEntry
-
-	// Parse each mapping entry
-	for i := 0; i < count; i++ {
-		if offset+16 > len(data) { // 4 ints = 16 bytes
-			break
-		}
-
-		mapping := RaceMappingEntry{
-			RaceID:        int(*(*uint32)(unsafe.Pointer(&data[offset]))),
-			Syscall1Index: int(*(*uint32)(unsafe.Pointer(&data[offset+4]))),
-			Syscall2Index: int(*(*uint32)(unsafe.Pointer(&data[offset+8]))),
-			Score:         float64(*(*uint32)(unsafe.Pointer(&data[offset+12]))) / 1000.0, // Convert back from fixed-point
-		}
-
-		mappings = append(mappings, mapping)
-		offset += 16
-	}
-
-	return mappings, nil
-}
-
 // ===============DDRD====================
-// newRacePair processes new race pair discoveries with full Manager integration
-func (mgr *Manager) newRacePair(args *rpctype.NewRacePairArgs) bool {
+// newUAFPair processes new UAF pair discoveries with full Manager integration
+func (mgr *Manager) newUAFPair(args *rpctype.NewUAFPairArgs) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
+	log.Logf(0, "Received new UAF pair: ID=%x from %s", args.Pair.PairID, args.Name)
+	// 1. Save UAF log to disk (similar to saveCrash)
+	mgr.saveUAFPair(args)
 
-	// 1. Save to race corpus
-	mgr.saveRaceCorpusItem(args)
-	mgr.raceStats.totalPairs++
+	// 2. Save to UAF corpus
+	mgr.saveUAFCorpusItem(args)
+	mgr.uafStats.totalPairs++
 
-	// 2. Race signal processing and propagation
+	// 3. UAF signal processing and propagation
 	if len(args.Pair.Signal) > 0 {
-		// Process race signal from the pair
-		log.Logf(2, "Processing race signal: %d bytes", len(args.Pair.Signal))
+		// Process UAF signal from the pair
+		log.Logf(2, "Processing UAF signal: %d bytes", len(args.Pair.Signal))
 
-		// Deserialize and merge race signal (using RPC helper)
-		if raceSignal, err := deserializeRaceSignal(args.Pair.Signal); err == nil && raceSignal != nil {
-			// Update race signal statistics
-			currentRaceSignals := mgr.stats.raceSignals.get()
-			newSize := int(currentRaceSignals) + len(*raceSignal)
-			mgr.stats.raceSignals.set(newSize)
-			log.Logf(2, "Updated race signal stats: %d -> %d", currentRaceSignals, newSize)
+		// Deserialize and merge UAF signal as generic signal for compatibility
+		if uafSignal, err := deserializeRaceSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+			// Merge UAF signal with manager's max UAF signal tracking
+			mgr.uafSignalMu.Lock()
+			// Convert generic signal to UAF signal for proper tracking
+			rawSignal := uafSignal.ToRawUint64()
+			uafOnlySignal := ddrd.FromRawUAF(rawSignal, 0)
+			mgr.maxUAFSignal.Merge(uafOnlySignal)
+			mgr.uafSignalMu.Unlock()
+
+			log.Logf(2, "Updated UAF signal: merged %d elements", len(rawSignal))
 		} else if err != nil {
-			log.Logf(1, "Failed to deserialize race signal: %v", err)
+			log.Logf(1, "Failed to deserialize UAF signal: %v", err)
 		}
 
-		// Update statistics through Manager's stats system
-		mgr.stats.newRaceSignals.add(1)
+		// Update UAF statistics
+		mgr.uafStats.uniqueUAFs++
 	}
 
-	// 3. Integration with scheduler: adjust fuzzing strategy based on races
+	// 4. UAF coverage processing
+	if len(args.Pair.UAFs) > 0 {
+		var uafs []ddrd.MayUAFPair
+		if err := json.Unmarshal(args.Pair.UAFs, &uafs); err == nil {
+			var uafPairs []*ddrd.MayUAFPair
+			for i := range uafs {
+				uafPairs = append(uafPairs, &uafs[i])
+			}
+			mgr.uafCoverMu.Lock()
+			mgr.maxUAFCover.Merge(uafPairs)
+			mgr.uafCoverMu.Unlock()
+
+			log.Logf(2, "Updated UAF coverage: merged %d UAF pairs", len(uafPairs))
+		}
+	}
+
+	// 4. Integration with scheduler: adjust fuzzing strategy based on UAFs
 	if mgr.fuzzScheduler != nil {
-		// Could notify scheduler about race discoveries
+		// Could notify scheduler about UAF discoveries
 		// This might influence the fuzzing phase transitions
-		log.Logf(2, "Notifying fuzzing scheduler about race discoveries")
+		log.Logf(2, "Notifying fuzzing scheduler about UAF discoveries")
 	}
 	return true
-}
-
-// normalizeVarNameKey creates a normalized key for VarName combinations
-// Ensures consistent ordering to avoid duplicate entries like "A:B" vs "B:A"
-func normalizeVarNameKey(var1, var2 string) string {
-	if var1 == "" && var2 == "" {
-		return ""
-	}
-	if var1 == "" {
-		return var2
-	}
-	if var2 == "" {
-		return var1
-	}
-	// Ensure consistent ordering
-	if var1 > var2 {
-		return var2 + ":" + var1
-	}
-	return var1 + ":" + var2
-}
-
-// isNewDataRaceCombination checks if a data race VarName combination has been seen before
-// Returns true if this is a new combination that should be reported
-// Returns false if this combination was already reported and should be skipped
-func (mgr *Manager) isNewDataRaceCombination(rep *report.Report) bool {
-	// Skip check if feature is disabled
-	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
-		return true
-	}
-
-	// Must have race information
-	if len(rep.ReportedRaces) == 0 {
-		return true
-	}
-
-	race := rep.ReportedRaces[0]
-	key := normalizeVarNameKey(race.VarName1, race.VarName2)
-
-	// Empty key means no valid VarNames
-	if key == "" {
-		return true
-	}
-
-	mgr.mu.Lock()
-	defer mgr.mu.Unlock()
-
-	// Check if combination already exists
-	if mgr.reportedDataRaceCombinations[key] {
-		return false
-	}
-
-	// Check memory limit and cleanup if needed
-	maxCombinations := mgr.cfg.Experimental.MaxDataRaceCombinations
-	if maxCombinations <= 0 {
-		maxCombinations = 10000 // Default limit
-	}
-
-	if len(mgr.reportedDataRaceCombinations) >= maxCombinations {
-		// Clear half of the combinations to make room
-		newMap := make(map[string]bool)
-		count := 0
-		for k, v := range mgr.reportedDataRaceCombinations {
-			if count < maxCombinations/2 {
-				newMap[k] = v
-				count++
-			}
-		}
-		mgr.reportedDataRaceCombinations = newMap
-		log.Logf(1, "Cleared old data race combinations, keeping %d out of %d",
-			len(newMap), maxCombinations)
-	}
-
-	// Mark this combination as reported
-	mgr.reportedDataRaceCombinations[key] = true
-	return true
-}
-
-// cleanupDataRaceCombinations periodically cleans up the data race combinations cache
-// This runs in a separate goroutine to prevent memory growth
-func (mgr *Manager) cleanupDataRaceCombinations() {
-	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
-		return
-	}
-
-	ticker := time.NewTicker(30 * time.Minute) // Cleanup every 30 minutes
-	defer ticker.Stop()
-
-	maxCombinations := mgr.cfg.Experimental.MaxDataRaceCombinations
-	if maxCombinations <= 0 {
-		maxCombinations = 10000
-	}
-
-	for {
-		select {
-		case <-ticker.C:
-			mgr.mu.Lock()
-			currentSize := len(mgr.reportedDataRaceCombinations)
-			if currentSize > maxCombinations*3/4 { // Clean when 75% full
-				// Keep only the most recent half
-				newMap := make(map[string]bool)
-				count := 0
-				for k, v := range mgr.reportedDataRaceCombinations {
-					if count < maxCombinations/2 {
-						newMap[k] = v
-						count++
-					}
-				}
-				oldSize := len(mgr.reportedDataRaceCombinations)
-				mgr.reportedDataRaceCombinations = newMap
-				log.Logf(1, "Periodic cleanup: reduced data race combinations from %d to %d",
-					oldSize, len(newMap))
-			}
-			mgr.mu.Unlock()
-		case <-mgr.vmStop:
-			return
-		}
-	}
 }
 
 // createMonitorConfig creates configuration for VM monitoring with duplicate data race filtering
 func (mgr *Manager) createMonitorConfig() *vm.MonitorConfig {
-	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
-		return nil
+	config := &vm.MonitorConfig{
+		WorkDir: mgr.cfg.Workdir,
 	}
 
-	mgr.mu.RLock()
-	skipCombinations := make(map[string]bool, len(mgr.reportedDataRaceCombinations))
-	for key, value := range mgr.reportedDataRaceCombinations {
-		skipCombinations[key] = value
-	}
-	mgr.mu.RUnlock()
+	if mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		mgr.mu.RLock()
+		skipCombinations := make(map[string]bool, len(mgr.reportedDataRaceCombinations))
+		for key, value := range mgr.reportedDataRaceCombinations {
+			skipCombinations[key] = value
+		}
+		mgr.mu.RUnlock()
 
-	return &vm.MonitorConfig{
-		SkipDuplicateDataRaces:   true,
-		SkipDataRaceCombinations: skipCombinations,
+		config.SkipDuplicateDataRaces = true
+		config.SkipDataRaceCombinations = skipCombinations
 	}
+
+	return config
 }
 
 // ===============DDRD====================

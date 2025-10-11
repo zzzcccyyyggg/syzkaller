@@ -16,6 +16,7 @@ import (
 	"unsafe"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
@@ -57,6 +58,7 @@ const (
 	FlagEnableCoverageFilter                       // setup and use bitmap to do coverage filter
 	FlagCollectRace                                // collect race pair signals
 	FlagTestPairSync                               // synchronize execution with another program (test pair mode)
+	FlagCollectUAF                                 // collect UAF (Use-After-Free) detection signals
 )
 
 type ExecOpts struct {
@@ -108,6 +110,12 @@ type ProgInfo struct {
 type PairProgInfo struct {
 	PairCount    uint32             // number of pairs
 	MayRacePairs []ddrd.MayRacePair // store the detail information of each pair
+	MayUAFPairs  []ddrd.MayUAFPair  // store UAF pair information
+	UAFCount     uint32             // number of UAF pairs
+	// Extended information for path-distance-aware scheduling
+	ExtendedRacePairs []ddrd.ExtendedRacePair
+	ExtendedUAFPairs  []ddrd.ExtendedUAFPair
+	HasExtendedInfo   bool
 }
 
 // Race validation related structures
@@ -401,7 +409,7 @@ func (c *command) execPair(opts1, opts2 *ExecOpts, prog1Data, prog2Data []byte, 
 		return
 	}
 
-	if reply.magic != outMagic {
+	if reply.magic != outPairMagic {
 		fmt.Fprintf(os.Stderr, "executor %v: got bad pair reply magic 0x%x\n", c.pid, reply.magic)
 		os.Exit(1)
 	}
@@ -458,26 +466,10 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	}
 
 	// Enable test pair synchronization and race collection
-	if opts1 == nil {
-		opts1 = &ExecOpts{}
+	if opts1 == nil || opts2 == nil {
+		err0 = fmt.Errorf("both opts must be non-nil")
+		return
 	}
-	if opts2 == nil {
-		opts2 = &ExecOpts{}
-	}
-
-	// Set test pair sync flag and enable race collection
-	opts1.Flags |= FlagTestPairSync | FlagCollectRace
-	opts2.Flags |= FlagTestPairSync | FlagCollectRace
-
-	// Debug: Print syscall numbers for each program before serialization
-	// log.Printf("DEBUG ExecPair: Program 1 syscalls:")
-	// for i, call := range p1.Calls {
-	// 	log.Printf("  [%d] %s (ID=%d)", i, call.Meta.Name, call.Meta.ID)
-	// }
-	// log.Printf("DEBUG ExecPair: Program 2 syscalls:")
-	// for i, call := range p2.Calls {
-	// 	log.Printf("  [%d] %s (ID=%d)", i, call.Meta.Name, call.Meta.ID)
-	// }
 
 	// Serialize both programs
 	prog1Size, err := p1.SerializeForExec(env.in)
@@ -538,6 +530,11 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 	// Execute pair using the new execPair method
 	output, hanged, err0 = env.cmd.execPair(opts1, opts2, prog1Data, prog2Data, int(prog1Size), int(prog2Size))
 	if err0 != nil {
+		log.Logf(1, "execPair failed: prog1_size=%d, prog2_size=%d, hanged=%v, error=%v",
+			prog1Size, prog2Size, hanged, err0)
+		if len(output) > 0 {
+			log.Logf(2, "execPair output before error: %q", output)
+		}
 		env.cmd.close()
 		env.cmd = nil
 		return
@@ -545,6 +542,19 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 
 	// Parse race-focused output (simplified parsing)
 	info, err0 = env.parsePairOutput(p1, p2)
+	if err0 != nil {
+		// Truncate program strings to avoid overly long logs
+		prog1Str := p1.String()
+		if len(prog1Str) > 100 {
+			prog1Str = prog1Str[:100]
+		}
+		prog2Str := p2.String()
+		if len(prog2Str) > 100 {
+			prog2Str = prog2Str[:100]
+		}
+		log.Logf(1, "parsePairOutput failed: prog1=%s, prog2=%s, output_len=%d, error=%v",
+			prog1Str, prog2Str, len(output), err0)
+	}
 	if !env.config.UseForkServer {
 		env.cmd.close()
 		env.cmd = nil
@@ -556,22 +566,14 @@ func (env *Env) ExecPair(opts1, opts2 *ExecOpts, p1, p2 *prog.Prog) (
 // parseMayRacePair manually parses a MayRacePair from byte array
 // This avoids unsafe pointer conversion and memory alignment issues
 func parseMayRacePair(data []byte) (*ddrd.MayRacePair, error) {
-	if len(data) < 84 { // C端发送84字节
+	if len(data) < 84 { // Should match C struct size
 		return nil, fmt.Errorf("insufficient data for MayRacePair: need 84 bytes, got %d", len(data))
 	}
 
 	pair := &ddrd.MayRacePair{}
 	offset := 0
 
-	// Parse fields according to C send order (84 bytes total)
-	pair.Syscall1Idx = int32(prog.HostEndian.Uint32(data[offset:]))
-	offset += 4
-	pair.Syscall2Idx = int32(prog.HostEndian.Uint32(data[offset:]))
-	offset += 4
-	pair.Syscall1Num = int32(prog.HostEndian.Uint32(data[offset:]))
-	offset += 4
-	pair.Syscall2Num = int32(prog.HostEndian.Uint32(data[offset:]))
-	offset += 4
+	// Parse fields according to new Go struct order (matching C send order)
 	pair.VarName1 = prog.HostEndian.Uint64(data[offset:])
 	offset += 8
 	pair.VarName2 = prog.HostEndian.Uint64(data[offset:])
@@ -580,27 +582,192 @@ func parseMayRacePair(data []byte) (*ddrd.MayRacePair, error) {
 	offset += 8
 	pair.CallStack2 = prog.HostEndian.Uint64(data[offset:])
 	offset += 8
+	pair.Signal = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.TimeDiff = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
 	pair.Sn1 = int32(prog.HostEndian.Uint32(data[offset:]))
 	offset += 4
 	pair.Sn2 = int32(prog.HostEndian.Uint32(data[offset:]))
 	offset += 4
-	pair.Signal = prog.HostEndian.Uint64(data[offset:])
-	offset += 8
+	pair.Syscall1Idx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall2Idx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall1Num = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.Syscall2Num = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
 	pair.LockType = prog.HostEndian.Uint32(data[offset:])
 	offset += 4
 	pair.AccessType1 = prog.HostEndian.Uint32(data[offset:])
 	offset += 4
 	pair.AccessType2 = prog.HostEndian.Uint32(data[offset:])
 	offset += 4
-	pair.TimeDiff = prog.HostEndian.Uint64(data[offset:])
-	offset += 8
 	// Total: 84 bytes
 
 	return pair, nil
 }
 
+// parseMayUAFPair parses UAF pair data from executor
+func parseMayUAFPair(data []byte) (*ddrd.MayUAFPair, error) {
+	if len(data) < 80 { // Match new Go struct size (80 bytes)
+		return nil, fmt.Errorf("insufficient data for MayUAFPair: need 80 bytes, got %d", len(data))
+	}
+
+	pair := &ddrd.MayUAFPair{}
+	offset := 0
+
+	// Parse fields according to new Go struct order (matching C send order)
+	pair.FreeAccessName = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.UseAccessName = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.FreeCallStack = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.UseCallStack = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.Signal = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.TimeDiff = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	pair.FreeSyscallIdx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.UseSyscallIdx = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.FreeSyscallNum = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.UseSyscallNum = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.FreeSN = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.UseSN = int32(prog.HostEndian.Uint32(data[offset:]))
+	offset += 4
+	pair.LockType = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	pair.UseAccessType = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	// Total should be 80 bytes
+
+	return pair, nil
+}
+
+// parseExtendedRacePair parses extended race pair data with history
+func parseExtendedRacePair(data []byte) (*ddrd.ExtendedRacePair, error) {
+	// 计算最小所需大小：基本信息(84) + 计数信息(8) + 目标时间(16) + 路径距离(16) = 124字节 + 历史记录数据
+	if len(data) < 124 {
+		return nil, fmt.Errorf("insufficient data for ExtendedRacePair header: need at least 124 bytes, got %d", len(data))
+	}
+
+	extPair := &ddrd.ExtendedRacePair{}
+	offset := 0
+
+	// Parse basic race info (84 bytes)
+	basicData := data[offset : offset+84]
+	basicPair, err := parseMayRacePair(basicData)
+	if err != nil {
+		return nil, fmt.Errorf("failed to parse basic race info: %w", err)
+	}
+	extPair.BasicInfo = *basicPair
+	offset += 84
+
+	// Parse extended fields
+	extPair.Thread1HistoryCount = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	extPair.Thread2HistoryCount = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	extPair.Thread1TargetTime = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	extPair.Thread2TargetTime = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+
+	// Parse access history records directly
+	totalRecords := extPair.Thread1HistoryCount + extPair.Thread2HistoryCount
+	recordSize := 8 + 8 + 8 + 4 + 4 // serialized_access_record_t size = 32 bytes
+	expectedHistorySize := uint32(recordSize) * totalRecords
+
+	if uint32(len(data)) < 104+expectedHistorySize { // No path distances in simplified structure
+		return nil, fmt.Errorf("insufficient data for access history: need %d bytes, got %d",
+			104+expectedHistorySize, len(data))
+	}
+
+	extPair.AccessHistory = make([]ddrd.SerializedAccessRecord, totalRecords)
+	for i := uint32(0); i < totalRecords; i++ {
+		record := &extPair.AccessHistory[i]
+		record.VarName = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.CallStackHash = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.AccessTime = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.SN = prog.HostEndian.Uint32(data[offset:])
+		offset += 4
+		record.AccessType = prog.HostEndian.Uint32(data[offset:])
+		offset += 4
+	}
+
+	return extPair, nil
+}
+
+// parseExtendedUAFPair parses extended UAF pair data with history
+func parseExtendedUAFPair(data []byte) (*ddrd.ExtendedUAFPair, error) {
+	// 扩展UAF数据结构：
+	// - 扩展头部：4 + 4 + 8 + 8 = 24字节 (计数 + 目标时间)
+	// - 历史记录：变长 (count × 32字节)
+	// - 路径距离：8 + 8 = 16字节
+	// 最小大小：24 + 16 = 40字节
+	if len(data) < 40 {
+		return nil, fmt.Errorf("insufficient data for ExtendedUAFPair header: need at least 40 bytes, got %d", len(data))
+	}
+
+	extUAF := &ddrd.ExtendedUAFPair{}
+	offset := 0
+
+	// Parse extended header fields (executor doesn't send basic UAF info again)
+	extUAF.UseThreadHistoryCount = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	extUAF.FreeThreadHistoryCount = prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+	extUAF.UseTargetTime = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+	extUAF.FreeTargetTime = prog.HostEndian.Uint64(data[offset:])
+	offset += 8
+
+	// Parse access history records
+	totalRecords := extUAF.UseThreadHistoryCount + extUAF.FreeThreadHistoryCount
+	recordSize := 32 // serialized_access_record_t size = 3×8 + 2×4 = 32 bytes
+	expectedHistorySize := int(recordSize) * int(totalRecords)
+
+	if len(data) < 24+expectedHistorySize+16 {
+		return nil, fmt.Errorf("insufficient data for access history: need %d bytes, got %d",
+			24+expectedHistorySize+16, len(data))
+	}
+
+	extUAF.AccessHistory = make([]ddrd.SerializedAccessRecord, totalRecords)
+	for i := uint32(0); i < totalRecords; i++ {
+		record := &extUAF.AccessHistory[i]
+		record.VarName = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.CallStackHash = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.AccessTime = prog.HostEndian.Uint64(data[offset:])
+		offset += 8
+		record.SN = prog.HostEndian.Uint32(data[offset:])
+		offset += 4
+		record.AccessType = prog.HostEndian.Uint32(data[offset:])
+		offset += 4
+	}
+
+	// Skip path distances (sent as uint64 but not stored in Go struct)
+	// TODO: Add path distance fields to ExtendedUAFPair struct if needed
+	offset += 8 // pathDistUse
+	offset += 8 // pathDistFree
+
+	return extUAF, nil
+}
+
 // parsePairOutput parses the race detection output from pair execution
-func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
+func (env *Env) parsePairOutput(_, _ *prog.Prog) (*PairProgInfo, error) {
 
 	out := env.out
 
@@ -612,67 +779,213 @@ func (env *Env) parsePairOutput(p1, p2 *prog.Prog) (*PairProgInfo, error) {
 	// fmt.Printf("DEBUG parsePairOutput: initial buffer length=%d, first %d bytes: %v\n",
 	// 	len(out), debugLen, out[:debugLen])
 
-	// Pair execution output format:
-	// [kOutPairMagic][pair_count][pair1][pair2]...
-	// Each pair record contains fixed-size fields described in executor/ddrd.h.
+	info := &PairProgInfo{}
 
-	magic, ok := readUint32(&out)
+	// Parse multiple sections with different magics
+	if len(out) >= 8 { // At least magic + count
+		magic, ok := readUint32(&out)
+		if !ok {
+			return nil, fmt.Errorf("failed to read magic")
+		}
+
+		switch magic {
+		case outPairMagic:
+			// Parse basic race pairs
+			err := env.parseBasicRacePairs(&out, info)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse basic race pairs: %w", err)
+			}
+
+		case outUAFMagic:
+			// Parse basic UAF pairs
+			fmt.Printf("DEBUG parsePairOutput: parsing basic UAF pairs\n")
+			err := env.parseBasicUAFPairs(&out, info)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse basic UAF pairs: %w", err)
+			}
+
+		case outExtendedPairMagic:
+			// Parse extended race pairs
+			err := env.parseExtendedRacePairs(&out, info)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse extended race pairs: %w", err)
+			}
+			info.HasExtendedInfo = true
+
+		case outExtendedUAFMagic:
+			// Parse extended UAF pairs
+			err := env.parseExtendedUAFPairs(&out, info)
+			if err != nil {
+				return nil, fmt.Errorf("failed to parse extended UAF pairs: %w", err)
+			}
+			info.HasExtendedInfo = true
+
+		default:
+			return nil, fmt.Errorf("unknown magic 0x%x", magic)
+		}
+	}
+
+	fmt.Printf("DEBUG parsePairOutput: successfully parsed race_pairs=%d, uaf_pairs=%d, extended_info=%v\n",
+		len(info.MayRacePairs), len(info.MayUAFPairs), info.HasExtendedInfo)
+	return info, nil
+}
+
+// parseBasicRacePairs parses basic race pair data
+func (env *Env) parseBasicRacePairs(out *[]byte, info *PairProgInfo) error {
+	pairCount, ok := readUint32(out)
 	if !ok {
-		return nil, fmt.Errorf("failed to read pair magic")
-	}
-	// fmt.Printf("DEBUG parsePairOutput: read magic=0x%x, expected=0x%x\n", magic, outPairMagic)
-	if magic != outPairMagic {
-		return nil, fmt.Errorf("bad pair magic 0x%x", magic)
+		return fmt.Errorf("failed to read race pair count")
 	}
 
-	pairCount, ok := readUint32(&out)
-	if !ok {
-		return nil, fmt.Errorf("failed to read pair count")
-	}
-	// fmt.Printf("DEBUG parsePairOutput: read pairCount=%d\n", pairCount)
+	info.MayRacePairs = make([]ddrd.MayRacePair, pairCount)
+	info.PairCount = pairCount
 
-	info := &PairProgInfo{
-		MayRacePairs: make([]ddrd.MayRacePair, pairCount),
-		PairCount:    pairCount,
-	}
-
-	// C端发送84字节每个pair
 	const pairDataSize = 84
-	// fmt.Printf("DEBUG parsePairOutput: expected pair data size=%d bytes\n", pairDataSize)
-
 	for i := uint32(0); i < pairCount; i++ {
-		// fmt.Printf("DEBUG parsePairOutput: parsing pair %d, remaining buffer=%d bytes\n", i, len(out))
-		if len(out) < pairDataSize {
-			return nil, fmt.Errorf("pair %v: truncated output, need %d bytes but only %d available", i, pairDataSize, len(out))
+		if len(*out) < pairDataSize {
+			return fmt.Errorf("race pair %v: truncated output, need %d bytes but only %d available", i, pairDataSize, len(*out))
 		}
 
-		// Debug: Show raw bytes for this pair
-		debugPairLen := pairDataSize
-		if len(out) < debugPairLen {
-			debugPairLen = len(out)
-		}
-		// fmt.Printf("DEBUG parsePairOutput: pair %d raw bytes (all %d): %v\n", i, debugPairLen, out[:debugPairLen])
-
-		// 使用手动解析而不是unsafe指针
-		mayRacePair, err := parseMayRacePair(out[:pairDataSize])
+		mayRacePair, err := parseMayRacePair((*out)[:pairDataSize])
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse pair %d: %w", i, err)
+			return fmt.Errorf("failed to parse race pair %d: %w", i, err)
 		}
-
-		// Debug: Show parsed fields
-		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: Syscall1Idx=%d, Syscall2Idx=%d, Syscall1Num=%d, Syscall2Num=%d\n",
-		// 	i, mayRacePair.Syscall1Idx, mayRacePair.Syscall2Idx, mayRacePair.Syscall1Num, mayRacePair.Syscall2Num)
-		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: VarName1=0x%x, VarName2=0x%x, Signal=0x%x\n",
-		// 	i, mayRacePair.VarName1, mayRacePair.VarName2, mayRacePair.Signal)
-		// fmt.Printf("DEBUG parsePairOutput: pair %d parsed: LockType=%d, AccessType1=%d, AccessType2=%d, TimeDiff=%d\n",
-		// 	i, mayRacePair.LockType, mayRacePair.AccessType1, mayRacePair.AccessType2, mayRacePair.TimeDiff)
 
 		info.MayRacePairs[i] = *mayRacePair
-		out = out[pairDataSize:] // 每次前进84字节
+		*out = (*out)[pairDataSize:]
+	}
+	return nil
+}
+
+// parseBasicUAFPairs parses basic UAF pair data
+func (env *Env) parseBasicUAFPairs(out *[]byte, info *PairProgInfo) error {
+	uafCount, ok := readUint32(out)
+	fmt.Printf("DEBUG parseBasicUAFPairs: UAF pair count = %d\n", uafCount)
+	if !ok {
+		return fmt.Errorf("failed to read UAF pair count")
 	}
 
-	fmt.Printf("DEBUG parsePairOutput: successfully parsed %d pairs\n", pairCount)
-	return info, nil
+	info.MayUAFPairs = make([]ddrd.MayUAFPair, uafCount)
+	info.UAFCount = uafCount
+
+	const uafDataSize = 80 // Match executor UAF output size (6×8 + 8×4 = 80 bytes)
+	for i := uint32(0); i < uafCount; i++ {
+		if len(*out) < uafDataSize {
+			return fmt.Errorf("UAF pair %v: truncated output, need %d bytes but only %d available", i, uafDataSize, len(*out))
+		}
+
+		mayUAFPair, err := parseMayUAFPair((*out)[:uafDataSize])
+		if err != nil {
+			return fmt.Errorf("failed to parse UAF pair %d: %w", i, err)
+		}
+
+		// 详细输出UAF pair结构体信息
+		fmt.Printf("DEBUG UAF Pair %d:\n", i)
+		fmt.Printf("  FreeAccessName: 0x%016x\n", mayUAFPair.FreeAccessName)
+		fmt.Printf("  UseAccessName:  0x%016x\n", mayUAFPair.UseAccessName)
+		fmt.Printf("  FreeCallStack:  0x%016x\n", mayUAFPair.FreeCallStack)
+		fmt.Printf("  UseCallStack:   0x%016x\n", mayUAFPair.UseCallStack)
+		fmt.Printf("  Signal:         0x%016x\n", mayUAFPair.Signal)
+		fmt.Printf("  TimeDiff:       %d ns\n", mayUAFPair.TimeDiff)
+		fmt.Printf("  FreeSyscallIdx: %d\n", mayUAFPair.FreeSyscallIdx)
+		fmt.Printf("  UseSyscallIdx:  %d\n", mayUAFPair.UseSyscallIdx)
+		fmt.Printf("  FreeSyscallNum: %d\n", mayUAFPair.FreeSyscallNum)
+		fmt.Printf("  UseSyscallNum:  %d\n", mayUAFPair.UseSyscallNum)
+		fmt.Printf("  FreeSN:         %d\n", mayUAFPair.FreeSN)
+		fmt.Printf("  UseSN:          %d\n", mayUAFPair.UseSN)
+		fmt.Printf("  LockType:       %d\n", mayUAFPair.LockType)
+		fmt.Printf("  UseAccessType:  %d\n", mayUAFPair.UseAccessType)
+		fmt.Printf("  StructSize:     %d bytes (expected: %d)\n", uafDataSize, uafDataSize)
+		fmt.Println()
+
+		info.MayUAFPairs[i] = *mayUAFPair
+		*out = (*out)[uafDataSize:]
+	}
+
+	if uafCount > 0 {
+		fmt.Printf("DEBUG parseBasicUAFPairs: Successfully parsed %d UAF pairs\n", uafCount)
+	} else {
+		fmt.Println("DEBUG parseBasicUAFPairs: No UAF pairs to parse")
+	}
+
+	return nil
+}
+
+// parseExtendedRacePairs parses extended race pair data with history
+func (env *Env) parseExtendedRacePairs(out *[]byte, info *PairProgInfo) error {
+	extRaceCount, ok := readUint32(out)
+	if !ok {
+		return fmt.Errorf("failed to read extended race pair count")
+	}
+
+	info.ExtendedRacePairs = make([]ddrd.ExtendedRacePair, extRaceCount)
+
+	// Extended race pair size: basic(84) + history_counts(8) + target_times(16) + variable history size
+	// We need to calculate the actual size based on history counts
+	const extRaceMinSize = 108 // Minimum size without history data
+	for i := uint32(0); i < extRaceCount; i++ {
+		if len(*out) < extRaceMinSize {
+			return fmt.Errorf("extended race pair %v: truncated output, need at least %d bytes but only %d available", i, extRaceMinSize, len(*out))
+		}
+
+		// Calculate actual size by reading the history counts first
+		thread1Count := prog.HostEndian.Uint32((*out)[84:88])
+		thread2Count := prog.HostEndian.Uint32((*out)[88:92])
+		recordSize := uint32(32) // New simplified record size
+		totalHistorySize := recordSize * (thread1Count + thread2Count)
+		actualSize := extRaceMinSize + totalHistorySize
+
+		if len(*out) < int(actualSize) {
+			return fmt.Errorf("extended race pair %v: insufficient data for history, need %d bytes but only %d available", i, actualSize, len(*out))
+		}
+
+		extRacePair, err := parseExtendedRacePair((*out)[:actualSize])
+		if err != nil {
+			return fmt.Errorf("failed to parse extended race pair %d: %w", i, err)
+		}
+
+		info.ExtendedRacePairs[i] = *extRacePair
+		*out = (*out)[actualSize:]
+	}
+	return nil
+}
+
+// parseExtendedUAFPairs parses extended UAF pair data with history
+func (env *Env) parseExtendedUAFPairs(out *[]byte, info *PairProgInfo) error {
+	extUAFCount, ok := readUint32(out)
+	if !ok {
+		return fmt.Errorf("failed to read extended UAF pair count")
+	}
+
+	info.ExtendedUAFPairs = make([]ddrd.ExtendedUAFPair, extUAFCount)
+
+	for i := uint32(0); i < extUAFCount; i++ {
+		// 读取计数信息来计算大小
+		if len(*out) < 8 {
+			return fmt.Errorf("extended UAF pair %v: insufficient data for history counts", i)
+		}
+
+		useCount := prog.HostEndian.Uint32((*out)[0:4])  // 正确偏移
+		freeCount := prog.HostEndian.Uint32((*out)[4:8]) // 正确偏移
+
+		// 计算实际大小
+		recordSize := uint32(32) // serialized_access_record_t = 3×8 + 2×4 = 32字节
+		totalHistorySize := recordSize * (useCount + freeCount)
+		actualSize := 24 + totalHistorySize + 16 // 扩展头部 + 历史 + 路径距离
+
+		if len(*out) < int(actualSize) {
+			return fmt.Errorf("extended UAF pair %v: insufficient data, need %d bytes but only %d available", i, actualSize, len(*out))
+		}
+
+		extUAFPair, err := parseExtendedUAFPair((*out)[:actualSize])
+		if err != nil {
+			return fmt.Errorf("failed to parse extended UAF pair %d: %w", i, err)
+		}
+
+		info.ExtendedUAFPairs[i] = *extUAFPair
+		*out = (*out)[actualSize:]
+	}
+	return nil
 }
 
 // ExecPairOpts holds options for ExecPair execution
@@ -715,8 +1028,8 @@ func (env *Env) ExecPairWithOpts(pairOpts *ExecPairOpts, p1, p2 *prog.Prog) (
 	opts2.Flags |= FlagTestPairSync
 
 	if pairOpts.EnableRaceCollection {
-		opts1.Flags |= FlagCollectRace
-		opts2.Flags |= FlagCollectRace
+		opts1.Flags |= FlagCollectRace | FlagCollectUAF
+		opts2.Flags |= FlagCollectRace | FlagCollectUAF
 	}
 
 	// Use the unified ExecPair implementation
@@ -864,18 +1177,16 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 		if len(out) < int(unsafe.Sizeof(callReply{})) {
 			return nil, fmt.Errorf("failed to read call %v reply", i)
 		}
-		
+
 		// Try to find correct reply position by searching for correct magic
-		originalOut := out
 		reply := *(*callReply)(unsafe.Pointer(&out[0]))
-		correctReplyFound := false
 		searchOffset := 0
-		
+
 		if reply.magic != outMagic {
 			fmt.Fprintf(os.Stderr, "DEBUG: Bad reply magic detected at call %d!\n", i)
 			fmt.Fprintf(os.Stderr, "  Expected magic: 0x%x\n", outMagic)
 			fmt.Fprintf(os.Stderr, "  Actual magic: 0x%x\n", reply.magic)
-			
+
 			// Search forward 4 bytes at a time for the correct magic
 			maxSearchBytes := 64 // Limit search to 64 bytes to avoid infinite loop
 			for searchOffset = 4; searchOffset < maxSearchBytes && searchOffset < len(out)-int(unsafe.Sizeof(callReply{})); searchOffset += 4 {
@@ -883,37 +1194,11 @@ func (env *Env) parseOutput(p *prog.Prog, opts *ExecOpts) (*ProgInfo, error) {
 				if testReply.magic == outMagic {
 					fmt.Fprintf(os.Stderr, "  Found correct magic at offset %d bytes\n", searchOffset)
 					reply = testReply
-					correctReplyFound = true
 					break
 				}
 			}
-			
-			if !correctReplyFound {
-				fmt.Fprintf(os.Stderr, "  Could not find correct magic within %d bytes\n", maxSearchBytes)
-				fmt.Fprintf(os.Stderr, "  Call reply %d details:\n", i)
-				fmt.Fprintf(os.Stderr, "    magic: 0x%x\n", reply.magic)
-				fmt.Fprintf(os.Stderr, "    index: %d\n", reply.index)
-				fmt.Fprintf(os.Stderr, "    num: %d\n", reply.num)
-				fmt.Fprintf(os.Stderr, "    errno: %d\n", reply.errno)
-				fmt.Fprintf(os.Stderr, "    flags: 0x%x\n", reply.flags)
-				fmt.Fprintf(os.Stderr, "    startTimeLow: 0x%x\n", reply.startTimeLow)
-				fmt.Fprintf(os.Stderr, "    startTimeHigh: 0x%x\n", reply.startTimeHigh)
-				fmt.Fprintf(os.Stderr, "    endTimeLow: 0x%x\n", reply.endTimeLow)
-				fmt.Fprintf(os.Stderr, "    endTimeHigh: 0x%x\n", reply.endTimeHigh)
-				fmt.Fprintf(os.Stderr, "    signalSize: %d\n", reply.signalSize)
-				fmt.Fprintf(os.Stderr, "    coverSize: %d\n", reply.coverSize)
-				fmt.Fprintf(os.Stderr, "    compsSize: %d\n", reply.compsSize)
-				fmt.Fprintf(os.Stderr, "  Raw bytes at reply position (first 64 bytes):\n")
-				rawBytes := (*[64]byte)(unsafe.Pointer(&originalOut[0]))
-				for j := 0; j < 64 && j < len(rawBytes) && j < len(originalOut); j += 8 {
-					fmt.Fprintf(os.Stderr, "    %02d: %02x %02x %02x %02x %02x %02x %02x %02x\n", 
-						j, rawBytes[j], rawBytes[j+1], rawBytes[j+2], rawBytes[j+3],
-						rawBytes[j+4], rawBytes[j+5], rawBytes[j+6], rawBytes[j+7])
-				}
-				return nil, fmt.Errorf("bad reply magic 0x%x at call %d, could not recover", reply.magic, i)
-			}
 		}
-		
+
 		// Adjust the output buffer position based on search offset
 		out = out[searchOffset:]
 		out = out[unsafe.Sizeof(callReply{}):]
@@ -1134,6 +1419,9 @@ const (
 	inRaceValidationMagic  = uint64(0xbadc0ffeebadfade) // Magic for race validation requests
 	outMagic               = uint32(0xbadf00d)
 	outPairMagic           = uint32(0xbadfeed)
+	outUAFMagic            = uint32(0xbadfaad) // Basic UAF info
+	outExtendedPairMagic   = uint32(0xbadface) // Extended race info magic
+	outExtendedUAFMagic    = uint32(0xbadf00d) // Extended UAF info magic
 	outRaceValidationMagic = uint32(0xbadfa1d)
 )
 
@@ -1587,8 +1875,35 @@ func (c *command) execRaceValidation(opts *RaceValidationOpts, prog1Data, prog2D
 	}
 
 	if exitStatus == 0 {
-		// Pair execution was OK.
+		// Pair execution was OK - now parse race/UAF data
+		close(done)
 		<-hang
+
+		// Get the executor output data
+		output = <-c.readDone
+
+		// Parse race/UAF data from executor output
+		if len(output) > 0 {
+			races, uafs, extRaces, extUAFs, parseErr := parseRaceUAFData(output)
+			if parseErr != nil {
+				// Log parsing errors but don't fail the validation
+				log.Logf(1, "executor %v: failed to parse race/UAF data: %v", c.pid, parseErr)
+			} else {
+				// Log parsed data for debugging
+				if len(races) > 0 {
+					log.Logf(1, "executor %v: parsed %d basic race pairs", c.pid, len(races))
+				}
+				if len(uafs) > 0 {
+					log.Logf(1, "executor %v: parsed %d UAF pairs", c.pid, len(uafs))
+				}
+				if len(extRaces) > 0 {
+					log.Logf(1, "executor %v: parsed %d extended race pairs", c.pid, len(extRaces))
+				}
+				if len(extUAFs) > 0 {
+					log.Logf(1, "executor %v: parsed %d extended UAF pairs", c.pid, len(extUAFs))
+				}
+			}
+		}
 		return
 	}
 
@@ -1616,4 +1931,169 @@ func (c *command) execRaceValidation(opts *RaceValidationOpts, prog1Data, prog2D
 		err0 = fmt.Errorf("executor %v: validate exit status %d err %w\n%s", c.pid, exitStatus, err, output)
 	}
 	return
+}
+
+// parseBasicRacePairs parses multiple basic race pairs from data
+func parseBasicRacePairs(data []byte) ([]ddrd.MayRacePair, int, error) {
+	var pairs []ddrd.MayRacePair
+	offset := 0
+
+	// First 4 bytes should be count
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("insufficient data for race pair count")
+	}
+
+	count := prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+
+	for i := uint32(0); i < count; i++ {
+		if offset+84 > len(data) {
+			return nil, offset, fmt.Errorf("insufficient data for race pair %d", i)
+		}
+
+		pair, err := parseMayRacePair(data[offset:])
+		if err != nil {
+			return nil, offset, fmt.Errorf("failed to parse race pair %d: %w", i, err)
+		}
+
+		pairs = append(pairs, *pair)
+		offset += 84
+	}
+
+	return pairs, offset, nil
+}
+
+// parseExtendedRacePairs parses multiple extended race pairs from data
+func parseExtendedRacePairs(data []byte) ([]ddrd.ExtendedRacePair, int, error) {
+	var pairs []ddrd.ExtendedRacePair
+	offset := 0
+
+	// First 4 bytes should be count
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("insufficient data for extended race pair count")
+	}
+
+	count := prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+
+	for i := uint32(0); i < count; i++ {
+		if offset+380 > len(data) {
+			return nil, offset, fmt.Errorf("insufficient data for extended race pair %d", i)
+		}
+
+		pair, err := parseExtendedRacePair(data[offset:])
+		if err != nil {
+			return nil, offset, fmt.Errorf("failed to parse extended race pair %d: %w", i, err)
+		}
+
+		pairs = append(pairs, *pair)
+		offset += 380
+	}
+
+	return pairs, offset, nil
+}
+
+// parseExtendedUAFPairs parses multiple extended UAF pairs from data
+func parseExtendedUAFPairs(data []byte) ([]ddrd.ExtendedUAFPair, int, error) {
+	var pairs []ddrd.ExtendedUAFPair
+	offset := 0
+
+	// First 4 bytes should be count
+	if len(data) < 4 {
+		return nil, 0, fmt.Errorf("insufficient data for extended UAF pair count")
+	}
+
+	count := prog.HostEndian.Uint32(data[offset:])
+	offset += 4
+
+	for i := uint32(0); i < count; i++ {
+		if offset+380 > len(data) {
+			return nil, offset, fmt.Errorf("insufficient data for extended UAF pair %d", i)
+		}
+
+		pair, err := parseExtendedUAFPair(data[offset:])
+		if err != nil {
+			return nil, offset, fmt.Errorf("failed to parse extended UAF pair %d: %w", i, err)
+		}
+
+		pairs = append(pairs, *pair)
+		offset += 380
+	}
+
+	return pairs, offset, nil
+}
+
+// parseRaceUAFData parses race and UAF data from executor output
+func parseRaceUAFData(output []byte) (races []ddrd.MayRacePair, uafs []ddrd.MayUAFPair,
+	extRaces []ddrd.ExtendedRacePair, extUAFs []ddrd.ExtendedUAFPair, err error) {
+
+	offset := 0
+	for offset < len(output) {
+		if offset+4 > len(output) {
+			break
+		}
+
+		// Read magic number
+		magic := prog.HostEndian.Uint32(output[offset:])
+		offset += 4
+
+		switch magic {
+		case outPairMagic:
+			// Basic race pair data
+			basicRaces, consumed, parseErr := parseBasicRacePairs(output[offset:])
+			if parseErr != nil {
+				return races, uafs, extRaces, extUAFs, fmt.Errorf("failed to parse basic race pairs: %w", parseErr)
+			}
+			races = append(races, basicRaces...)
+			offset += consumed
+
+		case outExtendedPairMagic:
+			// Extended race pair data
+			extendedRaces, consumed, parseErr := parseExtendedRacePairs(output[offset:])
+			if parseErr != nil {
+				return races, uafs, extRaces, extUAFs, fmt.Errorf("failed to parse extended race pairs: %w", parseErr)
+			}
+			extRaces = append(extRaces, extendedRaces...)
+			offset += consumed
+
+		case outExtendedUAFMagic:
+			// Extended UAF pair data
+			extendedUAFs, consumed, parseErr := parseExtendedUAFPairs(output[offset:])
+			if parseErr != nil {
+				return races, uafs, extRaces, extUAFs, fmt.Errorf("failed to parse extended UAF pairs: %w", parseErr)
+			}
+			extUAFs = append(extUAFs, extendedUAFs...)
+			offset += consumed
+
+		default:
+			// Unknown magic number, try to skip or break
+			log.Logf(1, "executor: unknown magic number 0x%x at offset %d", magic, offset-4)
+			// Try to find next valid magic number
+			foundNext := false
+			for searchOffset := offset; searchOffset < len(output)-4; searchOffset++ {
+				searchMagic := prog.HostEndian.Uint32(output[searchOffset:])
+				if searchMagic == outPairMagic || searchMagic == outExtendedPairMagic || searchMagic == outExtendedUAFMagic {
+					offset = searchOffset
+					foundNext = true
+					break
+				}
+			}
+			if !foundNext {
+				// No more valid magic numbers found
+				break
+			}
+		}
+	}
+
+	return races, uafs, extRaces, extUAFs, nil
+}
+
+// ParseExecutorOutput parses executor output and returns basic and extended race/UAF data
+func ParseExecutorOutput(output []byte) ([]ddrd.MayRacePair, []ddrd.MayUAFPair, []ddrd.ExtendedRacePair, []ddrd.ExtendedUAFPair) {
+	races, uafs, extRaces, extUAFs, err := parseRaceUAFData(output)
+	if err != nil {
+		// Log error but don't fail - return what we can parse
+		return races, uafs, extRaces, extUAFs
+	}
+	return races, uafs, extRaces, extUAFs
 }

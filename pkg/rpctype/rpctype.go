@@ -28,32 +28,34 @@ type Candidate struct {
 	Smashed   bool
 }
 
-// PairCandidate represents a pair of candidates for race testing
+// PairCandidate represents a pair of candidates for UAF testing
 type PairCandidate struct {
 	Prog1  []byte
 	Prog2  []byte
 	PairID uint64 // unique identifier for this pair
 }
 
-// ===============DDRD====================
-// RacePairInput represents a race pair discovered by a fuzzer
-type RacePairInput struct {
-	PairID uint64 // pair标识，使用哈希
-	Prog1  []byte // 程序1的序列化数据
-	Prog2  []byte // 程序2的序列化数据
-	Signal []byte // 关联的race signal (ddrd.Serial)
-	Races  []byte // 发现的races (序列化的[]ddrd.MayRacePair)
+// UAFPairInput represents a UAF pair discovered by a fuzzer
+type UAFPairInput struct {
+	PairID           uint64 // pair标识，使用哈希
+	Prog1            []byte // 程序1的序列化数据
+	Prog2            []byte // 程序2的序列化数据
+	Signal           []byte // 关联的UAF signal (ddrd.Serial)
+	UAFs             []byte // 发现的UAFs (序列化的[]ddrd.MayUAFPair)
+	LogPath          string // path to log file for reproduction (optional)
+	Output           []byte // 控制台输出，类似crash.Output，用于调试和分析
+	ExecutionContext []byte // 执行序列上下文，序列化的[]vmexec.ExecutionRecord
 }
 
-// NewRacePairArgs represents arguments for sending race pairs to manager
-type NewRacePairArgs struct {
+// NewUAFPairArgs represents arguments for sending UAF pairs to manager
+type NewUAFPairArgs struct {
 	Name string
-	Pair RacePairInput
+	Pair UAFPairInput
 }
 
-// NewRacePairRes represents response for race pair submission
-type NewRacePairRes struct {
-	Accepted bool `json:"accepted"` // Whether the race pair was accepted by manager
+// NewUAFPairRes represents response for UAF pair submission
+type NewUAFPairRes struct {
+	Accepted bool `json:"accepted"` // Whether the UAF pair was accepted by manager
 }
 
 // ===============DDRD====================
@@ -105,7 +107,7 @@ type PollArgs struct {
 	NeedCandidates bool
 	MaxSignal      signal.Serial
 	// ===============DDRD====================
-	MaxRaceSignal []byte // ddrd.Serial (避免循环导入，使用[]byte)
+	MaxUAFSignal []byte // ddrd.Serial (避免循环导入，使用[]byte)
 	// ===============DDRD====================
 	Stats map[string]uint64
 }
@@ -115,8 +117,8 @@ type PollRes struct {
 	NewInputs  []Input
 	MaxSignal  signal.Serial
 	// ===============DDRD====================
-	NewRacePairs  []RacePairInput // 新发现的race pair分发
-	MaxRaceSignal []byte          // 全局race signal (ddrd.Serial)
+	NewUAFPairs  []UAFPairInput // 新发现的UAF pair分发
+	MaxUAFSignal []byte         // 全局UAF signal (ddrd.Serial)
 	// ===============DDRD====================
 }
 
@@ -253,8 +255,8 @@ type LogMessageReq struct {
 }
 
 // ===============DDRD====================
-// RPC structures for race pair management
-// Note: Main race pair structures are defined above
+// RPC structures for UAF pair management
+// Note: Main UAF pair structures are defined above
 
 // ===============DDRD====================
 // RPC structures for mode transition synchronization

@@ -52,7 +52,7 @@ const (
 )
 
 const (
-	ExecBufferSize = 4 << 20 // keep in sync with kMaxInput in executor.cc
+	ExecBufferSize = 32 << 20 // keep in sync with kMaxInput in executor.cc
 	ExecNoCopyout  = ^uint64(0)
 
 	execMaxCommands = 1000 // executor knows about this constant (kMaxCommands)
