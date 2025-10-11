@@ -37,13 +37,15 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 			if (has_current) {
 				// debug("Saving previous record: type='%c', locks=%d\n", current_record.access_type, current_record.lock_count);
 				
-				// 添加到线程历史
-				ThreadAccessHistory* thread_history = access_context_find_thread(record_ctx, current_record.tid);
-				if (!thread_history) {
-					thread_history = access_context_create_thread_history(record_ctx, current_record.tid);
-				}
-				if (thread_history) {
-					add_access_to_history(thread_history, &current_record);
+				// 添加到线程历史（仅当功能启用时）
+				if (record_ctx->enable_history) {
+					ThreadAccessHistory* thread_history = access_context_find_thread(record_ctx, current_record.tid);
+					if (!thread_history) {
+						thread_history = access_context_create_thread_history(record_ctx, current_record.tid);
+					}
+					if (thread_history) {
+						add_access_to_history(thread_history, &current_record);
+					}
 				}
 				
 				if (current_record.access_type == 'F') {
@@ -91,13 +93,15 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 	if (has_current) {
 		// debug("Saving final record: type='%c', locks=%d\n", current_record.access_type, current_record.lock_count);
 		
-		// 添加到线程历史
-		ThreadAccessHistory* thread_history = access_context_find_thread(record_ctx, current_record.tid);
-		if (!thread_history) {
-			thread_history = access_context_create_thread_history(record_ctx, current_record.tid);
-		}
-		if (thread_history) {
-			add_access_to_history(thread_history, &current_record);
+		// 添加到线程历史（仅当功能启用时）
+		if (record_ctx->enable_history) {
+			ThreadAccessHistory* thread_history = access_context_find_thread(record_ctx, current_record.tid);
+			if (!thread_history) {
+				thread_history = access_context_create_thread_history(record_ctx, current_record.tid);
+			}
+			if (thread_history) {
+				add_access_to_history(thread_history, &current_record);
+			}
 		}
 		
 		if (current_record.access_type == 'F' && free_count < max_frees) {

@@ -71,6 +71,11 @@ ThreadAccessHistory* race_detector_find_thread_history(RaceDetector* detector, i
 ThreadAccessHistory* race_detector_create_thread_history(RaceDetector* detector, int tid);
 void race_detector_add_access_to_history(RaceDetector* detector, int tid, const AccessRecord* access);
 
+// 历史记录功能控制
+void race_detector_enable_history(RaceDetector* detector);
+void race_detector_disable_history(RaceDetector* detector);
+bool race_detector_is_history_enabled(RaceDetector* detector);
+
 // 辅助计算方法
 int race_detector_calculate_path_distance(const AccessRecord* target, const AccessRecord* current);
 double race_detector_calculate_delay_probability(int distance);

@@ -53,6 +53,7 @@ typedef struct {
     ThreadAccessHistory* thread_histories; // 线程访问历史（动态分配）
     int thread_count;           // 活跃线程数量
     int max_threads;            // 最大线程数量
+    bool enable_history;        // 是否启用线程访问历史记录功能
 } AccessContext;
 int access_context_init_from_buffer(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees);
 ThreadAccessHistory* access_context_find_thread(AccessContext* ctx, int tid);

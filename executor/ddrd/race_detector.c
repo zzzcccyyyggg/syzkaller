@@ -52,6 +52,7 @@ void race_detector_init(RaceDetector* detector) {
     detector->context.thread_histories = NULL;
     detector->context.record_count = 0;
     detector->context.free_count = 0;
+    detector->context.enable_history = true;  // 默认启用历史记录功能
     
     debug("Initializing race detector...\n");
     
@@ -207,7 +208,7 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
         }
     }
     
-    if (!detector->context.thread_histories) {
+    if (!detector->context.thread_histories && detector->context.enable_history) {
         detector->context.thread_histories = calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
         if (!detector->context.thread_histories) {
             free(buffer);
@@ -284,6 +285,24 @@ double race_detector_calculate_delay_probability(int distance) {
     }
     
     return 1.0 / (distance + 1);
+}
+
+// ================== 历史记录功能控制方法 ==================
+void race_detector_enable_history(RaceDetector* detector) {
+    if (!detector) return;
+    detector->context.enable_history = true;
+    debug("Thread access history tracking enabled\n");
+}
+
+void race_detector_disable_history(RaceDetector* detector) {
+    if (!detector) return;
+    detector->context.enable_history = false;
+    debug("Thread access history tracking disabled\n");
+}
+
+bool race_detector_is_history_enabled(RaceDetector* detector) {
+    if (!detector) return false;
+    return detector->context.enable_history;
 }
 int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector,
                                                          may_uaf_pair_t* uaf_buffer, int max_uaf_pairs) {
