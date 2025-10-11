@@ -340,7 +340,7 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector,
     for (basic_count = 0; basic_count < uaf_pair_count && basic_count < max_uaf_pairs; basic_count++) {
         UAFPair* uaf_pair = &uaf_pairs[basic_count];
         
-        uaf_buffer[basic_count].free_access_name = uaf_pair->use_access.var_name;
+        uaf_buffer[basic_count].free_access_name = uaf_pair->free_access.var_name;
         uaf_buffer[basic_count].use_access_name = uaf_pair->use_access.var_name;
         uaf_buffer[basic_count].free_call_stack = uaf_pair->free_access.call_stack_hash;
         uaf_buffer[basic_count].use_call_stack = uaf_pair->use_access.call_stack_hash;
@@ -416,7 +416,7 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
     for (basic_count = 0; basic_count < uaf_pair_count && basic_count < max_uaf_pairs; basic_count++) {
         UAFPair* uaf_pair = &uaf_pairs[basic_count];
         
-        uaf_buffer[basic_count].free_access_name = uaf_pair->use_access.var_name;
+        uaf_buffer[basic_count].free_access_name = uaf_pair->free_access.var_name;
         uaf_buffer[basic_count].use_access_name = uaf_pair->use_access.var_name;
         uaf_buffer[basic_count].free_call_stack = uaf_pair->free_access.call_stack_hash;
         uaf_buffer[basic_count].use_call_stack = uaf_pair->use_access.call_stack_hash;
@@ -694,6 +694,12 @@ int race_detector_analyze_and_generate_extended_uaf_infos(RaceDetector* detector
 SyscallTimeRecord* find_matching_syscall(uint64_t access_time, int tid)
 {
 	struct PairSyscallSharedData* pair_shared_data = get_pair_shared_data();
+	
+	// 必须先检查shared_data是否可用，否则会导致SIGSEGV
+	if (!pair_shared_data) {
+		return NULL;
+	}
+	
 	// 检查prog1的syscalls - 优化：先检查第一个syscall的thread_id来确定是否属于这个程序
 	if (pair_shared_data->prog1_syscall_count > 0) {
 		if (tid == pair_shared_data->prog1_syscalls[0].thread_id) {

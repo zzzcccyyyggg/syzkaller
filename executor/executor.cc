@@ -1200,7 +1200,6 @@ void execute_pair(const execute_pair_req& req)
 	// Clear previous pair syscall timing records for this execution
 	clear_pair_syscall_timing();
 	race_detector_reset(&race_detector);
-	cleanup_pair_syscall_shared_memory();
 
 	// For true race detection, we need concurrent execution using fork()
 	// This allows both programs to run simultaneously and potentially interact
@@ -1339,7 +1338,14 @@ void execute_pair(const execute_pair_req& req)
 		}
 	}
 #endif
+	debug("[%llums] execute_pair: about to call reply_execute_pair with status=%d\n",
+	      current_time_ms() - start_time_ms, final_status);
 	reply_execute_pair(final_status);
+	debug("[%llums] execute_pair: reply_execute_pair returned successfully\n",
+	      current_time_ms() - start_time_ms);
+	
+	// Clean up shared memory after reply is sent
+	cleanup_pair_syscall_shared_memory();
 }
 
 static void collect_and_output_race_data(){
@@ -1936,12 +1942,22 @@ void reply_execute(int status)
 
 void reply_execute_pair(int status)
 {
+	debug("[%llums] reply_execute_pair: preparing to send reply, status=%d\n", 
+	      current_time_ms() - start_time_ms, status);
 	execute_reply reply = {};
 	reply.magic = kOutPairMagic;
 	reply.done = true;
 	reply.status = status;
-	if (write(kOutPipeFd, &reply, sizeof(reply)) != sizeof(reply))
+	debug("[%llums] reply_execute_pair: writing to pipe, magic=0x%x, done=%d, status=%d\n",
+	      current_time_ms() - start_time_ms, reply.magic, reply.done, reply.status);
+	ssize_t written = write(kOutPipeFd, &reply, sizeof(reply));
+	if (written != sizeof(reply)) {
+		debug("[%llums] reply_execute_pair: write failed! written=%ld, expected=%zu, errno=%d\n",
+		      current_time_ms() - start_time_ms, (long)written, sizeof(reply), errno);
 		fail("control pipe write failed");
+	}
+	debug("[%llums] reply_execute_pair: successfully sent reply\n", 
+	      current_time_ms() - start_time_ms);
 }
 #if SYZ_EXECUTOR_USES_SHMEM
 void realloc_output_data()

@@ -1421,7 +1421,7 @@ const (
 	outPairMagic           = uint32(0xbadfeed)
 	outUAFMagic            = uint32(0xbadfaad) // Basic UAF info
 	outExtendedPairMagic   = uint32(0xbadface) // Extended race info magic
-	outExtendedUAFMagic    = uint32(0xbadf00d) // Extended UAF info magic
+	outExtendedUAFMagic    = uint32(0xbadfeee) // Extended UAF info magic
 	outRaceValidationMagic = uint32(0xbadfa1d)
 )
 
