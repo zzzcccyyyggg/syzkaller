@@ -52,7 +52,7 @@ void race_detector_init(RaceDetector* detector) {
     detector->context.thread_histories = NULL;
     detector->context.record_count = 0;
     detector->context.free_count = 0;
-    detector->context.enable_history = true;  // 默认启用历史记录功能
+    detector->context.enable_history = false;  // 默认禁用历史记录功能
     
     debug("Initializing race detector...\n");
     

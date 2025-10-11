@@ -509,7 +509,7 @@ const uint32 kOutMagic = 0xbadf00d;
 // ===============DDRD====================
 const uint32 kOutPairMagic = 0xbadfeed;
 const uint32 kOutUAFMagic = 0xbadfaad;
-const uint32 kOutExtendedUAFMagic = 0xbadf00d; // 扩展UAF信息魔数
+const uint32 kOutExtendedUAFMagic = 0xbadfeee; // 扩展UAF信息魔数（修改为唯一值）
 const uint64 kInPairMagic = 0xbadc0ffeebadfa0e; // Different magic for pair requests
 const uint64 kRaceValidationInMagic = 0xbadc0ffeebadfade;
 // const uint32 kRaceValidationOutMagic = 0xbadfa1d;
@@ -1108,6 +1108,7 @@ void receive_execute_pair_internal(const execute_pair_req& req)
 	flag_comparisons = false;
 	flag_threaded = false;
 	flag_coverage_filter = false;
+	flag_collect_extended = false;
 	flag_collect_race = req.exec_flags1 & (1 << 6);
 	flag_test_pair_sync = req.exec_flags1 & (1 << 7);
 	flag_collect_uaf = req.exec_flags1 & (1 << 8);   
