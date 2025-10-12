@@ -1394,7 +1394,7 @@ func (mgr *Manager) addNewCandidates(candidates []rpctype.Candidate) {
 
 // generatePairCandidates creates pair candidates from current candidates
 func (mgr *Manager) generatePairCandidates() {
-	if len(mgr.candidates) < 2 {
+	if len(mgr.candidates) == 0 {
 		return
 	}
 
@@ -1406,10 +1406,22 @@ func (mgr *Manager) generatePairCandidates() {
 		startIndex = len(mgr.candidates) - 1000 // only use last 1000 candidates for pairing
 	}
 
+	// Track existing PairIDs to avoid duplicates
+	existingPairs := make(map[uint64]bool)
+	for _, pair := range mgr.pairCandidates {
+		existingPairs[pair.PairID] = true
+	}
+
 	pairsGenerated := 0
+	// Generate pairs: i with j where j >= i (allowing self-pairing when i==j)
 	for i := startIndex; i < len(mgr.candidates) && pairsGenerated < maxNewPairs; i++ {
-		for j := i + 1; j < len(mgr.candidates) && pairsGenerated < maxNewPairs; j++ {
+		for j := i; j < len(mgr.candidates) && pairsGenerated < maxNewPairs; j++ {
 			pairID := ddrd.GeneratePairID(mgr.candidates[i].Prog, mgr.candidates[j].Prog)
+
+			// Skip if this pair already exists
+			if existingPairs[pairID] {
+				continue
+			}
 
 			pair := rpctype.PairCandidate{
 				Prog1:  mgr.candidates[i].Prog,
@@ -1418,12 +1430,14 @@ func (mgr *Manager) generatePairCandidates() {
 			}
 
 			mgr.pairCandidates = append(mgr.pairCandidates, pair)
+			existingPairs[pairID] = true
 			pairsGenerated++
 		}
 	}
 
 	if pairsGenerated > 0 {
-		log.Logf(1, "generated %d pair candidates from %d candidates", pairsGenerated, len(mgr.candidates))
+		log.Logf(1, "generated %d pair candidates from %d candidates (including self-pairs)",
+			pairsGenerated, len(mgr.candidates))
 	}
 }
 
@@ -1451,21 +1465,52 @@ func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate 
 
 	var res []rpctype.PairCandidate
 
-	// First, provide race pair candidates (high priority)
-	for i := 0; i < size && len(mgr.raceCorpusCandidates) > 0; i++ {
-		last := len(mgr.raceCorpusCandidates) - 1
-		res = append(res, mgr.raceCorpusCandidates[last])
-		mgr.raceCorpusCandidates[last] = rpctype.PairCandidate{} // clear for GC
-		mgr.raceCorpusCandidates = mgr.raceCorpusCandidates[:last]
+	// First, provide race pair candidates (high priority) - randomly selected
+	if size > 0 && len(mgr.raceCorpusCandidates) > 0 {
+		count := min(size, len(mgr.raceCorpusCandidates))
+
+		// Use Fisher-Yates shuffle to randomly select 'count' elements
+		for i := 0; i < count; i++ {
+			// Pick a random index from [i, len-1]
+			randIdx := i + rand.Intn(len(mgr.raceCorpusCandidates)-i)
+
+			// Add the selected candidate to result
+			res = append(res, mgr.raceCorpusCandidates[randIdx])
+
+			// Move the selected element to position i and mark for removal
+			mgr.raceCorpusCandidates[randIdx] = mgr.raceCorpusCandidates[i]
+		}
+
+		// Clear selected candidates from the slice
+		for i := 0; i < count; i++ {
+			mgr.raceCorpusCandidates[i] = rpctype.PairCandidate{} // clear for GC
+		}
+		mgr.raceCorpusCandidates = mgr.raceCorpusCandidates[count:]
 	}
 
-	// If still need more pairs, use generated pair candidates
+	// If still need more pairs, use generated pair candidates (randomly)
 	remaining := size - len(res)
-	for i := 0; i < remaining && len(mgr.pairCandidates) > 0; i++ {
-		last := len(mgr.pairCandidates) - 1
-		res = append(res, mgr.pairCandidates[last])
-		mgr.pairCandidates[last] = rpctype.PairCandidate{} // clear for GC
-		mgr.pairCandidates = mgr.pairCandidates[:last]
+	if remaining > 0 && len(mgr.pairCandidates) > 0 {
+		// Randomly shuffle and select
+		count := min(remaining, len(mgr.pairCandidates))
+
+		// Use Fisher-Yates shuffle to randomly select 'count' elements
+		for i := 0; i < count; i++ {
+			// Pick a random index from [i, len-1]
+			randIdx := i + rand.Intn(len(mgr.pairCandidates)-i)
+
+			// Add the selected candidate to result
+			res = append(res, mgr.pairCandidates[randIdx])
+
+			// Move the selected element to position i and mark for removal
+			mgr.pairCandidates[randIdx] = mgr.pairCandidates[i]
+		}
+
+		// Clear selected candidates from the slice
+		for i := 0; i < count; i++ {
+			mgr.pairCandidates[i] = rpctype.PairCandidate{} // clear for GC
+		}
+		mgr.pairCandidates = mgr.pairCandidates[count:]
 	}
 
 	// log.Logf(2, "getPriorityPairCandidates: returning %d pairs (%d race, %d generated), %d race pairs remaining, %d generated pairs remaining",
@@ -1636,7 +1681,7 @@ func (mgr *Manager) loadUAFCorpus() {
 				mgr.maxUAFSignal.Merge(*uafSignal)
 				newSignalLen := len(mgr.maxUAFSignal)
 				mgr.uafSignalMu.Unlock()
-				log.Logf(1, "Merged UAF signal for item %s: added %d signals (total: %d -> %d)", 
+				log.Logf(1, "Merged UAF signal for item %s: added %d signals (total: %d -> %d)",
 					key, len(*uafSignal), oldSignalLen, newSignalLen)
 			} else {
 				log.Logf(0, "Failed to deserialize UAF signal for item %s: %v", key, err)
@@ -1732,7 +1777,7 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 	var executionContextData []byte
 	if args.Pair.ExecutionContext != nil {
 		executionContextData = args.Pair.ExecutionContext
-		log.Logf(2, "Using pre-serialized execution context for UAF pair %x (%d bytes)", 
+		log.Logf(2, "Using pre-serialized execution context for UAF pair %x (%d bytes)",
 			args.Pair.PairID, len(executionContextData))
 	}
 
@@ -1971,7 +2016,7 @@ func deserializeUAFSignal(data []byte) (*ddrd.UAFSignal, error) {
 	if len(data) == 0 {
 		return nil, nil
 	}
-	
+
 	// First try to deserialize as ddrd.Serial (JSON object format)
 	var serial ddrd.Serial
 	if err := json.Unmarshal(data, &serial); err == nil {
@@ -1982,7 +2027,7 @@ func deserializeUAFSignal(data []byte) (*ddrd.UAFSignal, error) {
 		uafSignal := ddrd.FromRawUAF(rawSignal, 0)
 		return &uafSignal, nil
 	}
-	
+
 	// Fallback: try to deserialize as []uint64 array (legacy format)
 	var rawSignal []uint64
 	if err := json.Unmarshal(data, &rawSignal); err != nil {
