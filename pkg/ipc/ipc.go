@@ -798,7 +798,7 @@ func (env *Env) parsePairOutput(_, _ *prog.Prog) (*PairProgInfo, error) {
 
 		case outUAFMagic:
 			// Parse basic UAF pairs
-			fmt.Printf("DEBUG parsePairOutput: parsing basic UAF pairs\n")
+			// fmt.Printf("DEBUG parsePairOutput: parsing basic UAF pairs\n")
 			err := env.parseBasicUAFPairs(&out, info)
 			if err != nil {
 				return nil, fmt.Errorf("failed to parse basic UAF pairs: %w", err)
@@ -825,8 +825,8 @@ func (env *Env) parsePairOutput(_, _ *prog.Prog) (*PairProgInfo, error) {
 		}
 	}
 
-	fmt.Printf("DEBUG parsePairOutput: successfully parsed race_pairs=%d, uaf_pairs=%d, extended_info=%v\n",
-		len(info.MayRacePairs), len(info.MayUAFPairs), info.HasExtendedInfo)
+	// fmt.Printf("DEBUG parsePairOutput: successfully parsed race_pairs=%d, uaf_pairs=%d, extended_info=%v\n",
+	// 	len(info.MayRacePairs), len(info.MayUAFPairs), info.HasExtendedInfo)
 	return info, nil
 }
 
@@ -860,7 +860,7 @@ func (env *Env) parseBasicRacePairs(out *[]byte, info *PairProgInfo) error {
 // parseBasicUAFPairs parses basic UAF pair data
 func (env *Env) parseBasicUAFPairs(out *[]byte, info *PairProgInfo) error {
 	uafCount, ok := readUint32(out)
-	fmt.Printf("DEBUG parseBasicUAFPairs: UAF pair count = %d\n", uafCount)
+	// fmt.Printf("DEBUG parseBasicUAFPairs: UAF pair count = %d\n", uafCount)
 	if !ok {
 		return fmt.Errorf("failed to read UAF pair count")
 	}
@@ -900,12 +900,6 @@ func (env *Env) parseBasicUAFPairs(out *[]byte, info *PairProgInfo) error {
 
 		info.MayUAFPairs[i] = *mayUAFPair
 		*out = (*out)[uafDataSize:]
-	}
-
-	if uafCount > 0 {
-		fmt.Printf("DEBUG parseBasicUAFPairs: Successfully parsed %d UAF pairs\n", uafCount)
-	} else {
-		fmt.Println("DEBUG parseBasicUAFPairs: No UAF pairs to parse")
 	}
 
 	return nil

@@ -584,12 +584,12 @@ func (proc *Proc) executeTestPair(opts1, opts2 *ipc.ExecOpts, p1, p2 *prog.Prog,
 	// ===============DDRD====================
 	// Use the same concurrency control as normal execution to prevent
 	// shared memory conflicts between concurrent ExecPair calls
-	log.Logf(0, "proc %d: about to acquire gate ticket (env=%p)", proc.pid, proc.env)
+	// log.Logf(0, "proc %d: about to acquire gate ticket (env=%p)", proc.pid, proc.env)
 	ticket := proc.fuzzer.gate.Enter()
-	log.Logf(0, "proc %d: acquired gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
+	// log.Logf(0, "proc %d: acquired gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
 	defer func() {
 		proc.fuzzer.gate.Leave(ticket)
-		log.Logf(0, "proc %d: released gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
+		// log.Logf(0, "proc %d: released gate ticket=%d (env=%p)", proc.pid, ticket, proc.env)
 	}()
 
 	// Mark as executing for scheduler tracking
