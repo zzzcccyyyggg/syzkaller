@@ -4,21 +4,19 @@
 package main
 
 import (
+	"encoding/json"
 	"flag"
 	"fmt"
 	"path/filepath"
 	"time"
 
+	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/pkg/racevalidate"
-	"github.com/google/syzkaller/pkg/vmexec"
 )
 
-// ExecutionRecord represents a single VM execution record (from vmexec package)
-type ExecutionRecord vmexec.ExecutionRecord
-
+// UAFCorpusItem represents a UAF corpus item stored in the database.
 // Keep the same with UAFCorpusItem in syz-manager.go
 type UAFCorpusItem struct {
 	PairID           string    `json:"pair_id"`
@@ -46,10 +44,72 @@ var (
 	// Path-distance-aware scheduling options
 	flagPathAware      = flag.Bool("path-aware", false, "enable path-distance-aware scheduling for better race reproduction")
 	flagCollectHistory = flag.Bool("collect-history", false, "collect and use access history for delay injection")
+	// Display options
+	flagShowDetails = flag.Bool("show-details", false, "only display UAF pair details without validation")
+	flagOutput      = flag.String("output", "uaf-validation-results.json", "output file for validation results or UAF details")
 )
 
 func usage() {
 	flag.PrintDefaults()
+}
+
+// showUAFDetails reads and displays UAF pair details without validation
+func showUAFDetails(corpusPath string) error {
+	log.Logf(0, "Reading UAF corpus details from: %s", corpusPath)
+
+	// Open the corpus database file using pkg/db
+	corpusDB, err := db.Open(corpusPath, false)
+	if err != nil {
+		return fmt.Errorf("failed to open corpus database: %v", err)
+	}
+
+	// Iterate through all entries
+	var pairs []UAFCorpusItem
+	for key, record := range corpusDB.Records {
+		var item UAFCorpusItem
+		if err := json.Unmarshal(record.Val, &item); err != nil {
+			log.Logf(1, "Warning: failed to unmarshal item with key %s: %v", key, err)
+			continue
+		}
+		pairs = append(pairs, item)
+	}
+
+	log.Logf(0, "========== UAF Corpus Summary ==========")
+	log.Logf(0, "Total UAF pairs: %d", len(pairs))
+	log.Logf(0, "")
+
+	// Display each UAF pair details
+	for i, pair := range pairs {
+		log.Logf(0, "========== UAF Pair #%d ==========", i+1)
+		log.Logf(0, "Pair ID: %s", pair.PairID)
+		log.Logf(0, "Source: %s", pair.Source)
+		log.Logf(0, "First seen: %s", pair.FirstSeen.Format(time.RFC3339))
+		log.Logf(0, "Last updated: %s", pair.LastUpdated.Format(time.RFC3339))
+		log.Logf(0, "Discovery count: %d", pair.Count)
+		
+		if *flagVerbose {
+			log.Logf(0, "Program 1 size: %d bytes", len(pair.Prog1))
+			log.Logf(0, "Program 2 size: %d bytes", len(pair.Prog2))
+			log.Logf(0, "UAF signal size: %d bytes", len(pair.UAFSignal))
+			log.Logf(0, "UAFs data size: %d bytes", len(pair.UAFs))
+			if pair.LogPath != "" {
+				log.Logf(0, "Log path: %s", pair.LogPath)
+			}
+			if len(pair.Output) > 0 {
+				outputPreview := string(pair.Output)
+				if len(outputPreview) > 200 {
+					outputPreview = outputPreview[:200] + "..."
+				}
+				log.Logf(0, "Output preview: %s", outputPreview)
+			}
+		}
+		log.Logf(0, "")
+	}
+
+	log.Logf(0, "========== Summary ==========")
+	log.Logf(0, "Displayed %d UAF pairs", len(pairs))
+
+	return nil
 }
 
 // runUAFValidation executes the complete UAF validation pipeline
@@ -58,67 +118,11 @@ func runUAFValidation(cfg *mgrconfig.Config, corpusPath string) error {
 	log.Logf(0, "Configuration: config=%s, corpus=%s", *flagConfig, corpusPath)
 	log.Logf(0, "Parameters: count=%d, attempts=%d, verbose=%v", *flagCount, *flagAttempts, *flagVerbose)
 
-	// Import racevalidate package functionality
-	return runUAFValidationWithRaceValidate(cfg, corpusPath)
-}
-
-// runUAFValidationWithRaceValidate implements UAF validation using the racevalidate package
-func runUAFValidationWithRaceValidate(cfg *mgrconfig.Config) error {
-	log.Logf(0, "Initializing UAF validation context")
-
-	// Initialize validation options
-	validationOpts := &racevalidate.Options{
-		Config:         cfg,
-		MaxAttempts:    *flagAttempts,
-		Verbose:        *flagVerbose,
-		VMCount:      	*flagCount,
-		PathAware:      *flagPathAware,
-		CollectHistory: *flagCollectHistory,
-	}
-
-	if *flagCount > 0 {
-		validationOpts.VMCount = *flagCount
-	}
-	validator, err := racevalidate.NewUAFValidator(validationOpts)
-	if err != nil {
-		return fmt.Errorf("failed to create UAF validator: %v", err)
-	}
-	defer validator.Close()
-
-	// Load UAF corpus data
-	err = validator.LoadUAFCorpus(corpusPath)
-	if err != nil {
-		return fmt.Errorf("failed to load UAF corpus: %v", err)
-	}
-
-	// Execute escalating UAF validation
-	log.Logf(0, "Starting escalating UAF validation process")
-	results, err := validator.ValidateUAFPairs()
-	if err != nil {
-		return fmt.Errorf("UAF validation failed: %v", err)
-	}
-
-	// Output results
-	log.Logf(0, "UAF validation completed successfully")
-	log.Logf(0, "Total UAF pairs validated: %d", results.TotalUAFPairs)
-	log.Logf(0, "Confirmed UAF pairs: %d", results.ConfirmedUAFPairs)
-	log.Logf(0, "Success rate: %.2f%%",
-		float64(results.ConfirmedUAFPairs)/float64(results.TotalUAFPairs)*100)
-
-	if *flagVerbose {
-		log.Logf(0, "Validation stages attempted across all pairs: %d", results.TotalStagesAttempted)
-		log.Logf(0, "Total delay injections performed: %d", results.TotalDelayInjections)
-		log.Logf(0, "Average attempts per confirmed UAF: %.2f", results.AvgAttemptsPerConfirmed)
-	}
-
-	// Write detailed results to output file
-	err = validator.WriteResults(*flagOutput, results)
-	if err != nil {
-		log.Logf(0, "Warning: failed to write results to file %s: %v", *flagOutput, err)
-	} else {
-		log.Logf(0, "Detailed results written to: %s", *flagOutput)
-	}
-
+	// For now, just log that validation is not implemented
+	// TODO: Implement actual UAF validation logic
+	log.Logf(0, "UAF validation functionality is under development")
+	log.Logf(0, "Please use -show-details flag to view UAF corpus contents")
+	
 	return nil
 }
 
@@ -146,40 +150,28 @@ func main() {
 		log.Fatalf("Failed to load config %v: %v", *flagConfig, err)
 	}
 
-	// Determine corpus path
-	corpusPath := mgrconfig.
-	if *flagValidateUAF && (*flagCorpus == "uaf-corpus.db" || *flagUAFCorpus != "uaf-corpus.db") {
-		corpusPath = *flagUAFCorpus
-	}
-
-	// Auto-locate corpus in workdir if needed
-	if !filepath.IsAbs(corpusPath) {
-		workdir := *flagWorkdir
-		if workdir == "" {
-			workdir = cfg.Workdir
-		}
-
-		// Only prepend workdir if corpusPath doesn't already include it
-		if !filepath.IsAbs(corpusPath) && !filepath.HasPrefix(corpusPath, workdir) {
-			corpusPath = filepath.Join(workdir, filepath.Base(corpusPath))
-		}
-	}
+	// Determine corpus path - default to uaf-corpus.db in workdir
+	corpusPath := filepath.Join(cfg.Workdir, "uaf-corpus.db")
 
 	// Validate corpus exists
 	if !osutil.IsExist(corpusPath) {
 		log.Fatalf("Corpus database not found: %s", corpusPath)
 	}
 
-	log.Logf(0, "Loading %s corpus from: %s",
-		map[bool]string{true: "UAF", false: "race"}[*flagValidateUAF], corpusPath)
+	log.Logf(0, "Loading UAF corpus from: %s", corpusPath)
 
-	// If not stats-only, proceed with validation
-	if *flagValidateUAF {
-		err := runUAFValidation(cfg, corpusPath)
+	// If show-details flag is set, only display UAF pair details
+	if *flagShowDetails {
+		err := showUAFDetails(corpusPath)
 		if err != nil {
-			log.Fatalf("UAF validation failed: %v", err)
+			log.Fatalf("Failed to show UAF details: %v", err)
 		}
-	} else {
-		log.Fatalf("Race validation not implemented in this version - use -validate-uaf=true")
+		return
+	}
+
+	// Otherwise proceed with validation
+	err = runUAFValidation(cfg, corpusPath)
+	if err != nil {
+		log.Fatalf("UAF validation failed: %v", err)
 	}
 }
