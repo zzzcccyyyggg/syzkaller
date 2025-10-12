@@ -58,13 +58,13 @@ func usage() {
 // The UAFs field in UAFCorpusItem is JSON-encoded []ddrd.MayUAFPair
 func parseUAFPairs(data []byte) []ddrd.MayUAFPair {
 	var pairs []ddrd.MayUAFPair
-	
+
 	// Unmarshal JSON data
 	if err := json.Unmarshal(data, &pairs); err != nil {
 		log.Logf(1, "Warning: failed to unmarshal UAF pairs: %v", err)
 		return nil
 	}
-	
+
 	return pairs
 }
 
@@ -101,29 +101,29 @@ func showUAFDetails(corpusPath string) error {
 		log.Logf(0, "First seen: %s", pair.FirstSeen.Format(time.RFC3339))
 		log.Logf(0, "Last updated: %s", pair.LastUpdated.Format(time.RFC3339))
 		log.Logf(0, "Discovery count: %d", pair.Count)
-		
+
 		// Parse and display UAF pairs information
 		if len(pair.UAFs) > 0 {
 			uafPairs := parseUAFPairs(pair.UAFs)
 			if len(uafPairs) > 0 {
 				log.Logf(0, "UAF Details (%d pairs):", len(uafPairs))
 				for j, uaf := range uafPairs {
-					log.Logf(0, "  [%d] Free VarName: 0x%016x, Use VarName: 0x%016x", 
+					log.Logf(0, "  [%d] Free VarName: 0x%016x, Use VarName: 0x%016x",
 						j+1, uaf.FreeAccessName, uaf.UseAccessName)
-					log.Logf(0, "      Free CallStack: 0x%016x, Use CallStack: 0x%016x", 
+					log.Logf(0, "      Free CallStack: 0x%016x, Use CallStack: 0x%016x",
 						uaf.FreeCallStack, uaf.UseCallStack)
-					log.Logf(0, "      Signal: 0x%016x, TimeDiff: %d ns", 
+					log.Logf(0, "      Signal: 0x%016x, TimeDiff: %d ns",
 						uaf.Signal, uaf.TimeDiff)
-					log.Logf(0, "      Free Syscall: idx=%d num=%d sn=%d", 
+					log.Logf(0, "      Free Syscall: idx=%d num=%d sn=%d",
 						uaf.FreeSyscallIdx, uaf.FreeSyscallNum, uaf.FreeSN)
-					log.Logf(0, "      Use Syscall: idx=%d num=%d sn=%d", 
+					log.Logf(0, "      Use Syscall: idx=%d num=%d sn=%d",
 						uaf.UseSyscallIdx, uaf.UseSyscallNum, uaf.UseSN)
-					log.Logf(0, "      Lock Type: %d, Use Access Type: %d", 
+					log.Logf(0, "      Lock Type: %d, Use Access Type: %d",
 						uaf.LockType, uaf.UseAccessType)
 				}
 			}
 		}
-		
+
 		if *flagVerbose {
 			log.Logf(0, "Program 1 size: %d bytes", len(pair.Prog1))
 			log.Logf(0, "Program 2 size: %d bytes", len(pair.Prog2))
@@ -159,7 +159,7 @@ func runUAFValidation(cfg *mgrconfig.Config, corpusPath string) error {
 	// TODO: Implement actual UAF validation logic
 	log.Logf(0, "UAF validation functionality is under development")
 	log.Logf(0, "Please use -show-details flag to view UAF corpus contents")
-	
+
 	return nil
 }
 

@@ -57,6 +57,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 					free_rec->size = current_record.size;
 					free_rec->access_time = current_record.access_time;
 					free_rec->tid = current_record.tid;
+					free_rec->var_name = current_record.var_name;
+					free_rec->call_stack_hash = current_record.call_stack_hash;
 					// 复制锁信息到FreeRecord
 					free_rec->lock_count = current_record.lock_count;
 					for (int k = 0; k < current_record.lock_count && k < 8; k++) {
@@ -112,6 +114,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 			free_rec->size = current_record.size;
 			free_rec->access_time = current_record.access_time;
 			free_rec->tid = current_record.tid;
+			free_rec->var_name = current_record.var_name;
+			free_rec->call_stack_hash = current_record.call_stack_hash;
 			// 复制锁信息到FreeRecord
 			free_rec->lock_count = current_record.lock_count;
 			for (int k = 0; k < current_record.lock_count && k < 8; k++) {
