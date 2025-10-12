@@ -1438,6 +1438,8 @@ func (mgr *Manager) generatePairCandidates() {
 	if pairsGenerated > 0 {
 		log.Logf(0, "generated %d pair candidates from %d candidates (including self-pairs)",
 			pairsGenerated, len(mgr.candidates))
+	} else {
+		log.Logf(0, "no new pair candidates generated from %d candidates", len(mgr.candidates))
 	}
 }
 
