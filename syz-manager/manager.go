@@ -1436,7 +1436,7 @@ func (mgr *Manager) generatePairCandidates() {
 	}
 
 	if pairsGenerated > 0 {
-		log.Logf(1, "generated %d pair candidates from %d candidates (including self-pairs)",
+		log.Logf(0, "generated %d pair candidates from %d candidates (including self-pairs)",
 			pairsGenerated, len(mgr.candidates))
 	}
 }
