@@ -4,7 +4,6 @@
 package main
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -55,44 +54,15 @@ func usage() {
 	flag.PrintDefaults()
 }
 
-// parseUAFPairs deserializes UAF pairs from byte slice
+// parseUAFPairs parses UAF pairs from JSON data
+// The UAFs field in UAFCorpusItem is JSON-encoded []ddrd.MayUAFPair
 func parseUAFPairs(data []byte) []ddrd.MayUAFPair {
 	var pairs []ddrd.MayUAFPair
 	
-	// Size of MayUAFPair struct: 80 bytes (see types.go comment)
-	const uafPairSize = 80
-	
-	if len(data)%uafPairSize != 0 {
-		log.Logf(1, "Warning: UAF data size %d is not multiple of %d", len(data), uafPairSize)
-	}
-	
-	numPairs := len(data) / uafPairSize
-	for i := 0; i < numPairs; i++ {
-		offset := i * uafPairSize
-		if offset+uafPairSize > len(data) {
-			break
-		}
-		
-		pairData := data[offset : offset+uafPairSize]
-		var pair ddrd.MayUAFPair
-		
-		// Parse fields according to MayUAFPair struct layout
-		pair.FreeAccessName = binary.LittleEndian.Uint64(pairData[0:8])
-		pair.UseAccessName = binary.LittleEndian.Uint64(pairData[8:16])
-		pair.FreeCallStack = binary.LittleEndian.Uint64(pairData[16:24])
-		pair.UseCallStack = binary.LittleEndian.Uint64(pairData[24:32])
-		pair.Signal = binary.LittleEndian.Uint64(pairData[32:40])
-		pair.TimeDiff = binary.LittleEndian.Uint64(pairData[40:48])
-		pair.FreeSyscallIdx = int32(binary.LittleEndian.Uint32(pairData[48:52]))
-		pair.UseSyscallIdx = int32(binary.LittleEndian.Uint32(pairData[52:56]))
-		pair.FreeSyscallNum = int32(binary.LittleEndian.Uint32(pairData[56:60]))
-		pair.UseSyscallNum = int32(binary.LittleEndian.Uint32(pairData[60:64]))
-		pair.FreeSN = int32(binary.LittleEndian.Uint32(pairData[64:68]))
-		pair.UseSN = int32(binary.LittleEndian.Uint32(pairData[68:72]))
-		pair.LockType = binary.LittleEndian.Uint32(pairData[72:76])
-		pair.UseAccessType = binary.LittleEndian.Uint32(pairData[76:80])
-		
-		pairs = append(pairs, pair)
+	// Unmarshal JSON data
+	if err := json.Unmarshal(data, &pairs); err != nil {
+		log.Logf(1, "Warning: failed to unmarshal UAF pairs: %v", err)
+		return nil
 	}
 	
 	return pairs
