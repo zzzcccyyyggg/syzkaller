@@ -28,6 +28,13 @@
   - 首次发现时间
   - 最后更新时间
   - 发现次数
+  - **UAF详情**（如果有UAFs数据）：
+    - Free/Use VarName（变量名哈希值）
+    - Free/Use CallStack（调用栈哈希值）
+    - Signal（UAF信号）
+    - TimeDiff（时间差，纳秒）
+    - Free/Use Syscall信息（索引、编号、序列号）
+    - Lock Type和Access Type
 
 **详细信息（-verbose）：**
 - 程序1和程序2的大小（字节）
@@ -48,6 +55,19 @@ Source: fuzzer-01
 First seen: 2025-10-11T10:30:45Z
 Last updated: 2025-10-12T08:15:22Z
 Discovery count: 3
+UAF Details (2 pairs):
+  [1] Free VarName: 0x00007f8a9c4d5000, Use VarName: 0x00007f8a9c4d5000
+      Free CallStack: 0xa3b4c5d6e7f81234, Use CallStack: 0xb4c5d6e7f8123456
+      Signal: 0x1234567890abcdef, TimeDiff: 125000 ns
+      Free Syscall: idx=3 num=56 sn=10
+      Use Syscall: idx=5 num=78 sn=15
+      Lock Type: 0, Use Access Type: 1
+  [2] Free VarName: 0x00007f8a9c4d6000, Use VarName: 0x00007f8a9c4d6000
+      Free CallStack: 0xc5d6e7f812345678, Use CallStack: 0xd6e7f81234567890
+      Signal: 0x234567890abcdef1, TimeDiff: 98000 ns
+      Free Syscall: idx=7 num=90 sn=20
+      Use Syscall: idx=9 num=112 sn=25
+      Lock Type: 1, Use Access Type: 2
 
 ========== UAF Pair #2 ==========
 ...

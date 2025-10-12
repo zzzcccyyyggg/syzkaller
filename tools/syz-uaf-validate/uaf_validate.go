@@ -4,6 +4,7 @@
 package main
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"flag"
 	"fmt"
@@ -11,6 +12,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/db"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -53,6 +55,49 @@ func usage() {
 	flag.PrintDefaults()
 }
 
+// parseUAFPairs deserializes UAF pairs from byte slice
+func parseUAFPairs(data []byte) []ddrd.MayUAFPair {
+	var pairs []ddrd.MayUAFPair
+	
+	// Size of MayUAFPair struct: 80 bytes (see types.go comment)
+	const uafPairSize = 80
+	
+	if len(data)%uafPairSize != 0 {
+		log.Logf(1, "Warning: UAF data size %d is not multiple of %d", len(data), uafPairSize)
+	}
+	
+	numPairs := len(data) / uafPairSize
+	for i := 0; i < numPairs; i++ {
+		offset := i * uafPairSize
+		if offset+uafPairSize > len(data) {
+			break
+		}
+		
+		pairData := data[offset : offset+uafPairSize]
+		var pair ddrd.MayUAFPair
+		
+		// Parse fields according to MayUAFPair struct layout
+		pair.FreeAccessName = binary.LittleEndian.Uint64(pairData[0:8])
+		pair.UseAccessName = binary.LittleEndian.Uint64(pairData[8:16])
+		pair.FreeCallStack = binary.LittleEndian.Uint64(pairData[16:24])
+		pair.UseCallStack = binary.LittleEndian.Uint64(pairData[24:32])
+		pair.Signal = binary.LittleEndian.Uint64(pairData[32:40])
+		pair.TimeDiff = binary.LittleEndian.Uint64(pairData[40:48])
+		pair.FreeSyscallIdx = int32(binary.LittleEndian.Uint32(pairData[48:52]))
+		pair.UseSyscallIdx = int32(binary.LittleEndian.Uint32(pairData[52:56]))
+		pair.FreeSyscallNum = int32(binary.LittleEndian.Uint32(pairData[56:60]))
+		pair.UseSyscallNum = int32(binary.LittleEndian.Uint32(pairData[60:64]))
+		pair.FreeSN = int32(binary.LittleEndian.Uint32(pairData[64:68]))
+		pair.UseSN = int32(binary.LittleEndian.Uint32(pairData[68:72]))
+		pair.LockType = binary.LittleEndian.Uint32(pairData[72:76])
+		pair.UseAccessType = binary.LittleEndian.Uint32(pairData[76:80])
+		
+		pairs = append(pairs, pair)
+	}
+	
+	return pairs
+}
+
 // showUAFDetails reads and displays UAF pair details without validation
 func showUAFDetails(corpusPath string) error {
 	log.Logf(0, "Reading UAF corpus details from: %s", corpusPath)
@@ -86,6 +131,28 @@ func showUAFDetails(corpusPath string) error {
 		log.Logf(0, "First seen: %s", pair.FirstSeen.Format(time.RFC3339))
 		log.Logf(0, "Last updated: %s", pair.LastUpdated.Format(time.RFC3339))
 		log.Logf(0, "Discovery count: %d", pair.Count)
+		
+		// Parse and display UAF pairs information
+		if len(pair.UAFs) > 0 {
+			uafPairs := parseUAFPairs(pair.UAFs)
+			if len(uafPairs) > 0 {
+				log.Logf(0, "UAF Details (%d pairs):", len(uafPairs))
+				for j, uaf := range uafPairs {
+					log.Logf(0, "  [%d] Free VarName: 0x%016x, Use VarName: 0x%016x", 
+						j+1, uaf.FreeAccessName, uaf.UseAccessName)
+					log.Logf(0, "      Free CallStack: 0x%016x, Use CallStack: 0x%016x", 
+						uaf.FreeCallStack, uaf.UseCallStack)
+					log.Logf(0, "      Signal: 0x%016x, TimeDiff: %d ns", 
+						uaf.Signal, uaf.TimeDiff)
+					log.Logf(0, "      Free Syscall: idx=%d num=%d sn=%d", 
+						uaf.FreeSyscallIdx, uaf.FreeSyscallNum, uaf.FreeSN)
+					log.Logf(0, "      Use Syscall: idx=%d num=%d sn=%d", 
+						uaf.UseSyscallIdx, uaf.UseSyscallNum, uaf.UseSN)
+					log.Logf(0, "      Lock Type: %d, Use Access Type: %d", 
+						uaf.LockType, uaf.UseAccessType)
+				}
+			}
+		}
 		
 		if *flagVerbose {
 			log.Logf(0, "Program 1 size: %d bytes", len(pair.Prog1))
