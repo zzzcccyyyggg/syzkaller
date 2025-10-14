@@ -1515,8 +1515,8 @@ func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate 
 		mgr.pairCandidates = mgr.pairCandidates[count:]
 	}
 
-	// log.Logf(2, "getPriorityPairCandidates: returning %d pairs (%d race, %d generated), %d race pairs remaining, %d generated pairs remaining",
-	// 	len(res), size-remaining, len(res)-(size-remaining), len(mgr.raceCorpusCandidates), len(mgr.pairCandidates))
+	log.Logf(0, "getPriorityPairCandidates: returning %d pairs (%d race, %d generated), %d race pairs remaining, %d generated pairs remaining",
+		len(res), size-remaining, len(res)-(size-remaining), len(mgr.raceCorpusCandidates), len(mgr.pairCandidates))
 	return res
 }
 
