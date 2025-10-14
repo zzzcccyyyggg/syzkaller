@@ -317,11 +317,11 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector,
         return 0;
     }
 
-    #define MAX_RECORDS 0x5000 // 20480 RECORDS
+    #define MAX_RECORDS 0x10000 // 20480 RECORDS
     #define MAX_UAF_PAIRS 0x200 // 512 PAIRS
 
     // 解析trace buffer到当前context
-    int parsed_count = race_detector_parse_trace_buffer(detector, MAX_RECORDS, MAX_RECORDS / 4);
+    int parsed_count = race_detector_parse_trace_buffer(detector, MAX_RECORDS, MAX_RECORDS / 16);
     if (parsed_count <= 0) {
         debug("Failed to parse trace buffer for combined UAF analysis\n");
         return 0;
