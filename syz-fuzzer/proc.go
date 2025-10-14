@@ -139,7 +139,7 @@ func (proc *Proc) loop() {
 func (proc *Proc) handleRacePairMode() {
 	// Note: Pair queue maintenance is now handled by background goroutine
 	// (fuzzer.pairQueueMaintenanceLoop) to avoid per-loop overhead
-	
+
 	// Process UAF pair work from queue with load balancing
 	var item interface{}
 

@@ -179,7 +179,7 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
     if (!detector) return 0;
     
     // 分配 buffer 读取 trace 数据
-    const size_t buffer_size = 1024 * 1024; // 1MB buffer
+    const size_t buffer_size = 1024 * 1024 * 64; // 64MB buffer
     char* buffer = malloc(buffer_size);
     if (!buffer) return 0;
     
