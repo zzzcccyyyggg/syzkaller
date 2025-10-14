@@ -1011,9 +1011,26 @@ func (fuzzer *Fuzzer) maintainRacePairQueues() {
 		return
 	}
 
-	// Get current queue status (you may need to implement this method in RacePairWorkQueue)
-	// For now, we'll request a batch regardless
-	batchSize := 20 // Request 20 pair candidates at a time
+	// Get current queue status - ONLY request if we're running low
+	candidatesCount, triageCount, valuableCount := fuzzer.uafPairWorkQueue.getQueueStats()
+	totalQueued := candidatesCount + triageCount + valuableCount
+
+	// Only request more pairs if total queued work is low
+	// Keep a buffer of at least 50 pairs per proc to avoid frequent requests
+	minQueueSize := len(fuzzer.procs) * 50
+	if totalQueued >= minQueueSize {
+		// log.Logf(3, "maintainRacePairQueues: sufficient work queued (%d items), skipping request", totalQueued)
+		return
+	}
+
+	// Request enough to refill to target size
+	batchSize := minQueueSize - totalQueued
+	if batchSize > 100 {
+		batchSize = 100 // Cap at 100 per request to avoid overwhelming manager
+	}
+
+	log.Logf(2, "maintainRacePairQueues: requesting %d pairs (current queue: %d candidates, %d triage, %d valuable)",
+		batchSize, candidatesCount, triageCount, valuableCount)
 
 	// Get pair candidates from manager
 	pairCandidates := fuzzer.getPairCandidatesFromManager(batchSize)
