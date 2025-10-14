@@ -137,9 +137,9 @@ func (proc *Proc) loop() {
 // handleRacePairMode handles execution in race pair testing mode
 // ===============DDRD====================
 func (proc *Proc) handleRacePairMode() {
-	// First, ensure race pair queues are maintained
-	proc.fuzzer.maintainRacePairQueues()
-
+	// Note: Pair queue maintenance is now handled by background goroutine
+	// (fuzzer.pairQueueMaintenanceLoop) to avoid per-loop overhead
+	
 	// Process UAF pair work from queue with load balancing
 	var item interface{}
 

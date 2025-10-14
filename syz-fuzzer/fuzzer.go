@@ -384,6 +384,8 @@ func main() {
 	fuzzer.isTestPairMode = fuzzer.determineInitialMode()
 	if fuzzer.isTestPairMode {
 		log.Logf(0, "fuzzer started in RACE PAIR mode")
+		// Start background pair queue maintenance goroutine for race pair mode
+		go fuzzer.pairQueueMaintenanceLoop()
 	} else {
 		log.Logf(0, "fuzzer started in NORMAL mode")
 	}
@@ -1029,8 +1031,8 @@ func (fuzzer *Fuzzer) maintainRacePairQueues() {
 		batchSize = 100 // Cap at 100 per request to avoid overwhelming manager
 	}
 
-	log.Logf(2, "maintainRacePairQueues: requesting %d pairs (current queue: %d candidates, %d triage, %d valuable)",
-		batchSize, candidatesCount, triageCount, valuableCount)
+	// log.Logf(2, "maintainRacePairQueues: requesting %d pairs (current queue: %d candidates, %d triage, %d valuable)",
+	// 	batchSize, candidatesCount, triageCount, valuableCount)
 
 	// Get pair candidates from manager
 	pairCandidates := fuzzer.getPairCandidatesFromManager(batchSize)
@@ -1062,7 +1064,24 @@ func (fuzzer *Fuzzer) maintainRacePairQueues() {
 		log.Logf(1, "maintainRacePairQueues: added %d race pairs from manager (requested %d)",
 			added, len(pairCandidates))
 	}
-} // addRacePairWithNewCoverage adds a program pair that brings new race coverage
+}
+
+// pairQueueMaintenanceLoop runs in the background to periodically maintain pair queues
+// This runs as a separate goroutine to avoid blocking proc execution loops
+func (fuzzer *Fuzzer) pairQueueMaintenanceLoop() {
+	// Check every 5 seconds
+	ticker := time.NewTicker(5 * time.Second)
+	defer ticker.Stop()
+
+	log.Logf(0, "pair queue maintenance loop started (checking every 5 seconds)")
+
+	for range ticker.C {
+		// Call the maintenance function
+		fuzzer.maintainRacePairQueues()
+	}
+}
+
+// addRacePairWithNewCoverage adds a program pair that brings new race coverage
 func (fuzzer *Fuzzer) addRacePairWithNewCoverage(p1, p2 *prog.Prog, races []*ddrd.MayRacePair) {
 	pairID := fmt.Sprintf("newcover_%d_%d", time.Now().UnixNano(), len(races))
 	// ===============DDRD====================
