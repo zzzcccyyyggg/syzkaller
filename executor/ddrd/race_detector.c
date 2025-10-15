@@ -389,9 +389,6 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
         return 0;
     }
 
-    #define MAX_RECORDS 0x5000 // 20480 RECORDS
-    #define MAX_UAF_PAIRS 0x200 // 512 PAIRS
-
     // 解析trace buffer到当前context
     int parsed_count = race_detector_parse_trace_buffer(detector, MAX_RECORDS, MAX_RECORDS / 4);
     if (parsed_count <= 0) {
@@ -645,8 +642,6 @@ int race_detector_analyze_and_generate_extended_race_infos(RaceDetector* detecto
 
     debug("Generating extended information for %d existing races...\n", race_count);
 
-    // 重新读取并解析trace数据进行扩展分析
-    #define MAX_RECORDS 0x5000
     int parsed_count = race_detector_parse_trace_buffer(detector, MAX_RECORDS, MAX_RECORDS / 4);
     if (parsed_count <= 0) {
         debug("Failed to parse trace buffer for extended race analysis\n");
@@ -674,8 +669,6 @@ int race_detector_analyze_and_generate_extended_uaf_infos(RaceDetector* detector
 
     debug("Generating extended information for %d existing UAF pairs...\n", uaf_count);
 
-    // 重新读取并解析trace数据进行扩展分析
-    #define MAX_RECORDS 0x5000
     int parsed_count = race_detector_parse_trace_buffer(detector, MAX_RECORDS, MAX_RECORDS / 4);
     if (parsed_count <= 0) {
         debug("Failed to parse trace buffer for extended UAF analysis\n");
