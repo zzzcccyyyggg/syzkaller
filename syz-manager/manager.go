@@ -1134,8 +1134,8 @@ func (mgr *Manager) saveUAFPair(args *rpctype.NewUAFPairArgs) {
 	// Simply delegate to saveUAFCorpusItem for database storage
 	mgr.saveUAFCorpusItem(args)
 
-	log.Logf(1, "saved UAF pair %x to database (output: %d bytes, context: %t)",
-		args.Pair.PairID, len(args.Pair.Output), args.Pair.ExecutionContext != nil)
+	// log.Logf(1, "saved UAF pair %x to database (output: %d bytes, context: %t)",
+	// 	args.Pair.PairID, len(args.Pair.Output), args.Pair.ExecutionContext != nil)
 }
 
 const maxReproAttempts = 3
@@ -1693,18 +1693,18 @@ func (mgr *Manager) loadUAFCorpus() {
 		}
 
 		// Load UAF coverage from this corpus item
-		if len(item.UAFs) > 0 {
-			var uafs []ddrd.MayUAFPair
-			if err := json.Unmarshal(item.UAFs, &uafs); err == nil {
-				var uafPairs []*ddrd.MayUAFPair
-				for i := range uafs {
-					uafPairs = append(uafPairs, &uafs[i])
-				}
-				mgr.uafCoverMu.Lock()
-				mgr.maxUAFCover.Merge(uafPairs)
-				mgr.uafCoverMu.Unlock()
-			}
-		}
+		// if len(item.UAFs) > 0 {
+		// 	var uafs []ddrd.MayUAFPair
+		// 	if err := json.Unmarshal(item.UAFs, &uafs); err == nil {
+		// 		var uafPairs []*ddrd.MayUAFPair
+		// 		for i := range uafs {
+		// 			uafPairs = append(uafPairs, &uafs[i])
+		// 		}
+		// 		mgr.uafCoverMu.Lock()
+		// 		mgr.maxUAFCover.Merge(uafPairs)
+		// 		mgr.uafCoverMu.Unlock()
+		// 	}
+		// }
 
 		log.Logf(0, "Loaded UAF pair: ID=%x, Count=%d, FirstSeen=%s, LastUpdated=%s",
 			item.PairID, item.Count, item.FirstSeen.Format("15:04:05"), item.LastUpdated.Format("15:04:05"))
@@ -1769,7 +1769,7 @@ func (mgr *Manager) loadRaceCorpus() {
 		len(mgr.raceCorpus), broken)
 }
 
-func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
+func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) bool {
 	mgr.uafCorpusMu.Lock()
 	defer mgr.uafCorpusMu.Unlock()
 
@@ -1806,18 +1806,18 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 			if !hasNewSignal {
 				log.Logf(1, "Rejecting UAF pair %x: all UAF signals already seen (signal size: %d, new: 0)",
 					args.Pair.PairID, len(*uafSignal))
-				return // Don't save if no new signal
+				return false // Don't save if no new signal
 			}
 
-			log.Logf(1, "UAF pair %x brings %d new UAF signals (total signal size: %d)",
+			log.Logf(0, "UAF pair %x brings %d new UAF signals (total signal size: %d)",
 				args.Pair.PairID, newSignalCount, len(*uafSignal))
 		} else {
 			log.Logf(1, "Failed to deserialize UAF signal for pair %x: %v", args.Pair.PairID, err)
-			return // Don't save if signal is invalid
+			return false // Don't save if signal is invalid
 		}
 	} else {
 		log.Logf(1, "Rejecting UAF pair %x: no UAF signal provided", args.Pair.PairID)
-		return // Don't save if no signal
+		return false // Don't save if no signal
 	}
 
 	// Check if already exists
@@ -1897,20 +1897,20 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 		}
 
 		// Update UAF coverage if provided
-		if len(args.Pair.UAFs) > 0 {
-			var uafs []ddrd.MayUAFPair
-			if err := json.Unmarshal(args.Pair.UAFs, &uafs); err == nil {
-				var uafPairs []*ddrd.MayUAFPair
-				for i := range uafs {
-					uafPairs = append(uafPairs, &uafs[i])
-				}
-				mgr.uafCoverMu.Lock()
-				mgr.maxUAFCover.Merge(uafPairs)
-				mgr.uafCoverMu.Unlock()
-				log.Logf(2, "Merged UAF coverage for new pair %x (uaf count: %d)",
-					args.Pair.PairID, len(uafs))
-			}
-		}
+		// if len(args.Pair.UAFs) > 0 {
+		// 	var uafs []ddrd.MayUAFPair
+		// 	if err := json.Unmarshal(args.Pair.UAFs, &uafs); err == nil {
+		// 		var uafPairs []*ddrd.MayUAFPair
+		// 		for i := range uafs {
+		// 			uafPairs = append(uafPairs, &uafs[i])
+		// 		}
+		// 		mgr.uafCoverMu.Lock()
+		// 		mgr.maxUAFCover.Merge(uafPairs)
+		// 		mgr.uafCoverMu.Unlock()
+		// 		log.Logf(2, "Merged UAF coverage for new pair %x (uaf count: %d)",
+		// 			args.Pair.PairID, len(uafs))
+		// 	}
+		// }
 
 		log.Logf(2, "Added new UAF pair %x from %s (with execution context: %t)",
 			args.Pair.PairID, args.Name, len(executionContextData) > 0)
@@ -1918,6 +1918,7 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 
 	// Persist to database
 	mgr.persistUAFCorpusItem(args.Pair.PairID)
+	return true
 }
 
 func (mgr *Manager) persistRaceCorpusItem(pairID uint64) {
@@ -1959,7 +1960,7 @@ func (mgr *Manager) persistUAFCorpusItem(pairID uint64) {
 		return
 	}
 
-	log.Logf(1, "Persisting UAF corpus item %x (%d bytes)", pairID, len(data))
+	// log.Logf(1, "Persisting UAF corpus item %x (%d bytes)", pairID, len(data))
 
 	// Save to database
 	mgr.uafCorpusDB.Save(strconv.FormatUint(pairID, 16), data, 0)
@@ -2403,61 +2404,7 @@ func publicWebAddr(addr string) string {
 func (mgr *Manager) newUAFPair(args *rpctype.NewUAFPairArgs) bool {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
-	log.Logf(0, "Received new UAF pair: ID=%x from %s", args.Pair.PairID, args.Name)
-	// 1. Save UAF log to disk (similar to saveCrash)
-	mgr.saveUAFPair(args)
-
-	// 2. Save to UAF corpus
-	mgr.saveUAFCorpusItem(args)
-	mgr.uafStats.totalPairs++
-
-	// 3. UAF signal processing and propagation
-	if len(args.Pair.Signal) > 0 {
-		// Process UAF signal from the pair
-		log.Logf(2, "Processing UAF signal: %d bytes", len(args.Pair.Signal))
-
-		// Deserialize and merge UAF signal as generic signal for compatibility
-		if uafSignal, err := deserializeRaceSignal(args.Pair.Signal); err == nil && uafSignal != nil {
-			// Merge UAF signal with manager's max UAF signal tracking
-			mgr.uafSignalMu.Lock()
-			// Convert generic signal to UAF signal for proper tracking
-			rawSignal := uafSignal.ToRawUint64()
-			uafOnlySignal := ddrd.FromRawUAF(rawSignal, 0)
-			mgr.maxUAFSignal.Merge(uafOnlySignal)
-			mgr.uafSignalMu.Unlock()
-
-			log.Logf(2, "Updated UAF signal: merged %d elements", len(rawSignal))
-		} else if err != nil {
-			log.Logf(1, "Failed to deserialize UAF signal: %v", err)
-		}
-
-		// Update UAF statistics
-		mgr.uafStats.uniqueUAFs++
-	}
-
-	// 4. UAF coverage processing
-	if len(args.Pair.UAFs) > 0 {
-		var uafs []ddrd.MayUAFPair
-		if err := json.Unmarshal(args.Pair.UAFs, &uafs); err == nil {
-			var uafPairs []*ddrd.MayUAFPair
-			for i := range uafs {
-				uafPairs = append(uafPairs, &uafs[i])
-			}
-			mgr.uafCoverMu.Lock()
-			mgr.maxUAFCover.Merge(uafPairs)
-			mgr.uafCoverMu.Unlock()
-
-			log.Logf(2, "Updated UAF coverage: merged %d UAF pairs", len(uafPairs))
-		}
-	}
-
-	// 4. Integration with scheduler: adjust fuzzing strategy based on UAFs
-	if mgr.fuzzScheduler != nil {
-		// Could notify scheduler about UAF discoveries
-		// This might influence the fuzzing phase transitions
-		log.Logf(2, "Notifying fuzzing scheduler about UAF discoveries")
-	}
-	return true
+	return mgr.saveUAFCorpusItem(args)
 }
 
 // createMonitorConfig creates configuration for VM monitoring with duplicate data race filtering

@@ -499,8 +499,8 @@ func (serv *RPCServer) CheckTestPairMode(a *rpctype.CheckModeArgs, r *rpctype.Ch
 
 // NewUAFPair handles UAF pair data from fuzzer
 func (serv *RPCServer) NewUAFPair(a *rpctype.NewUAFPairArgs, r *rpctype.NewUAFPairRes) error {
-	log.Logf(1, "NewUAFPair from %v: pairID=%v, signal len=%d",
-		a.Name, a.Pair.PairID, len(a.Pair.Signal))
+	// log.Logf(1, "NewUAFPair from %v: pairID=%v, signal len=%d",
+	// 	a.Name, a.Pair.PairID, len(a.Pair.Signal))
 
 	// Now using Manager interface for complex processing
 	accepted := serv.mgr.newUAFPair(a)
