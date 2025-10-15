@@ -1662,7 +1662,7 @@ func (mgr *Manager) loadUAFCorpus() {
 
 	broken := 0
 	for key, rec := range mgr.uafCorpusDB.Records {
-		log.Logf(1, "Loading UAF corpus item: %s (size: %d bytes)", key, len(rec.Val))
+		// log.Logf(1, "Loading UAF corpus item: %s (size: %d bytes)", key, len(rec.Val))
 
 		var item UAFCorpusItem
 		if err := json.Unmarshal(rec.Val, &item); err != nil {
@@ -1783,32 +1783,66 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 			args.Pair.PairID, len(executionContextData))
 	}
 
+	// ===============DDRD====================
+	// CRITICAL: Only save UAF pairs that bring NEW UAF signals
+	// Even if the corpus item itself is new (different PairID), we reject it
+	// if all its UAF signals have already been seen in other corpus items.
+	// This ensures every saved UAF pair contributes unique UAF detection capability.
+	// ===============DDRD====================
+	// First, check if this UAF pair brings new UAF signal
+	var hasNewSignal bool
+	var newSignalCount int
+	if len(args.Pair.Signal) > 0 {
+		if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+			mgr.uafSignalMu.Lock()
+			// Calculate difference: elements in uafSignal that are NOT in maxUAFSignal
+			// Diff(other) returns elements in 'other' but not in 's'
+			// So we want: mgr.maxUAFSignal.Diff(*uafSignal) gives us new elements
+			newSignal := mgr.maxUAFSignal.Diff(*uafSignal)
+			hasNewSignal = !newSignal.Empty()
+			newSignalCount = len(newSignal)
+			mgr.uafSignalMu.Unlock()
+
+			if !hasNewSignal {
+				log.Logf(1, "Rejecting UAF pair %x: all UAF signals already seen (signal size: %d, new: 0)",
+					args.Pair.PairID, len(*uafSignal))
+				return // Don't save if no new signal
+			}
+
+			log.Logf(1, "UAF pair %x brings %d new UAF signals (total signal size: %d)",
+				args.Pair.PairID, newSignalCount, len(*uafSignal))
+		} else {
+			log.Logf(1, "Failed to deserialize UAF signal for pair %x: %v", args.Pair.PairID, err)
+			return // Don't save if signal is invalid
+		}
+	} else {
+		log.Logf(1, "Rejecting UAF pair %x: no UAF signal provided", args.Pair.PairID)
+		return // Don't save if no signal
+	}
+
 	// Check if already exists
 	if existing, exists := mgr.uafCorpus[args.Pair.PairID]; exists {
-		// Update existing item
+		// Update existing item only if it brings new signal
 		existing.LastUpdated = now
 		existing.Count++
 
-		// Update UAF signal if provided
-		if len(args.Pair.Signal) > 0 {
-			existing.UAFSignal = args.Pair.Signal
-			// Merge new signal
-			if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
-				mgr.uafSignalMu.Lock()
-				oldSignalSize := len(mgr.maxUAFSignal)
-				mgr.maxUAFSignal.Merge(*uafSignal)
-				newSignalSize := len(mgr.maxUAFSignal)
-				mgr.uafSignalMu.Unlock()
+		// Update UAF signal
+		existing.UAFSignal = args.Pair.Signal
+		if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+			mgr.uafSignalMu.Lock()
+			oldSignalSize := len(mgr.maxUAFSignal)
+			mgr.maxUAFSignal.Merge(*uafSignal)
+			newSignalSize := len(mgr.maxUAFSignal)
+			mgr.uafSignalMu.Unlock()
 
-				// Update UAF statistics - set to current total and track new signals
-				mgr.stats.uafSignals.set(newSignalSize)
-				if newSignalSize > oldSignalSize {
-					mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
-				}
-
-				log.Logf(2, "Merged UAF signal for existing pair %x (signal size: %d, new coverage: %d)",
-					args.Pair.PairID, len(*uafSignal), newSignalSize-oldSignalSize)
+			// Update UAF statistics
+			mgr.stats.uafSignals.set(newSignalSize)
+			if newSignalSize > oldSignalSize {
+				mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
 			}
+
+			log.Logf(2, "Updated existing UAF pair %x with new signal (signal size: %d, new coverage: %d)",
+				args.Pair.PairID, len(*uafSignal), newSignalSize-oldSignalSize)
 		}
 
 		// Update execution context if provided
@@ -1821,9 +1855,10 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 			existing.Output = args.Pair.Output
 		}
 
-		log.Logf(2, "Updated existing UAF pair %x (count: %d)", args.Pair.PairID, existing.Count)
+		log.Logf(2, "Updated existing UAF pair %x (count: %d, new signals: %d)",
+			args.Pair.PairID, existing.Count, newSignalCount)
 	} else {
-		// Create new item
+		// Create new item (we already checked it has new signal above)
 		item := &UAFCorpusItem{
 			PairID:           strconv.FormatUint(args.Pair.PairID, 16),
 			Prog1:            args.Pair.Prog1,
@@ -1843,24 +1878,22 @@ func (mgr *Manager) saveUAFCorpusItem(args *rpctype.NewUAFPairArgs) {
 		// Update UAF stats for new item
 		mgr.uafStats.uniqueUAFs++
 
-		// Update UAF signal if provided
-		if len(args.Pair.Signal) > 0 {
-			if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
-				mgr.uafSignalMu.Lock()
-				oldSignalSize := len(mgr.maxUAFSignal)
-				mgr.maxUAFSignal.Merge(*uafSignal)
-				newSignalSize := len(mgr.maxUAFSignal)
-				mgr.uafSignalMu.Unlock()
+		// Merge UAF signal into global signal
+		if uafSignal, err := deserializeUAFSignal(args.Pair.Signal); err == nil && uafSignal != nil {
+			mgr.uafSignalMu.Lock()
+			oldSignalSize := len(mgr.maxUAFSignal)
+			mgr.maxUAFSignal.Merge(*uafSignal)
+			newSignalSize := len(mgr.maxUAFSignal)
+			mgr.uafSignalMu.Unlock()
 
-				// Update UAF statistics - set to current total and track new signals
-				mgr.stats.uafSignals.set(newSignalSize)
-				if newSignalSize > oldSignalSize {
-					mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
-				}
-
-				log.Logf(2, "Merged UAF signal for new pair %x (signal size: %d, new coverage: %d)",
-					args.Pair.PairID, len(*uafSignal), newSignalSize-oldSignalSize)
+			// Update UAF statistics
+			mgr.stats.uafSignals.set(newSignalSize)
+			if newSignalSize > oldSignalSize {
+				mgr.stats.newUAFSignals.add(newSignalSize - oldSignalSize)
 			}
+
+			log.Logf(1, "Added new UAF pair %x with %d new signals (total UAF signals: %d)",
+				args.Pair.PairID, newSignalCount, newSignalSize)
 		}
 
 		// Update UAF coverage if provided
