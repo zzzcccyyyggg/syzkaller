@@ -111,6 +111,7 @@ type Manager struct {
 	raceCorpusCandidates []rpctype.PairCandidate // high-priority race pairs from race corpus
 	disabledHashes       map[string]struct{}
 	corpus               map[string]CorpusItem
+	corpusBackup         [][]byte // backup of initial candidates for fallback pair generation
 	seeds                [][]byte
 	newRepros            [][]byte
 	lastMinCorpus        int
@@ -1398,6 +1399,16 @@ func (mgr *Manager) generatePairCandidates() {
 		return
 	}
 
+	// Save a backup of candidates for fallback pair generation
+	// This ensures we always have programs available even when corpus is empty
+	if len(mgr.corpusBackup) == 0 {
+		mgr.corpusBackup = make([][]byte, 0, len(mgr.candidates))
+		for _, candidate := range mgr.candidates {
+			mgr.corpusBackup = append(mgr.corpusBackup, candidate.Prog)
+		}
+		log.Logf(1, "saved %d programs to corpus backup for fallback pair generation", len(mgr.corpusBackup))
+	}
+
 	// Generate pairs from recent candidates (avoid O(n^2) for large candidate sets)
 	// Only pair the last few candidates with existing ones
 	maxNewPairs := 1000000 // limit to avoid memory explosion
@@ -1516,29 +1527,30 @@ func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate 
 	}
 
 	// Third fallback: when both race corpus and generated pairs are exhausted,
-	// randomly generate pairs from the general corpus (allows duplicates)
+	// randomly generate pairs from corpus backup or live corpus (allows duplicates)
 	remaining = size - len(res)
-	if remaining > 0 && len(mgr.corpus) > 0 {
-		// Convert corpus map to slice for random access
-		corpusProgs := make([][]byte, 0, len(mgr.corpus))
-		for _, item := range mgr.corpus {
-			corpusProgs = append(corpusProgs, item.Prog)
+	if remaining > 0 {
+		var sourceProgs [][]byte
+
+		if len(mgr.corpusBackup) > 0 {
+			sourceProgs = mgr.corpusBackup
+			log.Logf(1, "getPriorityPairCandidates: generating %d random pairs from corpus backup (size=%d)",
+				remaining, len(sourceProgs))
 		}
 
-		if len(corpusProgs) > 0 {
-			log.Logf(1, "getPriorityPairCandidates: generating %d random pairs from corpus (size=%d)",
-				remaining, len(corpusProgs))
-
-			// Generate random pairs (allows self-pairs and duplicates)
+		// Generate random pairs from available source (allows self-pairs and duplicates)
+		if len(sourceProgs) > 0 {
 			for i := 0; i < remaining; i++ {
-				prog1Idx := rand.Intn(len(corpusProgs))
-				prog2Idx := rand.Intn(len(corpusProgs))
+				prog1Idx := rand.Intn(len(sourceProgs))
+				prog2Idx := rand.Intn(len(sourceProgs))
 
 				res = append(res, rpctype.PairCandidate{
-					Prog1: corpusProgs[prog1Idx],
-					Prog2: corpusProgs[prog2Idx],
+					Prog1: sourceProgs[prog1Idx],
+					Prog2: sourceProgs[prog2Idx],
 				})
 			}
+		} else {
+			log.Logf(1, "getPriorityPairCandidates: no corpus or backup available to generate random pairs")
 		}
 	}
 
