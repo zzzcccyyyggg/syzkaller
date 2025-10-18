@@ -1515,6 +1515,33 @@ func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate 
 		mgr.pairCandidates = mgr.pairCandidates[count:]
 	}
 
+	// Third fallback: when both race corpus and generated pairs are exhausted,
+	// randomly generate pairs from the general corpus (allows duplicates)
+	remaining = size - len(res)
+	if remaining > 0 && len(mgr.corpus) > 0 {
+		// Convert corpus map to slice for random access
+		corpusProgs := make([][]byte, 0, len(mgr.corpus))
+		for _, item := range mgr.corpus {
+			corpusProgs = append(corpusProgs, item.Prog)
+		}
+
+		if len(corpusProgs) > 0 {
+			log.Logf(1, "getPriorityPairCandidates: generating %d random pairs from corpus (size=%d)",
+				remaining, len(corpusProgs))
+
+			// Generate random pairs (allows self-pairs and duplicates)
+			for i := 0; i < remaining; i++ {
+				prog1Idx := rand.Intn(len(corpusProgs))
+				prog2Idx := rand.Intn(len(corpusProgs))
+
+				res = append(res, rpctype.PairCandidate{
+					Prog1: corpusProgs[prog1Idx],
+					Prog2: corpusProgs[prog2Idx],
+				})
+			}
+		}
+	}
+
 	// log.Logf(0, "getPriorityPairCandidates: returning %d pairs (%d race, %d generated), %d race pairs remaining, %d generated pairs remaining",
 	// 	len(res), size-remaining, len(res)-(size-remaining), len(mgr.raceCorpusCandidates), len(mgr.pairCandidates))
 	return res
