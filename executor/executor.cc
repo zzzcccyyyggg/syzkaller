@@ -1065,7 +1065,7 @@ void receive_execute_internal(const execute_req& req)
 #if SYZ_EXECUTOR_USES_SHMEM
 	// In shared memory mode, program data is already in input_data (shared memory)
 	// The program data is at the beginning of input_data
-	debug("SHMEM mode: program data already available in input_data, size=%llu\n", req.prog_size);
+	// debug("SHMEM mode: program data already available in input_data, size=%llu\n", req.prog_size);
 	return;
 #else
 	// In pipe mode, read program data from pipe into input_data
@@ -2386,9 +2386,9 @@ void write_call_output(thread_t* th, bool finished)
 	}
 #if SYZ_EXECUTOR_USES_SHMEM
 	if (!flag_collect_race && !flag_collect_uaf) {
-		debug("write_call_output: writing magic 0x%x at output_pos=%p\n", kOutMagic, output_pos);
+		// debug("write_call_output: writing magic 0x%x at output_pos=%p\n", kOutMagic, output_pos);
 		write_output(kOutMagic);
-		debug("write_call_output: after writing magic, output_pos=%p\n", output_pos);
+		// debug("write_call_output: after writing magic, output_pos=%p\n", output_pos);
 		write_output(th->call_index);
 		write_output(th->call_num);
 		write_output(reserrno);

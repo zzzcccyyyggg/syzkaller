@@ -19,13 +19,14 @@ import (
 )
 
 var (
-	flagConfig = flag.String("config", "", "manager configuration file (manager.cfg)")
-	flagCount  = flag.Int("count", 0, "number of VMs to use (overrides config count param)")
-	flagDebug  = flag.Bool("debug", false, "print debug output")
-	flagOutput = flag.String("output", filepath.Join(".", "repro.txt"), "output syz repro file (repro.txt)")
-	flagCRepro = flag.String("crepro", filepath.Join(".", "repro.c"), "output c file (repro.c)")
-	flagTitle  = flag.String("title", "", "where to save the title of the reproduced bug")
-	flagStrace = flag.String("strace", "", "output strace log (strace_bin must be set)")
+	flagConfig    = flag.String("config", "", "manager configuration file (manager.cfg)")
+	flagCount     = flag.Int("count", 0, "number of VMs to use (overrides config count param)")
+	flagDebug     = flag.Bool("debug", false, "print debug output")
+	flagOutput    = flag.String("output", filepath.Join(".", "repro.txt"), "output syz repro file (repro.txt)")
+	flagCRepro    = flag.String("crepro", filepath.Join(".", "repro.c"), "output c file (repro.c)")
+	flagTitle     = flag.String("title", "", "where to save the title of the reproduced bug")
+	flagStrace    = flag.String("strace", "", "output strace log (strace_bin must be set)")
+	flagExecDebug = flag.Bool("executor_debug", false, "enable executor debug output")
 )
 
 func main() {
@@ -38,6 +39,7 @@ func main() {
 	if err != nil {
 		log.Fatalf("%v: %v", *flagConfig, err)
 	}
+	repro.SetExecutorDebug(*flagExecDebug || *flagDebug)
 	logFile := flag.Args()[0]
 	data, err := os.ReadFile(logFile)
 	if err != nil {

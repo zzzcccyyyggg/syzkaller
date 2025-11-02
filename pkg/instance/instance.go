@@ -526,7 +526,7 @@ func OldFuzzerCmd(fuzzer, executor, name, OS, arch, fwdAddr, sandbox string, san
 }
 
 func ExecprogCmd(execprog, executor, OS, arch, sandbox string, sandboxArg int, repeat, threaded, collide bool,
-	procs, faultCall, faultNth int, optionalFlags bool, slowdown int, progFile string) string {
+	procs, faultCall, faultNth int, optionalFlags bool, slowdown int, debug bool, progFile string) string {
 	repeatCount := 1
 	if repeat {
 		repeatCount = 0
@@ -543,10 +543,16 @@ func ExecprogCmd(execprog, executor, OS, arch, sandbox string, sandboxArg int, r
 	}
 
 	if optionalFlags {
-		optionalArg += " " + tool.OptionalFlags([]tool.Flag{
+		flags := []tool.Flag{
 			{Name: "slowdown", Value: fmt.Sprint(slowdown)},
 			{Name: "sandboxArg", Value: fmt.Sprint(sandboxArg)},
-		})
+		}
+		if debug {
+			flags = append(flags, tool.Flag{Name: "debug", Value: "true"})
+		}
+		optionalArg += " " + tool.OptionalFlags(flags)
+	} else if debug {
+		optionalArg += " -debug=1"
 	}
 
 	return fmt.Sprintf("%v -executor=%v -arch=%v%v -sandbox=%v"+
@@ -559,7 +565,7 @@ func ExecprogCmd(execprog, executor, OS, arch, sandbox string, sandboxArg int, r
 // RaceValidationCmd builds command for race validation execution in syz-execprog
 func RaceValidationCmd(execprog, executor, OS, arch string, raceSignal, varName1, varName2,
 	callStack1, callStack2, sn1, sn2 uint64, lockStatus uint32, attempts int,
-	optionalFlags bool, slowdown int, prog1File, prog2File string) string {
+	optionalFlags bool, slowdown int, debug bool, prog1File, prog2File string) string {
 	osArg := ""
 	if targets.Get(OS, arch).HostFuzzer {
 		osArg = " -os=" + OS
@@ -567,9 +573,15 @@ func RaceValidationCmd(execprog, executor, OS, arch string, raceSignal, varName1
 
 	optionalArg := ""
 	if optionalFlags {
-		optionalArg = " " + tool.OptionalFlags([]tool.Flag{
+		flags := []tool.Flag{
 			{Name: "slowdown", Value: fmt.Sprint(slowdown)},
-		})
+		}
+		if debug {
+			flags = append(flags, tool.Flag{Name: "debug", Value: "true"})
+		}
+		optionalArg = " " + tool.OptionalFlags(flags)
+	} else if debug {
+		optionalArg = " -debug=1"
 	}
 
 	return fmt.Sprintf("%v -executor=%v -arch=%v%v -race-validation"+

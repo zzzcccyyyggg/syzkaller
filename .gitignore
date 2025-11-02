@@ -33,3 +33,10 @@ log
 /build
 
 *.log
+
+/*.c
+/*.txt
+/*.sh
+/*.extract
+syz-log2corpus
+syz-uaf-validate

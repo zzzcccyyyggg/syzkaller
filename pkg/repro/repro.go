@@ -43,26 +43,33 @@ type Stats struct {
 	SimplifyCTime    time.Duration
 }
 
+var enableExecutorDebug bool
+
+func SetExecutorDebug(enabled bool) {
+	enableExecutorDebug = enabled
+}
+
 type reproInstance struct {
 	index    int
 	execProg execInterface
 }
 
 type context struct {
-	logf         func(string, ...interface{})
-	target       *targets.Target
-	reporter     *report.Reporter
-	crashTitle   string
-	crashType    crash.Type
-	crashStart   int
-	entries      []*prog.LogEntry
-	instances    chan *reproInstance
-	bootRequests chan int
-	testTimeouts []time.Duration
-	startOpts    csource.Options
-	stats        *Stats
-	report       *report.Report
-	timeouts     targets.Timeouts
+	logf          func(string, ...interface{})
+	target        *targets.Target
+	reporter      *report.Reporter
+	crashTitle    string
+	crashType     crash.Type
+	crashStart    int
+	entries       []*prog.LogEntry
+	instances     chan *reproInstance
+	bootRequests  chan int
+	testTimeouts  []time.Duration
+	startOpts     csource.Options
+	stats         *Stats
+	report        *report.Report
+	timeouts      targets.Timeouts
+	executorDebug bool
 }
 
 // execInterface describes what's needed from a VM by a pkg/repro.
@@ -131,20 +138,24 @@ func prepareCtx(crashLog []byte, cfg *mgrconfig.Config, features *host.Features,
 		testTimeouts = testTimeouts[2:]
 	}
 	ctx := &context{
-		target:       cfg.SysTarget,
-		reporter:     reporter,
-		crashTitle:   crashTitle,
-		crashType:    crashType,
-		crashStart:   crashStart,
-		entries:      entries,
-		instances:    make(chan *reproInstance, VMs),
-		bootRequests: make(chan int, VMs),
-		testTimeouts: testTimeouts,
-		startOpts:    createStartOptions(cfg, features, crashType),
-		stats:        new(Stats),
-		timeouts:     cfg.Timeouts,
+		target:        cfg.SysTarget,
+		reporter:      reporter,
+		crashTitle:    crashTitle,
+		crashType:     crashType,
+		crashStart:    crashStart,
+		entries:       entries,
+		instances:     make(chan *reproInstance, VMs),
+		bootRequests:  make(chan int, VMs),
+		testTimeouts:  testTimeouts,
+		startOpts:     createStartOptions(cfg, features, crashType),
+		stats:         new(Stats),
+		timeouts:      cfg.Timeouts,
+		executorDebug: enableExecutorDebug,
 	}
 	ctx.reproLogf(0, "%v programs, %v VMs, timeouts %v", len(entries), VMs, testTimeouts)
+	if ctx.executorDebug {
+		ctx.reproLogf(1, "executor debug output enabled")
+	}
 	return ctx, nil
 }
 
@@ -224,7 +235,6 @@ func (ctx *context) repro() (*Result, error) {
 			break
 		}
 	}
-
 	reproStart := time.Now()
 	defer func() {
 		ctx.reproLogf(3, "reproducing took %s", time.Since(reproStart))
@@ -278,7 +288,6 @@ func (ctx *context) extractProg(entries []*prog.LogEntry) (*Result, error) {
 	defer func() {
 		ctx.stats.ExtractProgTime = time.Since(start)
 	}()
-
 	// Extract last program on every proc.
 	procs := make(map[int]int)
 	for i, ent := range entries {
@@ -294,6 +303,8 @@ func (ctx *context) extractProg(entries []*prog.LogEntry) (*Result, error) {
 		lastEntries = append(lastEntries, entries[indices[i]])
 	}
 	for _, timeout := range ctx.testTimeouts {
+		// ctx.reproLogf(0, "full: executing full log with %s programs and timeout %s", encodeEntries(entries), timeout)
+			ctx.testFullLog(entries, timeout)
 		// Execute each program separately to detect simple crashes caused by a single program.
 		// Programs are executed in reverse order, usually the last program is the guilty one.
 		res, err := ctx.extractProgSingle(lastEntries, timeout)
@@ -346,6 +357,22 @@ func (ctx *context) extractProgSingle(entries []*prog.LogEntry, duration time.Du
 	}
 
 	ctx.reproLogf(3, "single: failed to extract reproducer")
+	return nil, nil
+}
+func (ctx *context) testFullLog(entries []*prog.LogEntry, baseDuration time.Duration) (*Result, error) {
+	opts := ctx.startOpts
+	duration := func(entries int) time.Duration {
+		return baseDuration + time.Duration(entries/4)*time.Second
+	}
+	for i := 0; i < 400; i++ {
+		if i == 1 {
+			// time.Sleep(120 * time.Second)
+		}
+		_, _ = ctx.testProgs(entries, duration(len(entries)), opts)
+	}
+	if len(entries) == 0 {
+		return nil, nil
+	}
 	return nil, nil
 }
 
@@ -544,6 +571,9 @@ func (ctx *context) testWithInstance(callback func(execInterface) (rep *instance
 	if err != nil {
 		return false, err
 	}
+	// if len(result.RawOutput) > 0 {
+	// 	ctx.reproLogf(3, "executor output:%s\n", string(result.RawOutput))
+	// }
 	rep := result.Report
 	if rep == nil {
 		return false, nil
@@ -667,7 +697,10 @@ func (ctx *context) createInstances(cfg *mgrconfig.Config, vmPool *vm.Pool) {
 				default:
 				}
 				inst, err := instance.CreateExecProgInstance(vmPool, vmIndex, cfg,
-					ctx.reporter, &instance.OptionalConfig{Logf: ctx.reproLogf})
+					ctx.reporter, &instance.OptionalConfig{
+						Logf:          ctx.reproLogf,
+						ExecutorDebug: ctx.executorDebug,
+					})
 				if err != nil {
 					ctx.reproLogf(0, "failed to boot instance (try %v): %v", try+1, err)
 					time.Sleep(10 * time.Second)

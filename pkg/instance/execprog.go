@@ -25,6 +25,7 @@ type OptionalConfig struct {
 	OldFlagsCompatMode bool
 	BeforeContextLen   int
 	StraceBin          string
+	ExecutorDebug      bool
 }
 
 type ExecProgInstance struct {
@@ -170,7 +171,7 @@ func (inst *ExecProgInstance) RunSyzProgFile(progFile string, duration time.Dura
 	}
 	command := ExecprogCmd(inst.execprogBin, inst.executorBin, target.OS, target.Arch, opts.Sandbox,
 		opts.SandboxArg, opts.Repeat, opts.Threaded, opts.Collide, opts.Procs, faultCall, opts.FaultNth,
-		!inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown, vmProgFile)
+		!inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown, inst.ExecutorDebug, vmProgFile)
 	return inst.runCommand(command, duration)
 }
 
@@ -218,7 +219,7 @@ func (inst *ExecProgInstance) RunRaceValidation(prog1Data, prog2Data []byte, dur
 	command := RaceValidationCmd(inst.execprogBin, inst.executorBin, target.OS, target.Arch,
 		raceSignal, varName1, varName2, callStack1, callStack2, sn1, sn2,
 		lockStatus, attempts, !inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown,
-		vmProg1, vmProg2)
+		inst.ExecutorDebug, vmProg1, vmProg2)
 
 	return inst.runCommand(command, duration)
 }

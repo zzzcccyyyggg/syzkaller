@@ -270,7 +270,7 @@ int access_context_analyze_uaf_pairs(AccessContext* record_ctx, UAFPair* uaf_pai
 {
 	// ===============DDRD====================
 	// UAF检测时间阈值（微秒）
-	const uint64_t TIME_THRESHOLD = 1000000; // 10ms
+	const uint64_t TIME_THRESHOLD = 10000000000; // 10s
 	// ===============DDRD====================
 
 	int pair_count = 0;

@@ -99,7 +99,7 @@ func TestExecprogCmd(t *testing.T) {
 	flagSandbox := flags.String("sandbox", "none", "sandbox for fuzzing (none/setuid/namespace/android)")
 	flagSlowdown := flags.Int("slowdown", 1, "")
 	cmdLine := ExecprogCmd(os.Args[0], "/myexecutor", targets.FreeBSD, targets.I386,
-		"namespace", 3, true, false, true, 7, 2, 3, true, 10, "myprog")
+		"namespace", 3, true, false, true, 7, 2, 3, true, 10, false, "myprog")
 	args := strings.Split(cmdLine, " ")[1:]
 	if err := tool.ParseFlags(flags, args); err != nil {
 		t.Fatal(err)
