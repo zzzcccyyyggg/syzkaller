@@ -218,6 +218,14 @@ static uint64 slowdown_scale;
 // Can be used to disginguish whether we're at the initialization stage
 // or we already execute programs.
 static bool in_execute_one = false;
+// ===============DDRD Pair-safety flags====================
+// While executing a pair in the parent process we must ensure that the
+// control pipe always receives a completion reply even if some internal
+// fail/doexit path is hit. pair_in_progress is set for the duration of
+// execute_pair in the parent. pair_reply_sent is set when the reply is
+// successfully written to the control pipe.
+static volatile bool pair_in_progress = false;
+static volatile bool pair_reply_sent = false;
 
 #define SYZ_EXECUTOR 1
 
@@ -1175,6 +1183,13 @@ void receive_execute_pair_internal(const execute_pair_req& req)
 
 void execute_pair(const execute_pair_req& req)
 {
+#if 1
+	// Mark that a pair execution is in progress in the parent. This allows
+	// fail paths to detect pair context and attempt to send a completion
+	// reply before exiting, avoiding EOF on the IPC side.
+	pair_in_progress = true;
+	pair_reply_sent = false;
+#endif
 #if GOOS_linux
 	// Switch to LOG mode before execution
 	if (ukc_controller) {
@@ -1343,7 +1358,10 @@ void execute_pair(const execute_pair_req& req)
 	reply_execute_pair(final_status);
 	debug("[%llums] execute_pair: reply_execute_pair returned successfully\n",
 	      current_time_ms() - start_time_ms);
-	
+
+	// Mark pair as finished (reply already sent) so other exit paths don't try to resend.
+	pair_in_progress = false;
+
 	// Clean up shared memory after reply is sent
 	cleanup_pair_syscall_shared_memory();
 }
@@ -1950,14 +1968,16 @@ void reply_execute_pair(int status)
 	reply.status = status;
 	debug("[%llums] reply_execute_pair: writing to pipe, magic=0x%x, done=%d, status=%d\n",
 	      current_time_ms() - start_time_ms, reply.magic, reply.done, reply.status);
-	ssize_t written = write(kOutPipeFd, &reply, sizeof(reply));
-	if (written != sizeof(reply)) {
-		debug("[%llums] reply_execute_pair: write failed! written=%ld, expected=%zu, errno=%d\n",
-		      current_time_ms() - start_time_ms, (long)written, sizeof(reply), errno);
-		fail("control pipe write failed");
-	}
-	debug("[%llums] reply_execute_pair: successfully sent reply\n", 
-	      current_time_ms() - start_time_ms);
+    ssize_t written = write(kOutPipeFd, &reply, sizeof(reply));
+    if (written != sizeof(reply)) {
+	  debug("[%llums] reply_execute_pair: write failed! written=%ld, expected=%zu, errno=%d\n",
+		  current_time_ms() - start_time_ms, (long)written, sizeof(reply), errno);
+	  fail("control pipe write failed");
+    }
+    // Mark that we successfully sent the pair reply so other exit paths don't try again.
+    pair_reply_sent = true;
+    debug("[%llums] reply_execute_pair: successfully sent reply\n", 
+	    current_time_ms() - start_time_ms);
 }
 #if SYZ_EXECUTOR_USES_SHMEM
 void realloc_output_data()
@@ -2993,8 +3013,20 @@ void failmsg(const char* err, const char* msg, ...)
 	// All fail() invocations during system call execution with enabled fault injection
 	// lead to termination with zero exit code. In all other cases, the exit code is
 	// kFailStatus.
-	if (current_thread && current_thread->soft_fail_state)
+	if (current_thread && current_thread->soft_fail_state) {
+		// Attempt to send a pair completion reply (status 0) if we're the parent
+		// and a pair execution is in progress and nobody has sent the reply yet.
+		if (pair_in_progress && !pair_reply_sent && !is_pair_prog1 && !is_pair_prog2) {
+			debug("[%llums] failmsg: sending pair reply (soft_fail_state) before exit\n", current_time_ms() - start_time_ms);
+			reply_execute_pair(0);
+		}
 		doexit(0);
+	}
+	// Fatal exit path: try to send pair reply with failure status if needed.
+	if (pair_in_progress && !pair_reply_sent && !is_pair_prog1 && !is_pair_prog2) {
+		debug("[%llums] failmsg: sending pair reply (fatal) before exit\n", current_time_ms() - start_time_ms);
+		reply_execute_pair(kFailStatus);
+	}
 	doexit(kFailStatus);
 }
 
