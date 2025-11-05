@@ -2581,6 +2581,7 @@ func (mgr *Manager) initUAFValidateMode() error {
 	mgr.uafValidateIndex = 0
 
 	// Synchronize in-memory corpus items with persisted validation records.
+	validatedCount := 0
 	for pairID, item := range mgr.uafCorpus {
 		record, err := mgr.uafValidatedDB.GetValidatedRecord(pairID)
 		if err != nil {
@@ -2590,11 +2591,15 @@ func (mgr *Manager) initUAFValidateMode() error {
 		if record.IsValid {
 			item.Validated = true
 			item.ValidatedAt = record.ValidationTime
+			validatedCount++
 		} else {
 			item.Validated = false
 			item.ValidatedAt = time.Time{}
 		}
 	}
+
+	log.Logf(0, "uaf-validate: initialized queue with %d pending pairs (%d validated, corpus=%d)",
+		len(mgr.uafValidateQueue), validatedCount, len(mgr.uafCorpus))
 
 	return nil
 }
@@ -2623,8 +2628,15 @@ func (mgr *Manager) nextUAFValidateTask(requester string) (rpctype.UAFValidateTa
 			RebootAfter:      true,
 			TimeoutSec:       0,
 		}
+		pending := len(mgr.uafValidateQueue) - mgr.uafValidateIndex
+		if pending < 0 {
+			pending = 0
+		}
+		log.Logf(0, "uaf-validate: dispatched pair %x to %s (pending=%d, inflight=%d)",
+			pairID, requester, pending, len(mgr.uafInFlight))
 		return task, true
 	}
+	log.Logf(1, "uaf-validate: no pending validation tasks for %s", requester)
 	return rpctype.UAFValidateTask{}, false
 }
 
@@ -2693,6 +2705,15 @@ func (mgr *Manager) handleUAFValidateResult(res rpctype.UAFValidateResult) error
 		}
 	}
 
+	status := "validated"
+	if !succeeded {
+		if validationErr == "" {
+			status = "failed"
+		} else {
+			status = fmt.Sprintf("failed (%s)", validationErr)
+		}
+	}
+
 	if item != nil {
 		mgr.uafCorpusMu.Lock()
 		item.LastUpdated = time.Now()
@@ -2714,7 +2735,15 @@ func (mgr *Manager) handleUAFValidateResult(res rpctype.UAFValidateResult) error
 	// Remove from inflight
 	mgr.uafValidateMu.Lock()
 	delete(mgr.uafInFlight, res.PairID)
+	inflight := len(mgr.uafInFlight)
+	pending := len(mgr.uafValidateQueue) - mgr.uafValidateIndex
+	if pending < 0 {
+		pending = 0
+	}
+	total := len(mgr.uafValidateQueue)
 	mgr.uafValidateMu.Unlock()
+
+	log.Logf(0, "uaf-validate: pair %x %s (pending=%d/%d, inflight=%d)", res.PairID, status, pending, total, inflight)
 	return nil
 }
 
