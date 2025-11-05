@@ -173,6 +173,20 @@ type CheckModeRes struct {
 	IsTestPairMode bool
 }
 
+// ===============DDRD====================
+// Generic mode query for fuzzer startup.
+// Allows returning explicit mode names beyond a single boolean.
+type CurrentModeArgs struct {
+	Name string
+}
+
+type CurrentModeRes struct {
+	// Mode can be: "normal", "concurrency" (race pair), "uaf-validate" (UAF validation mode)
+	Mode string
+}
+
+// ===============DDRD====================
+
 const (
 	NoTask int64 = math.MaxInt64
 )
@@ -304,6 +318,50 @@ type GetPairCandidatesArgs struct {
 // GetPairCandidatesRes response with pair candidates
 type GetPairCandidatesRes struct {
 	PairCandidates []PairCandidate // requested pair candidates
+}
+
+// ===============DDRD====================
+
+// ===============DDRD====================
+// UAF Validation RPC structures
+
+// UAFValidateTask describes a single validation job sent from Manager to fuzzer.
+// ExecutionContext is optional and used only to restore VM state (no detection/collection during replay).
+type UAFValidateTask struct {
+	PairID           uint64
+	Prog1            []byte
+	Prog2            []byte
+	ExecutionContext []byte // serialized []vmexec.ExecutionRecord
+	RebootAfter      bool   // fuzzer should reboot/exit after finishing this task
+	TimeoutSec       int32  // optional per-task timeout in seconds (0 -> default)
+}
+
+type GetUAFValidateTaskArgs struct {
+	Name string
+}
+
+type GetUAFValidateTaskRes struct {
+	HasTask bool
+	Task    UAFValidateTask
+}
+
+// UAFValidateResult is the outcome of a validation run on fuzzer side.
+// Succeeded indicates whether UAF re-appeared during detection run.
+type UAFValidateResult struct {
+	PairID        uint64
+	Succeeded     bool
+	DetectedCount int
+	UAFs          []byte
+	Error         string
+}
+
+type ReportUAFValidateResultArgs struct {
+	Name   string
+	Result UAFValidateResult
+}
+
+type ReportUAFValidateResultRes struct {
+	Ack bool
 }
 
 // ===============DDRD====================

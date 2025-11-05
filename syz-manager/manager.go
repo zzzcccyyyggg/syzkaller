@@ -37,6 +37,7 @@ import (
 	"github.com/google/syzkaller/pkg/repro"
 	"github.com/google/syzkaller/pkg/rpctype"
 	"github.com/google/syzkaller/pkg/signal"
+	"github.com/google/syzkaller/pkg/uafvalidate"
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/sys/targets"
 	"github.com/google/syzkaller/vm"
@@ -121,6 +122,13 @@ type Manager struct {
 	reportedDataRaceCombinations map[string]bool
 	saturatedCalls               map[string]bool
 
+	// ===============DDRD: Lazy Pair Generation====================
+	// For dynamic on-demand pair generation to avoid startup delay and memory explosion
+	corpusCopyForPairs [][]byte // copy of corpus progs for pairing (immutable snapshot)
+	pairIndexI         int      // current i index for pair generation
+	pairIndexJ         int      // current j index for pair generation
+	// ===============DDRD====================
+
 	needMoreRepros     chan chan bool
 	externalReproQueue chan *Crash
 	reproRequest       chan chan map[string]bool
@@ -136,6 +144,16 @@ type Manager struct {
 	afterTriageStatSent bool
 
 	assetStorage *asset.Storage
+
+	// ===============UAF-VALIDATE====================
+	// Validation mode state
+	uafValidateMode  bool
+	uafValidatedDB   *uafvalidate.ValidatedDB
+	uafValidateQueue []uint64 // ordered list of pairIDs to validate
+	uafValidateIndex int
+	uafValidateMu    sync.Mutex
+	uafInFlight      map[uint64]string // pairID -> fuzzer name
+	// ===============UAF-VALIDATE====================
 }
 
 type CorpusItemUpdate struct {
@@ -171,18 +189,21 @@ type RaceCorpusItem struct {
 
 // UAFCorpusItem represents a UAF pair item in the corpus
 type UAFCorpusItem struct {
-	PairID           string    `json:"pair_id"`
-	Prog1            []byte    `json:"prog1"`
-	Prog2            []byte    `json:"prog2"`
-	UAFSignal        []byte    `json:"uaf_signal"`        // serialized UAF signal
-	UAFs             []byte    `json:"uafs"`              // serialized []ddrd.MayUAFPair
-	Output           []byte    `json:"output"`            // execution output for debugging
-	ExecutionContext []byte    `json:"execution_context"` // serialized execution sequence context
-	FirstSeen        time.Time `json:"first_seen"`
-	LastUpdated      time.Time `json:"last_updated"`
-	Source           string    `json:"source"`             // source fuzzer name
-	LogPath          string    `json:"log_path,omitempty"` // path to log file for reproduction
-	Count            int       `json:"count"`              // discovery count
+	PairID            string    `json:"pair_id"`
+	Prog1             []byte    `json:"prog1"`
+	Prog2             []byte    `json:"prog2"`
+	UAFSignal         []byte    `json:"uaf_signal"`        // serialized UAF signal
+	UAFs              []byte    `json:"uafs"`              // serialized []ddrd.MayUAFPair
+	Output            []byte    `json:"output"`            // execution output for debugging
+	ExecutionContext  []byte    `json:"execution_context"` // serialized execution sequence context
+	FirstSeen         time.Time `json:"first_seen"`
+	LastUpdated       time.Time `json:"last_updated"`
+	Source            string    `json:"source"`             // source fuzzer name
+	LogPath           string    `json:"log_path,omitempty"` // path to log file for reproduction
+	Count             int       `json:"count"`              // discovery count
+	Validated         bool      `json:"validated,omitempty"`
+	ValidatedAt       time.Time `json:"validated_at,omitempty"`
+	LastValidationErr string    `json:"last_validation_error,omitempty"`
 }
 
 // ===============DDRD====================
@@ -309,6 +330,17 @@ func RunManager(cfg *mgrconfig.Config) {
 	// Initialize UAF corpus
 	mgr.initUAFCorpus()
 	// ===============DDRD====================
+
+	// Initialize UAF validation mode if requested (before RPC server starts)
+	if FuzzMode(cfg.Experimental.FuzzMode) == FuzzModeUAFValidate {
+		if err := mgr.initUAFValidateMode(); err != nil {
+			log.Logf(0, "failed to init UAF validate mode: %v", err)
+		} else {
+			log.Logf(0, "UAF validation mode initialized: %d pending pairs",
+				len(mgr.uafValidateQueue))
+		}
+	}
+
 	mgr.initStats() // Initializes prometheus variables.
 
 	mgr.initHTTP() // Creates HTTP server.
@@ -798,8 +830,11 @@ func (mgr *Manager) loadCorpus() {
 	}
 	mgr.phase = phaseLoadedCorpus
 
-	// Generate initial pair candidates after corpus is loaded
-	mgr.generatePairCandidates()
+	// ===============DDRD: Initialize lazy pair generation====================
+	// Instead of generating all pairs at startup (which causes delay and memory explosion),
+	// we copy corpus and use indices to generate pairs on-demand
+	mgr.initLazyPairGeneration()
+	// ===============DDRD====================
 }
 
 func (mgr *Manager) loadProg(data []byte, minimized, smashed bool) bool {
@@ -1393,71 +1428,105 @@ func (mgr *Manager) addNewCandidates(candidates []rpctype.Candidate) {
 	}
 }
 
-// generatePairCandidates creates pair candidates from current candidates
+// ===============DDRD: Lazy Pair Generation====================
+// initLazyPairGeneration prepares corpus copy and initializes pair indices.
+// Instead of pre-generating all pair combinations at startup (which is slow and memory-intensive),
+// we create a snapshot of corpus and generate pairs on-demand using (i,j) indices.
+func (mgr *Manager) initLazyPairGeneration() {
+	// Take a snapshot of current corpus for pair generation
+	mgr.corpusCopyForPairs = make([][]byte, 0, len(mgr.corpus))
+	for _, item := range mgr.corpus {
+		mgr.corpusCopyForPairs = append(mgr.corpusCopyForPairs, item.Prog)
+	}
+
+	// Also include candidates if corpus is empty
+	if len(mgr.corpusCopyForPairs) == 0 && len(mgr.candidates) > 0 {
+		for _, cand := range mgr.candidates {
+			mgr.corpusCopyForPairs = append(mgr.corpusCopyForPairs, cand.Prog)
+		}
+	}
+
+	// Initialize pair indices to start from (0, 0)
+	mgr.pairIndexI = 0
+	mgr.pairIndexJ = 0
+
+	totalPossiblePairs := 0
+	if n := len(mgr.corpusCopyForPairs); n > 0 {
+		totalPossiblePairs = n * (n + 1) / 2 // triangular number for pairs with i<=j
+	}
+
+	log.Logf(0, "lazy pair generation initialized: %d corpus programs, ~%d possible pairs (will generate on-demand)",
+		len(mgr.corpusCopyForPairs), totalPossiblePairs)
+}
+
+// generatePairCandidatesLazy generates the next batch of pairs on-demand using indices.
+// Returns the number of pairs generated.
+func (mgr *Manager) generatePairCandidatesLazy(count int) int {
+	if len(mgr.corpusCopyForPairs) == 0 {
+		return 0
+	}
+
+	n := len(mgr.corpusCopyForPairs)
+	generated := 0
+
+	for generated < count {
+		// Check if we've exhausted all pairs
+		if mgr.pairIndexI >= n {
+			// Wrap around to beginning (circular iteration)
+			mgr.pairIndexI = 0
+			mgr.pairIndexJ = 0
+		}
+
+		// Generate pair (i, j) where j >= i
+		prog1 := mgr.corpusCopyForPairs[mgr.pairIndexI]
+		prog2 := mgr.corpusCopyForPairs[mgr.pairIndexJ]
+		pairID := ddrd.GeneratePairID(prog1, prog2)
+
+		pair := rpctype.PairCandidate{
+			Prog1:  prog1,
+			Prog2:  prog2,
+			PairID: pairID,
+		}
+		mgr.pairCandidates = append(mgr.pairCandidates, pair)
+		generated++
+
+		// Advance indices: iterate j from i to n-1, then move to next i
+		mgr.pairIndexJ++
+		if mgr.pairIndexJ >= n {
+			mgr.pairIndexI++
+			mgr.pairIndexJ = mgr.pairIndexI
+		}
+	}
+
+	return generated
+}
+
+// Deprecated: old eager pair generation (kept for reference, will be removed)
 func (mgr *Manager) generatePairCandidates() {
-	if len(mgr.candidates) == 0 {
-		return
-	}
-
-	// Save a backup of candidates for fallback pair generation
-	// This ensures we always have programs available even when corpus is empty
-	if len(mgr.corpusBackup) == 0 {
-		mgr.corpusBackup = make([][]byte, 0, len(mgr.candidates))
-		for _, candidate := range mgr.candidates {
-			mgr.corpusBackup = append(mgr.corpusBackup, candidate.Prog)
-		}
-		log.Logf(1, "saved %d programs to corpus backup for fallback pair generation", len(mgr.corpusBackup))
-	}
-
-	// Generate pairs from recent candidates (avoid O(n^2) for large candidate sets)
-	// Only pair the last few candidates with existing ones
-	maxNewPairs := 1000000 // limit to avoid memory explosion
-	startIndex := 0
-	if len(mgr.candidates) > 1000 {
-		startIndex = len(mgr.candidates) - 1000 // only use last 1000 candidates for pairing
-	}
-
-	// Track existing PairIDs to avoid duplicates
-	existingPairs := make(map[uint64]bool)
-	for _, pair := range mgr.pairCandidates {
-		existingPairs[pair.PairID] = true
-	}
-
-	pairsGenerated := 0
-	// Generate pairs: i with j where j >= i (allowing self-pairing when i==j)
-	for i := startIndex; i < len(mgr.candidates) && pairsGenerated < maxNewPairs; i++ {
-		for j := i; j < len(mgr.candidates) && pairsGenerated < maxNewPairs; j++ {
-			pairID := ddrd.GeneratePairID(mgr.candidates[i].Prog, mgr.candidates[j].Prog)
-
-			// Skip if this pair already exists
-			if existingPairs[pairID] {
-				continue
-			}
-
-			pair := rpctype.PairCandidate{
-				Prog1:  mgr.candidates[i].Prog,
-				Prog2:  mgr.candidates[j].Prog,
-				PairID: pairID,
-			}
-
-			mgr.pairCandidates = append(mgr.pairCandidates, pair)
-			existingPairs[pairID] = true
-			pairsGenerated++
-		}
-	}
-
-	if pairsGenerated > 0 {
-		log.Logf(0, "generated %d pair candidates from %d candidates (including self-pairs)",
-			pairsGenerated, len(mgr.candidates))
-	} else {
-		log.Logf(0, "no new pair candidates generated from %d candidates", len(mgr.candidates))
-	}
+	// This method is now deprecated in favor of lazy generation.
+	// Keeping for potential fallback or testing purposes.
+	log.Logf(1, "generatePairCandidates (deprecated) called, use initLazyPairGeneration instead")
 }
 
 // pairCandidateBatch returns a batch of pair candidates (similar to candidateBatch)
+// Now with lazy generation: auto-refills queue when running low
 func (mgr *Manager) pairCandidateBatch(size int) []rpctype.PairCandidate {
 	mgr.mu.Lock()
 	defer mgr.mu.Unlock()
+
+	// Auto-refill: if queue is low, generate more pairs lazily
+	const minQueueSize = 100
+	if len(mgr.pairCandidates) < minQueueSize {
+		// Generate enough to fill queue plus requested batch
+		needed := size + minQueueSize - len(mgr.pairCandidates)
+		if needed > 0 {
+			generated := mgr.generatePairCandidatesLazy(needed)
+			if generated > 0 {
+				log.Logf(2, "lazy pair generation: generated %d new pairs, queue now has %d",
+					generated, len(mgr.pairCandidates))
+			}
+		}
+	}
 
 	var res []rpctype.PairCandidate
 	for i := 0; i < size && len(mgr.pairCandidates) > 0; i++ {
@@ -1501,8 +1570,22 @@ func (mgr *Manager) getPriorityPairCandidates(size int) []rpctype.PairCandidate 
 		mgr.raceCorpusCandidates = mgr.raceCorpusCandidates[count:]
 	}
 
-	// If still need more pairs, use generated pair candidates (randomly)
+	// If still need more pairs, ensure generated pair candidates are available (auto-refill lazily)
 	remaining := size - len(res)
+	if remaining > 0 {
+		// If not enough pre-generated pairs, generate more on-demand.
+		if len(mgr.pairCandidates) < remaining {
+			// Try to generate enough to satisfy request plus a small buffer.
+			need := remaining + 100 - len(mgr.pairCandidates)
+			if need < 0 {
+				need = remaining
+			}
+			generated := mgr.generatePairCandidatesLazy(need)
+			if generated > 0 {
+				log.Logf(2, "lazy pair generation (on-demand): generated %d new pairs, queue now has %d", generated, len(mgr.pairCandidates))
+			}
+		}
+	}
 	if remaining > 0 && len(mgr.pairCandidates) > 0 {
 		// Randomly shuffle and select
 		count := min(remaining, len(mgr.pairCandidates))
@@ -2468,3 +2551,201 @@ func (mgr *Manager) createMonitorConfig() *vm.MonitorConfig {
 }
 
 // ===============DDRD====================
+
+// ===============UAF-VALIDATE====================
+// UAF validation mode helpers
+
+// initUAFValidateMode prepares the validation DB and pending queue.
+func (mgr *Manager) initUAFValidateMode() error {
+	mgr.uafValidateMode = true
+
+	vdb, err := uafvalidate.OpenValidatedDB(mgr.cfg.Workdir)
+	if err != nil {
+		return err
+	}
+	mgr.uafValidatedDB = vdb
+	mgr.uafInFlight = make(map[uint64]string)
+
+	// Build validation queue from unvalidated pairs in the corpus DB.
+	var queue []uint64
+	if mgr.uafCorpusDB != nil {
+		queue = vdb.GetUnvalidatedPairs(mgr.uafCorpusDB)
+	}
+	// Fallback: if DB not available or empty, iterate current in-memory corpus.
+	if len(queue) == 0 {
+		for id := range mgr.uafCorpus {
+			queue = append(queue, id)
+		}
+	}
+	mgr.uafValidateQueue = queue
+	mgr.uafValidateIndex = 0
+
+	// Synchronize in-memory corpus items with persisted validation records.
+	for pairID, item := range mgr.uafCorpus {
+		record, err := mgr.uafValidatedDB.GetValidatedRecord(pairID)
+		if err != nil {
+			continue
+		}
+		item.LastValidationErr = record.LastError
+		if record.IsValid {
+			item.Validated = true
+			item.ValidatedAt = record.ValidationTime
+		} else {
+			item.Validated = false
+			item.ValidatedAt = time.Time{}
+		}
+	}
+
+	return nil
+}
+
+// nextUAFValidateTask pops the next validation task (if any).
+func (mgr *Manager) nextUAFValidateTask(requester string) (rpctype.UAFValidateTask, bool) {
+	mgr.uafValidateMu.Lock()
+	defer mgr.uafValidateMu.Unlock()
+	// Find next non-inflight task
+	for mgr.uafValidateIndex < len(mgr.uafValidateQueue) {
+		pairID := mgr.uafValidateQueue[mgr.uafValidateIndex]
+		mgr.uafValidateIndex++
+		if _, busy := mgr.uafInFlight[pairID]; busy {
+			continue
+		}
+		item := mgr.uafCorpus[pairID]
+		if item == nil {
+			continue
+		}
+		mgr.uafInFlight[pairID] = requester
+		task := rpctype.UAFValidateTask{
+			PairID:           pairID,
+			Prog1:            item.Prog1,
+			Prog2:            item.Prog2,
+			ExecutionContext: item.ExecutionContext,
+			RebootAfter:      true,
+			TimeoutSec:       0,
+		}
+		return task, true
+	}
+	return rpctype.UAFValidateTask{}, false
+}
+
+// handleUAFValidateResult records validation outcome into the validation DB.
+func (mgr *Manager) handleUAFValidateResult(res rpctype.UAFValidateResult) error {
+	if mgr.uafValidatedDB == nil {
+		return nil
+	}
+
+	mgr.uafCorpusMu.Lock()
+	item := mgr.uafCorpus[res.PairID]
+	mgr.uafCorpusMu.Unlock()
+
+	var source string
+	if item != nil {
+		source = item.Source
+	}
+
+	succeeded := res.Succeeded
+	validationErr := res.Error
+
+	var reproducedPairs []ddrd.MayUAFPair
+	if len(res.UAFs) > 0 {
+		decoded, err := decodeUAFPairs(res.UAFs)
+		if err != nil {
+			log.Logf(0, "handleUAFValidateResult: failed to decode reproduced UAF pairs for %x: %v", res.PairID, err)
+		} else {
+			reproducedPairs = decoded
+		}
+	}
+
+	if succeeded {
+		if len(reproducedPairs) == 0 {
+			log.Logf(1, "handleUAFValidateResult: validation for %x reported success but no UAF data", res.PairID)
+			succeeded = false
+			if validationErr == "" {
+				validationErr = "missing reproduced UAF data"
+			}
+		} else {
+			var baseline []ddrd.MayUAFPair
+			if item != nil && len(item.UAFs) > 0 {
+				decoded, err := decodeUAFPairs(item.UAFs)
+				if err != nil {
+					log.Logf(0, "handleUAFValidateResult: failed to decode baseline UAF pairs for %x: %v", res.PairID, err)
+				} else {
+					baseline = decoded
+				}
+			}
+			if !uafSignalsOverlap(baseline, reproducedPairs) {
+				log.Logf(1, "handleUAFValidateResult: reproduced UAF signals for %x do not match corpus baseline", res.PairID)
+				succeeded = false
+				if validationErr == "" {
+					validationErr = "reproduced UAF signals mismatch"
+				}
+			}
+		}
+	}
+
+	if succeeded {
+		if err := mgr.uafValidatedDB.MarkAsValidated(res.PairID, source); err != nil {
+			return err
+		}
+	} else {
+		if err := mgr.uafValidatedDB.MarkAsInvalid(res.PairID, validationErr, source); err != nil {
+			return err
+		}
+	}
+
+	if item != nil {
+		mgr.uafCorpusMu.Lock()
+		item.LastUpdated = time.Now()
+		if succeeded {
+			item.Validated = true
+			item.ValidatedAt = time.Now()
+			item.LastValidationErr = ""
+			if len(res.UAFs) > 0 {
+				item.UAFs = res.UAFs
+			}
+		} else {
+			item.Validated = false
+			item.LastValidationErr = validationErr
+		}
+		mgr.uafCorpusMu.Unlock()
+		mgr.persistUAFCorpusItem(res.PairID)
+	}
+
+	// Remove from inflight
+	mgr.uafValidateMu.Lock()
+	delete(mgr.uafInFlight, res.PairID)
+	mgr.uafValidateMu.Unlock()
+	return nil
+}
+
+func decodeUAFPairs(data []byte) ([]ddrd.MayUAFPair, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	var pairs []ddrd.MayUAFPair
+	if err := json.Unmarshal(data, &pairs); err != nil {
+		return nil, err
+	}
+	return pairs, nil
+}
+
+func uafSignalsOverlap(baseline, reproduced []ddrd.MayUAFPair) bool {
+	if len(reproduced) == 0 {
+		return false
+	}
+	if len(baseline) == 0 {
+		return true
+	}
+	signals := make(map[uint64]struct{}, len(baseline))
+	for _, pair := range baseline {
+		signals[pair.Signal] = struct{}{}
+	}
+	for _, pair := range reproduced {
+		if _, ok := signals[pair.Signal]; ok {
+			return true
+		}
+	}
+	return false
+}
+
+// ===============UAF-VALIDATE====================

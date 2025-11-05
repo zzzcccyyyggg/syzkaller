@@ -1,0 +1,3 @@
+- [x] Compare validation results with existing UAF pairs and mark matching pairs as valid in both memory and persistent stores.
+- [x] Update corpus in-memory structures to reflect validated status without affecting ongoing validation queue handling.
+- [x] Ensure validation DB and manager logs capture the status transition when a UAF pair is confirmed reproducible.

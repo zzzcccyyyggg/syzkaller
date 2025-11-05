@@ -33,9 +33,10 @@ type FuzzMode string
 
 // Supported fuzzing modes
 const (
-	FuzzModeAuto        FuzzMode = "auto"        // Automatic two-phase mode
-	FuzzModeNormal      FuzzMode = "normal"      // Normal fuzzing only
-	FuzzModeConcurrency FuzzMode = "concurrency" // Concurrency testing only
+	FuzzModeAuto        FuzzMode = "auto"         // Automatic two-phase mode
+	FuzzModeNormal      FuzzMode = "normal"       // Normal fuzzing only
+	FuzzModeConcurrency FuzzMode = "concurrency"  // Concurrency testing only
+	FuzzModeUAFValidate FuzzMode = "uaf-validate" // UAF validation only (no corpus evolution)
 )
 
 // ModeTransitionManager manages restart-based mode transitions.
@@ -300,6 +301,12 @@ func NewFuzzScheduler(mode FuzzMode) *FuzzScheduler {
 		initialPhase = PhaseRaceFuzz
 		normalEnabled = false
 		raceEnabled = true
+	case FuzzModeUAFValidate:
+		// Validation mode does not perform regular fuzzing phases.
+		// Keep a default phase for internal book-keeping, but disable both.
+		initialPhase = PhaseNormalFuzz
+		normalEnabled = false
+		raceEnabled = false
 	default: // FuzzModeAuto
 		initialPhase = PhaseNormalFuzz
 		normalEnabled = true

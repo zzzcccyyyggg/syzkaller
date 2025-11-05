@@ -290,6 +290,56 @@ func (serv *RPCServer) Check(a *rpctype.CheckArgs, r *int) error {
 	return nil
 }
 
+// ===============UAF-VALIDATE====================
+// CheckCurrentMode returns the current execution mode as a string.
+func (serv *RPCServer) CheckCurrentMode(a *rpctype.CurrentModeArgs, r *rpctype.CurrentModeRes) error {
+	mode := "normal"
+	mgr := serv.mgr.(*Manager)
+	if mgr.fuzzScheduler != nil {
+		fm := mgr.fuzzScheduler.GetFuzzMode()
+		mode = string(fm)
+	} else if mgr.cfg != nil {
+		// Fallback to config value if scheduler not set
+		mode = mgr.cfg.Experimental.FuzzMode
+	}
+	r.Mode = mode
+	return nil
+}
+
+// GetUAFValidateTask provides the next UAF validation task if in validation mode.
+func (serv *RPCServer) GetUAFValidateTask(a *rpctype.GetUAFValidateTaskArgs, r *rpctype.GetUAFValidateTaskRes) error {
+	mgr := serv.mgr.(*Manager)
+	// Only serve tasks in uaf-validate mode.
+	if !mgr.uafValidateMode {
+		r.HasTask = false
+		return nil
+	}
+	task, ok := mgr.nextUAFValidateTask(a.Name)
+	r.HasTask = ok
+	if ok {
+		r.Task = task
+	}
+	return nil
+}
+
+// ReportUAFValidateResult records the outcome of a validation task.
+func (serv *RPCServer) ReportUAFValidateResult(a *rpctype.ReportUAFValidateResultArgs, r *rpctype.ReportUAFValidateResultRes) error {
+	mgr := serv.mgr.(*Manager)
+	if !mgr.uafValidateMode {
+		r.Ack = false
+		return nil
+	}
+	if err := mgr.handleUAFValidateResult(a.Result); err != nil {
+		log.Logf(0, "failed to record validation result for %x: %v", a.Result.PairID, err)
+		r.Ack = false
+		return nil
+	}
+	r.Ack = true
+	return nil
+}
+
+// ===============UAF-VALIDATE====================
+
 func (serv *RPCServer) NewInput(a *rpctype.NewInputArgs, r *int) error {
 	bad, disabled := checkProgram(serv.cfg.Target, serv.targetEnabledSyscalls, a.Input.Prog)
 	if bad != nil || disabled {

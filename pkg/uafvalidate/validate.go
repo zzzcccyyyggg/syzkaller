@@ -1,3 +1,6 @@
+//go:build uafvalidate_tool
+// +build uafvalidate_tool
+
 package uafvalidate
 
 import (

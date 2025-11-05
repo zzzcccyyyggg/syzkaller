@@ -114,6 +114,9 @@ type Fuzzer struct {
 
 	// Experimental flags.
 	resetAccState bool
+
+	// Current manager-advertised mode: "normal" | "concurrency" | "uaf-validate"
+	currentMode string
 }
 
 type FuzzerSnapshot struct {
@@ -381,12 +384,14 @@ func main() {
 
 	// ===============DDRD====================
 	// 在启动时一次性确定模式 (重启模式下整个生命周期保持不变)
-	fuzzer.isTestPairMode = fuzzer.determineInitialMode()
-	if fuzzer.isTestPairMode {
+	fuzzer.currentMode, fuzzer.isTestPairMode = fuzzer.determineCurrentMode()
+	switch fuzzer.currentMode {
+	case "uaf-validate":
+		log.Logf(0, "fuzzer started in UAF VALIDATE mode")
+	case "concurrency":
 		log.Logf(0, "fuzzer started in RACE PAIR mode")
-		// Start background pair queue maintenance goroutine for race pair mode
 		go fuzzer.pairQueueMaintenanceLoop()
-	} else {
+	default:
 		log.Logf(0, "fuzzer started in NORMAL mode")
 	}
 	// ===============DDRD====================
@@ -398,7 +403,15 @@ func main() {
 			log.SyzFatalf("failed to create proc: %v", err)
 		}
 		fuzzer.procs = append(fuzzer.procs, proc)
-		go proc.loop()
+		// In UAF VALIDATE mode, we don't start normal proc loops.
+		if fuzzer.currentMode != "uaf-validate" {
+			go proc.loop()
+		}
+	}
+
+	if fuzzer.currentMode == "uaf-validate" {
+		fuzzer.validateLoop()
+		return
 	}
 
 	fuzzer.pollLoop()
@@ -467,21 +480,118 @@ func (fuzzer *Fuzzer) filterDataRaceFrames(frames []string) {
 }
 
 // determineInitialMode 在启动时确定fuzzer的运行模式 (整个生命周期不变)
-func (fuzzer *Fuzzer) determineInitialMode() bool {
-	args := &rpctype.CheckModeArgs{
-		Name: fuzzer.name,
+func (fuzzer *Fuzzer) determineCurrentMode() (string, bool) {
+	// Preferred: CheckCurrentMode returns explicit mode string.
+	cur := &rpctype.CurrentModeRes{}
+	if err := fuzzer.manager.Call("Manager.CheckCurrentMode", &rpctype.CurrentModeArgs{Name: fuzzer.name}, cur); err == nil {
+		return cur.Mode, (cur.Mode == "concurrency")
 	}
+	// Fallback: legacy race pair boolean.
+	args := &rpctype.CheckModeArgs{Name: fuzzer.name}
 	res := &rpctype.CheckModeRes{}
 	if err := fuzzer.manager.Call("Manager.CheckTestPairMode", args, res); err != nil {
 		log.Logf(0, "CheckTestPairMode RPC失败: %v, 默认为normal模式", err)
-		return false
+		return "normal", false
 	}
 	if res.IsTestPairMode {
-		log.Logf(0, "Manager通知: 使用Test Pair模式")
-	} else {
-		log.Logf(0, "Manager通知: 使用Normal模式")
+		return "concurrency", true
 	}
-	return res.IsTestPairMode
+	return "normal", false
+}
+
+// validateLoop runs UAF validate tasks dispatched by Manager.
+func (fuzzer *Fuzzer) validateLoop() {
+	log.Logf(0, "validateLoop: entering validation task loop")
+	for {
+		// Fetch next task
+		gres := &rpctype.GetUAFValidateTaskRes{}
+		if err := fuzzer.manager.Call("Manager.GetUAFValidateTask", &rpctype.GetUAFValidateTaskArgs{Name: fuzzer.name}, gres); err != nil {
+			log.Logf(0, "GetUAFValidateTask RPC失败: %v", err)
+			time.Sleep(3 * time.Second * fuzzer.timeouts.Scale)
+			continue
+		}
+		if !gres.HasTask {
+			log.Logf(0, "validateLoop: no tasks available, sleeping")
+			time.Sleep(5 * time.Second * fuzzer.timeouts.Scale)
+			continue
+		}
+
+		task := gres.Task
+		var execErr error
+		succeeded := false
+		detectedCount := 0
+		var reproducedUAFs []byte
+
+		// Context replay (state restore) if provided: execute with no collection/detection side-effects
+		if len(task.ExecutionContext) != 0 {
+			var records []vmexec.ExecutionRecord
+			if err := json.Unmarshal(task.ExecutionContext, &records); err != nil {
+				log.Logf(1, "validateLoop: failed to unmarshal execution context for %x: %v", task.PairID, err)
+			} else if len(records) > 0 {
+				// Use first proc to replay sequence with minimal flags (no CollectUAF, no reporting)
+				proc := fuzzer.procs[0]
+				for _, rec := range records {
+					p1, err1 := fuzzer.target.Deserialize(rec.Prog1Data, prog.NonStrict)
+					p2, err2 := fuzzer.target.Deserialize(rec.Prog2Data, prog.NonStrict)
+					if err1 != nil || err2 != nil {
+						continue
+					}
+					opts1 := &ipc.ExecOpts{Flags: ipc.FlagTestPairSync}
+					opts2 := &ipc.ExecOpts{Flags: ipc.FlagTestPairSync}
+					_, _, _, _ = proc.env.ExecPair(opts1, opts2, p1, p2)
+				}
+			}
+		}
+
+		// Detection run on provided pair: allow detection but don't report or collect globally
+		{
+			proc := fuzzer.procs[0]
+			p1, err1 := fuzzer.target.Deserialize(task.Prog1, prog.NonStrict)
+			p2, err2 := fuzzer.target.Deserialize(task.Prog2, prog.NonStrict)
+			if err1 != nil || err2 != nil {
+				execErr = fmt.Errorf("failed to deserialize progs: %v / %v", err1, err2)
+			} else {
+				opts1 := &ipc.ExecOpts{Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF}
+				opts2 := &ipc.ExecOpts{Flags: ipc.FlagTestPairSync | ipc.FlagCollectUAF}
+				output, info, hanged, err := proc.env.ExecPair(opts1, opts2, p1, p2)
+				_ = output
+				_ = hanged
+				if err != nil {
+					execErr = err
+				} else if info != nil && len(info.MayUAFPairs) > 0 {
+					succeeded = true
+					detectedCount = len(info.MayUAFPairs)
+					if data, encErr := json.Marshal(info.MayUAFPairs); encErr != nil {
+						log.Logf(1, "validateLoop: failed to marshal reproduced UAF pairs for %x: %v", task.PairID, encErr)
+					} else {
+						reproducedUAFs = data
+					}
+				}
+			}
+		}
+
+		// Report result (never upsert corpus)
+		res := &rpctype.ReportUAFValidateResultRes{}
+		rargs := &rpctype.ReportUAFValidateResultArgs{
+			Name: fuzzer.name,
+			Result: rpctype.UAFValidateResult{
+				PairID:        task.PairID,
+				Succeeded:     succeeded,
+				DetectedCount: detectedCount,
+				UAFs:          reproducedUAFs,
+			},
+		}
+		if execErr != nil {
+			rargs.Result.Error = execErr.Error()
+		}
+		_ = fuzzer.manager.Call("Manager.ReportUAFValidateResult", rargs, res)
+
+		// Reboot/exit as per task directive
+		if task.RebootAfter {
+			log.Logf(0, "validateLoop: task %x finished (succ=%v, cnt=%d), exiting for reboot", task.PairID, succeeded, detectedCount)
+			os.Exit(0)
+		}
+	}
 }
 
 func (fuzzer *Fuzzer) pollLoop() {
