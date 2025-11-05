@@ -15,6 +15,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strconv"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -976,6 +977,8 @@ func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Re
 	atomic.AddUint32(&mgr.numFuzzing, 1)
 	defer atomic.AddUint32(&mgr.numFuzzing, ^uint32(0))
 
+	mode := mgr.effectiveFuzzerMode()
+
 	args := &instance.FuzzerCmdArgs{
 		Fuzzer:    fuzzerBin,
 		Executor:  executorBin,
@@ -996,6 +999,7 @@ func (mgr *Manager) runInstanceInner(index int, instanceName string) (*report.Re
 			SandboxArg:    mgr.cfg.SandboxArg,
 			PprofPort:     inst.PprofPort(),
 			ResetAccState: mgr.cfg.Experimental.ResetAccState,
+			Mode:          mode,
 		},
 	}
 	cmd := instance.FuzzerCmd(args)
@@ -2548,6 +2552,41 @@ func (mgr *Manager) createMonitorConfig() *vm.MonitorConfig {
 	}
 
 	return config
+}
+
+func (mgr *Manager) effectiveFuzzerMode() string {
+	if mgr.uafValidateMode {
+		return "uaf-validate"
+	}
+	if mgr.fuzzScheduler != nil {
+		switch mgr.fuzzScheduler.GetFuzzMode() {
+		case FuzzModeUAFValidate:
+			return "uaf-validate"
+		case FuzzModeConcurrency:
+			return "concurrency"
+		case FuzzModeAuto:
+			if mgr.fuzzScheduler.GetCurrentPhase() == PhaseRaceFuzz {
+				return "concurrency"
+			}
+			return "normal"
+		case FuzzModeNormal:
+			return "normal"
+		default:
+			if mode := strings.TrimSpace(string(mgr.fuzzScheduler.GetFuzzMode())); mode != "" {
+				return strings.ToLower(mode)
+			}
+		}
+	}
+	if mgr.cfg != nil {
+		mode := strings.ToLower(strings.TrimSpace(mgr.cfg.Experimental.FuzzMode))
+		switch mode {
+		case string(FuzzModeConcurrency):
+			return "concurrency"
+		case string(FuzzModeUAFValidate):
+			return "uaf-validate"
+		}
+	}
+	return "normal"
 }
 
 // ===============DDRD====================

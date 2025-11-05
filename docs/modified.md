@@ -19,7 +19,7 @@
 ### 1) RPC 类型与接口（新增）
 
 文件：`pkg/rpctype/rpctype.go`
-- 新增模式查询：
+- 模式查询结构体（保留兼容旧版 fuzzer，现阶段通过 CLI 参数直接传递模式）：
   - `type CurrentModeArgs struct{ Name string }`
   - `type CurrentModeRes struct{ Mode string }` // "normal" | "concurrency" | "uaf-validate"
 - 新增 UAF 验证任务/结果：
@@ -68,7 +68,7 @@
 文件：`syz-fuzzer/fuzzer.go`
 - 新增字段：`currentMode string` // "normal" | "concurrency" | "uaf-validate"
 - 启动模式判定：
-  - 新方法 `determineCurrentMode()`：优先调用 `CheckCurrentMode` 返回字符串模式；失败时 fallback `CheckTestPairMode`
+  - 新增 `-mode` CLI 参数；manager 通过 optional flags 传入，fuzzer 使用 `normalizeModeFlag` 归一化该参数并决定运行路径（不再依赖 RPC 查询）。
 - 验证循环：
   - 若 `currentMode == "uaf-validate"`：不启动常规 `proc.loop()` 与 `pollLoop()`，转入 `validateLoop()`
   - `validateLoop()`：
@@ -134,7 +134,10 @@
 - `pkg/rpctype/rpctype.go`：新增模式查询与 UAF 验证任务/结果的 RPC 结构体
 - `syz-manager/fuzz_scheduler.go`：新增 `FuzzModeUAFValidate`
 - `syz-manager/manager.go`：新增验证模式状态与并发调度、任务派发与结果落库
-- `syz-manager/rpc.go`：新增 `CheckCurrentMode`、`GetUAFValidateTask`、`ReportUAFValidateResult`
+- `syz-manager/rpc.go`：新增 `GetUAFValidateTask`、`ReportUAFValidateResult`（`CheckCurrentMode` 保留兼容但 fuzzer 默认使用 CLI 参数）
+- `pkg/instance/instance.go`：optional flag 增加 `mode` 传递；
+- `syz-manager/manager.go`：新增 `effectiveFuzzerMode()` 计算实际模式并通过命令行参数传递给 fuzzer
+- `syz-fuzzer/fuzzer.go`：新增 `-mode` flag、去除 RPC 模式探测、保持验证循环逻辑
 - `syz-fuzzer/fuzzer.go`：新增 `uaf-validate` 启动流与 `validateLoop`（不污染全局）
 - `pkg/uafvalidate/validate.go`：加 build tag，默认不参与编译
 

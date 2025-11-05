@@ -14,6 +14,7 @@ import (
 	"runtime"
 	"runtime/debug"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -200,6 +201,18 @@ func createIPCConfig(features *host.Features, config *ipc.Config) {
 // It coincides with prog.MaxPids.
 const gateSize = prog.MaxPids
 
+func normalizeModeFlag(mode string) (string, bool) {
+	mode = strings.ToLower(strings.TrimSpace(mode))
+	switch mode {
+	case "", "normal":
+		return "normal", true
+	case "concurrency", "uaf-validate":
+		return mode, true
+	default:
+		return "normal", false
+	}
+}
+
 // nolint: funlen
 func main() {
 	debug.SetGCPercent(50)
@@ -215,6 +228,7 @@ func main() {
 		flagRunTest   = flag.Bool("runtest", false, "enable program testing mode") // used by pkg/runtest
 		flagRawCover  = flag.Bool("raw_cover", false, "fetch raw coverage")
 		flagPprofPort = flag.Int("pprof_port", 0, "HTTP port for the pprof endpoint (disabled if 0)")
+		flagMode      = flag.String("mode", "normal", "execution mode (normal|concurrency|uaf-validate)")
 
 		// Experimental flags.
 		flagResetAccState = flag.Bool("reset_acc_state", false, "restarts executor before most executions")
@@ -327,6 +341,12 @@ func main() {
 		return
 	}
 
+	mode, recognized := normalizeModeFlag(*flagMode)
+	if !recognized {
+		log.Logf(0, "unknown mode %q, falling back to NORMAL", *flagMode)
+	}
+	isTestPairMode := mode == "concurrency"
+
 	needPoll := make(chan struct{}, 1)
 	needPoll <- struct{}{}
 	fuzzer := &Fuzzer{
@@ -349,6 +369,8 @@ func main() {
 		// Queue no more than ~3 new inputs / proc.
 		parallelNewInputs: make(chan struct{}, int64(3**flagProcs)),
 		resetAccState:     *flagResetAccState,
+		isTestPairMode:    isTestPairMode,
+		currentMode:       mode,
 		// ===============DDRD====================
 		// Initialize separate race pair work queue
 		uafPairWorkQueue: NewUAFPairWorkQueue(*flagProcs),
@@ -384,7 +406,6 @@ func main() {
 
 	// ===============DDRD====================
 	// 在启动时一次性确定模式 (重启模式下整个生命周期保持不变)
-	fuzzer.currentMode, fuzzer.isTestPairMode = fuzzer.determineCurrentMode()
 	switch fuzzer.currentMode {
 	case "uaf-validate":
 		log.Logf(0, "fuzzer started in UAF VALIDATE mode")
@@ -392,6 +413,11 @@ func main() {
 		log.Logf(0, "fuzzer started in RACE PAIR mode")
 		go fuzzer.pairQueueMaintenanceLoop()
 	default:
+		if fuzzer.currentMode != "normal" {
+			log.Logf(0, "fuzzer started with mode %q (treated as NORMAL)", fuzzer.currentMode)
+		}
+		fuzzer.currentMode = "normal"
+		fuzzer.isTestPairMode = false
 		log.Logf(0, "fuzzer started in NORMAL mode")
 	}
 	// ===============DDRD====================
@@ -477,26 +503,6 @@ func (fuzzer *Fuzzer) filterDataRaceFrames(frames []string) {
 		log.SyzFatalf("failed to set KCSAN filterlist: %v", err)
 	}
 	log.Logf(0, "%s", output)
-}
-
-// determineInitialMode 在启动时确定fuzzer的运行模式 (整个生命周期不变)
-func (fuzzer *Fuzzer) determineCurrentMode() (string, bool) {
-	// Preferred: CheckCurrentMode returns explicit mode string.
-	cur := &rpctype.CurrentModeRes{}
-	if err := fuzzer.manager.Call("Manager.CheckCurrentMode", &rpctype.CurrentModeArgs{Name: fuzzer.name}, cur); err == nil {
-		return cur.Mode, (cur.Mode == "concurrency")
-	}
-	// Fallback: legacy race pair boolean.
-	args := &rpctype.CheckModeArgs{Name: fuzzer.name}
-	res := &rpctype.CheckModeRes{}
-	if err := fuzzer.manager.Call("Manager.CheckTestPairMode", args, res); err != nil {
-		log.Logf(0, "CheckTestPairMode RPC失败: %v, 默认为normal模式", err)
-		return "normal", false
-	}
-	if res.IsTestPairMode {
-		return "concurrency", true
-	}
-	return "normal", false
 }
 
 // validateLoop runs UAF validate tasks dispatched by Manager.

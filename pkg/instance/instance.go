@@ -461,6 +461,7 @@ type OptionalFuzzerArgs struct {
 	SandboxArg    int
 	PprofPort     int
 	ResetAccState bool
+	Mode          string
 }
 
 type FuzzerCmdArgs struct {
@@ -504,6 +505,9 @@ func FuzzerCmd(args *FuzzerCmdArgs) string {
 			{Name: "sandbox_arg", Value: fmt.Sprint(args.Optional.SandboxArg)},
 			{Name: "pprof_port", Value: fmt.Sprint(args.Optional.PprofPort)},
 			{Name: "reset_acc_state", Value: fmt.Sprint(args.Optional.ResetAccState)},
+		}
+		if args.Optional.Mode != "" {
+			flags = append(flags, tool.Flag{Name: "mode", Value: args.Optional.Mode})
 		}
 		optionalArg = " " + tool.OptionalFlags(flags)
 	}
