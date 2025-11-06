@@ -244,27 +244,32 @@ GUEST_CODE static noinline void guest_handle_wr_crn(struct api_call_2* cmd)
 	volatile uint64 reg = cmd->args[0];
 	if (reg == 0) {
 		// Move value to CR0.
-		asm volatile("movq %0, %%cr0" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%cr0" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 2) {
 		// Move value to CR2.
-		asm volatile("movq %0, %%cr2" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%cr2" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 3) {
 		// Move value to CR3.
-		asm volatile("movq %0, %%cr3" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%cr3" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 4) {
 		// Move value to CR4.
-		asm volatile("movq %0, %%cr4" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%cr4" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 8) {
 		// Move value to CR8 (TPR - Task Priority Register).
-		asm volatile("movq %0, %%cr8" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%cr8" ::"r"(value)
+			     : "memory");
 		return;
 	}
 }
@@ -275,35 +280,43 @@ GUEST_CODE static noinline void guest_handle_wr_drn(struct api_call_2* cmd)
 	uint64 value = cmd->args[1];
 	volatile uint64 reg = cmd->args[0];
 	if (reg == 0) {
-		asm volatile("movq %0, %%dr0" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr0" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 1) {
-		asm volatile("movq %0, %%dr1" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr1" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 2) {
-		asm volatile("movq %0, %%dr2" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr2" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 3) {
-		asm volatile("movq %0, %%dr3" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr3" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 4) {
-		asm volatile("movq %0, %%dr4" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr4" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 5) {
-		asm volatile("movq %0, %%dr5" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr5" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 6) {
-		asm volatile("movq %0, %%dr6" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr6" ::"r"(value)
+			     : "memory");
 		return;
 	}
 	if (reg == 7) {
-		asm volatile("movq %0, %%dr7" ::"r"(value) : "memory");
+		asm volatile("movq %0, %%dr7" ::"r"(value)
+			     : "memory");
 		return;
 	}
 }
@@ -317,19 +330,25 @@ GUEST_CODE static noinline void guest_handle_in_dx(struct api_call_2* cmd)
 	if (size == 1) {
 		uint8 unused;
 		// Reads 1 byte from the port in DX into AL.
-		asm volatile("inb %1, %0" : "=a"(unused) : "d"(port));
+		asm volatile("inb %1, %0"
+			     : "=a"(unused)
+			     : "d"(port));
 		return;
 	}
 	if (size == 2) {
 		uint16 unused;
 		// Reads 2 bytes from the port in DX into AX.
-		asm volatile("inw %1, %0" : "=a"(unused) : "d"(port));
+		asm volatile("inw %1, %0"
+			     : "=a"(unused)
+			     : "d"(port));
 		return;
 	}
 	if (size == 4) {
 		uint32 unused;
 		// Reads 4 bytes from the port in DX into EAX.
-		asm volatile("inl %1, %0" : "=a"(unused) : "d"(port));
+		asm volatile("inl %1, %0"
+			     : "=a"(unused)
+			     : "d"(port));
 	}
 	return;
 }

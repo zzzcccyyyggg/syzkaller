@@ -32,7 +32,7 @@ import (
 func TestFuzz(t *testing.T) {
 	defer checkGoroutineLeaks()
 
-	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
+	target, err := getTestTarget()
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -94,7 +94,7 @@ func TestFuzz(t *testing.T) {
 
 func BenchmarkFuzzer(b *testing.B) {
 	b.ReportAllocs()
-	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
+	target, err := getTestTarget()
 	if err != nil {
 		b.Fatal(err)
 	}
@@ -118,6 +118,14 @@ func BenchmarkFuzzer(b *testing.B) {
 			req.Done(res)
 		}
 	})
+}
+
+func getTestTarget() (*prog.Target, error) {
+	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
+	if err == nil {
+		return target, nil
+	}
+	return prog.GetTarget(targets.TestOS, targets.TestArch64)
 }
 
 // Based on the example from Go documentation.

@@ -119,6 +119,6 @@ static void cover_collect(cover_t* cov)
 {
 	struct ksancov_trace* trace = (struct ksancov_trace*)cov->data;
 	cov->size = ksancov_trace_head(trace);
-	cov->data_offset = ((int64_t)&(trace->pcs)) - ((int64_t)(cov->data));
+	cov->data_offset = ((int64_t) & (trace->pcs)) - ((int64_t)(cov->data));
 	cov->pc_offset = trace->offset;
 }

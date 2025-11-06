@@ -278,6 +278,7 @@ static bool flag_collect_cover;
 static bool flag_collect_signal;
 static bool flag_dedup_cover;
 static bool flag_threaded;
+static bool flag_barrier;
 
 // If true, then executor should write the comparisons data to fuzzer.
 static bool flag_comparisons;
@@ -286,6 +287,9 @@ static uint64 request_id;
 static rpc::RequestType request_type;
 static uint64 all_call_signal;
 static bool all_extra_signal;
+static int64_t barrier_group_id;
+static int32_t barrier_index;
+static int32_t barrier_group_size;
 
 // Tunable timeouts, received with execute_req.
 static uint64 syscall_timeout_ms;
@@ -435,6 +439,9 @@ struct execute_req {
 	uint64 exec_flags;
 	uint64 all_call_signal;
 	bool all_extra_signal;
+	int64_t barrier_group_id;
+	int32_t barrier_index;
+	int32_t barrier_group_size;
 };
 
 struct execute_reply {
@@ -487,8 +494,9 @@ static void setup_control_pipes();
 static bool coverage_filter(uint64 pc);
 static rpc::ComparisonRaw convert(const kcov_comparison_t& cmp);
 static flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64 req_id, uint32 num_calls,
-						uint64 elapsed, uint64 freshness, uint32 status, bool hanged,
-						const std::vector<uint8_t>* process_output);
+					uint64 elapsed, uint64 freshness, uint32 status, bool hanged,
+					const std::vector<uint8_t>* process_output, uint64 barrier_procs,
+					int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size);
 static void parse_execute(const execute_req& req);
 static void parse_handshake(const handshake_req& req);
 
@@ -871,6 +879,10 @@ void parse_execute(const execute_req& req)
 	flag_threaded = req.exec_flags & (uint64)rpc::ExecFlag::Threaded;
 	all_call_signal = req.all_call_signal;
 	all_extra_signal = req.all_extra_signal;
+	flag_barrier = req.barrier_group_size > 0;
+	barrier_group_id = req.barrier_group_id;
+	barrier_index = req.barrier_index;
+	barrier_group_size = req.barrier_group_size;
 
 	debug("[%llums] exec opts: reqid=%llu type=%llu procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d "
 	      " sandbox=%d/%d/%d/%d timeouts=%llu/%llu/%llu kernel_64_bit=%d\n",
@@ -1451,7 +1463,8 @@ void write_extra_output()
 }
 
 flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64 req_id, uint32 num_calls, uint64 elapsed,
-					 uint64 freshness, uint32 status, bool hanged, const std::vector<uint8_t>* process_output)
+			uint64 freshness, uint32 status, bool hanged, const std::vector<uint8_t>* process_output,
+			uint64 barrier_procs, int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size)
 {
 	// In snapshot mode the output size is fixed and output_size is always initialized, so use it.
 	int out_size = flag_snapshot ? output_size : output->size.load(std::memory_order_relaxed) ?
@@ -1485,7 +1498,8 @@ flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64
 	auto output_off = output->result_offset.load(std::memory_order_relaxed);
 	if (output_off.IsNull() && process_output)
 		output_off = fbb.CreateVector(*process_output);
-	auto exec_off = rpc::CreateExecResultRaw(fbb, req_id, proc_id, output_off, hanged, error_off, prog_info_off);
+	auto exec_off = rpc::CreateExecResultRaw(fbb, req_id, proc_id, output_off, hanged, error_off, prog_info_off,
+					barrier_procs, barrier_group_id, barrier_index, barrier_group_size);
 	auto msg_off = rpc::CreateExecutorMessageRaw(fbb, rpc::ExecutorMessagesRaw::ExecResult,
 						     flatbuffers::Offset<void>(exec_off.o));
 	fbb.FinishSizePrefixed(msg_off);

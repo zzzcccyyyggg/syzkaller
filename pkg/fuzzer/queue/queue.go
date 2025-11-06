@@ -9,6 +9,7 @@ import (
 	"encoding/gob"
 	"errors"
 	"fmt"
+	"math/bits"
 	"math/rand"
 	"strings"
 	"sync"
@@ -30,6 +31,15 @@ type Request struct {
 	Prog        *prog.Prog // for RequestTypeProgram
 	BinaryFile  string     // for RequestTypeBinary
 	GlobPattern string     // for 	RequestTypeGlob
+
+	// Barrier controls synchronized execution across a set of procs.
+	// When Barrier is true, BarrierParticipants identifies the proc set as a bitmask.
+	Barrier             bool
+	BarrierParticipants uint64
+	// BarrierPrograms holds per-proc programs for barrier execution. Order matches BarrierProcList.
+	BarrierPrograms []*prog.Prog
+	// BarrierProcList contains proc indices extracted from BarrierParticipants in ascending order.
+	BarrierProcList []int
 
 	// Return all signal for these calls instead of new signal.
 	ReturnAllSignal []int
@@ -57,6 +67,50 @@ type Request struct {
 	mu     sync.Mutex
 	result *Result
 	done   chan struct{}
+}
+
+// SetBarrier configures the request for barrier execution across procs represented by mask.
+// Passing mask=0 clears barrier behavior.
+func (r *Request) SetBarrier(mask uint64) {
+	r.BarrierParticipants = mask
+	r.Barrier = mask != 0
+	if r.Barrier {
+		r.ExecOpts.ExecFlags |= flatrpc.ExecFlagBarrier
+		r.BarrierProcList = enumerateBarrierProcs(mask)
+	} else {
+		r.ExecOpts.ExecFlags &^= flatrpc.ExecFlagBarrier
+		r.BarrierPrograms = nil
+		r.BarrierProcList = nil
+	}
+}
+
+// SetBarrierPrograms assigns per-proc programs for barrier execution. The provided slice must
+// follow the same ordering as BarrierProcList (ascending proc indices). Passing nil clears any plan.
+func (r *Request) SetBarrierPrograms(programs []*prog.Prog) error {
+	if len(programs) == 0 {
+		r.BarrierPrograms = nil
+		return nil
+	}
+	if !r.Barrier {
+		return fmt.Errorf("barrier programs require barrier execution")
+	}
+	expected := bits.OnesCount64(r.BarrierParticipants)
+	if expected == 0 {
+		return fmt.Errorf("barrier participants mask is empty")
+	}
+	if len(programs) != expected {
+		return fmt.Errorf("mismatched barrier program count: have %d want %d", len(programs), expected)
+	}
+	if len(r.BarrierProcList) != expected {
+		r.BarrierProcList = enumerateBarrierProcs(r.BarrierParticipants)
+	}
+	for i, prog := range programs {
+		if prog == nil {
+			return fmt.Errorf("nil program at barrier slot %d", i)
+		}
+	}
+	r.BarrierPrograms = programs
+	return nil
 }
 
 type ExecutorID struct {
@@ -143,6 +197,21 @@ func (r *Request) Validate() error {
 	default:
 		return fmt.Errorf("unknown request type")
 	}
+	if r.Barrier {
+		if r.ExecOpts.ExecFlags&flatrpc.ExecFlagBarrier == 0 {
+			return fmt.Errorf("barrier request must set ExecFlagBarrier")
+		}
+		if r.BarrierParticipants == 0 {
+			return fmt.Errorf("barrier request requires non-zero participants mask")
+		}
+		expected := bits.OnesCount64(r.BarrierParticipants)
+		if expected < 2 {
+			return fmt.Errorf("barrier request requires at least 2 participants")
+		}
+		if len(r.BarrierPrograms) != 0 && len(r.BarrierPrograms) != expected {
+			return fmt.Errorf("barrier programs are incomplete: have %d want %d", len(r.BarrierPrograms), expected)
+		}
+	}
 	return nil
 }
 
@@ -154,6 +223,23 @@ func (r *Request) hash() hash.Sig {
 	}
 	if err := enc.Encode(r.ExecOpts); err != nil {
 		panic(err)
+	}
+	if err := enc.Encode(r.Barrier); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(r.BarrierParticipants); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(r.BarrierProcList); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(len(r.BarrierPrograms)); err != nil {
+		panic(err)
+	}
+	for _, prog := range r.BarrierPrograms {
+		if err := enc.Encode(prog.Serialize()); err != nil {
+			panic(err)
+		}
 	}
 	var data []byte
 	switch r.Type {
@@ -167,6 +253,20 @@ func (r *Request) hash() hash.Sig {
 		panic("unknown request type")
 	}
 	return hash.Hash(data, buf.Bytes())
+}
+
+func enumerateBarrierProcs(mask uint64) []int {
+	if mask == 0 {
+		return nil
+	}
+	procs := make([]int, 0, bits.OnesCount64(mask))
+	for proc := 0; mask != 0; proc++ {
+		if mask&1 == 1 {
+			procs = append(procs, proc)
+		}
+		mask >>= 1
+	}
+	return procs
 }
 
 func (r *Request) initChannel() {
@@ -183,12 +283,56 @@ type Result struct {
 	Output   []byte
 	Status   Status
 	Err      error // More details in case of ExecFailure.
+	// BarrierParticipants mirrors ExecResult.barrier_procs for analysis.
+	BarrierParticipants uint64
+	BarrierGroupID      int64
+	BarrierGroupSize    int
+	BarrierMembers      []*BarrierMemberResult
 }
 
 func (r *Result) clone() *Result {
 	ret := *r
-	ret.Info = ret.Info.Clone()
+	if ret.Info != nil {
+		ret.Info = ret.Info.Clone()
+	}
+	if ret.Output != nil {
+		ret.Output = append([]byte{}, ret.Output...)
+	}
+	if len(ret.BarrierMembers) != 0 {
+		members := make([]*BarrierMemberResult, len(ret.BarrierMembers))
+		for i, member := range ret.BarrierMembers {
+			if member == nil {
+				continue
+			}
+			clone := *member
+			if member.Info != nil {
+				clone.Info = member.Info.Clone()
+			}
+			if member.Output != nil {
+				clone.Output = append([]byte{}, member.Output...)
+			}
+			if member.Prog != nil {
+				clone.Prog = member.Prog.Clone()
+			}
+			members[i] = &clone
+		}
+		ret.BarrierMembers = members
+	}
 	return &ret
+}
+
+// BarrierMemberResult describes the outcome for a single participant of a barrier execution.
+type BarrierMemberResult struct {
+	Index     int
+	GroupID   int64
+	GroupSize int
+	Proc      int
+	Prog      *prog.Prog
+	Executor  ExecutorID
+	Info      *flatrpc.ProgInfo
+	Output    []byte
+	Status    Status
+	Err       error
 }
 
 func (r *Result) Stop() bool {

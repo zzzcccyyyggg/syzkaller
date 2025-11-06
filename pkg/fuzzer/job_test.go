@@ -76,6 +76,9 @@ func TestDeflake(t *testing.T) {
 	}
 
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
+	if err != nil {
+		target, err = prog.GetTarget(targets.TestOS, targets.TestArch64)
+	}
 	assert.NoError(t, err)
 	const anyTestProg = `syz_compare(&AUTO="00000000", 0x4, &AUTO=@conditional={0x0, @void, @void, @void}, AUTO)`
 	prog, err := target.Deserialize([]byte(anyTestProg), prog.NonStrict)

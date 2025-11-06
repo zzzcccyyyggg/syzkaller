@@ -25,3 +25,14 @@ executor/syscalls.h
 
 # vscode
 .vscode
+
+/build
+
+/*.c
+/*.log
+/test
+/*.txt
+/*.extract
+/*.sh
+/flatc
+.cache/

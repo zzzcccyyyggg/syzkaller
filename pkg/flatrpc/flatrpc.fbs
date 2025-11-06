@@ -161,6 +161,7 @@ enum ExecFlag : uint64 (bit_flags) {
 	DedupCover,		// deduplicate coverage in executor
 	CollectComps,		// collect KCOV comparisons
 	Threaded,		// use multiple threads to mitigate blocked syscalls
+	Barrier,		// synchronize execution across selected procs
 }
 
 struct ExecOptsRaw {
@@ -182,6 +183,14 @@ table ExecRequestRaw {
 	flags			:RequestFlag;
 	// Return all signal for these calls.
 	all_signal		:[int32];
+	// Bitmask of procs that participate in barrier execution (if any).
+	barrier_participants	:uint64;
+	// Unique identifier shared by all procs participating in a barrier execution.
+	barrier_group_id	:int64;
+	// Local index of the current proc in the barrier group.
+	barrier_index		:int32;
+	// Total number of procs that are expected to participate in the barrier.
+	barrier_group_size	:int32;
 }
 
 table SignalUpdateRaw {
@@ -261,6 +270,14 @@ table ExecResultRaw {
 	hanged			:bool;
 	error			:string;
 	info			:ProgInfoRaw;
+	// Participants mask for barrier executions (if any).
+	barrier_procs		:uint64;
+	// Identifier of the barrier group that produced this result (if any).
+	barrier_group_id	:int64;
+	// Local index of this result within the barrier group (if any).
+	barrier_index		:int32;
+	// Total number of participants expected within the barrier group (if any).
+	barrier_group_size	:int32;
 }
 
 table StateResultRaw {

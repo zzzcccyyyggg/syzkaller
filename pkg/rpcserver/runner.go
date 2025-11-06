@@ -40,18 +40,56 @@ type Runner struct {
 	infoc         chan chan []byte
 	canonicalizer *cover.CanonicalizerInstance
 	nextRequestID int64
-	requests      map[int64]*queue.Request
+	requests      map[int64]*requestContext
 	executing     map[int64]bool
 	hanged        map[int64]bool
 	lastExec      *LastExecuting
 	updInfo       dispatcher.UpdateInfo
 	resultCh      chan error
 
+	barrierGroups      map[int64]*barrierGroup
+	nextBarrierGroupID int64
+
 	// The mutex protects all the fields below.
 	mu          sync.Mutex
 	conn        *flatrpc.Conn
 	stopped     bool
 	machineInfo []byte
+}
+
+type requestContext struct {
+	req          *queue.Request
+	program      *prog.Prog
+	barrier      *barrierGroup
+	barrierIndex int
+	requestID    int64
+}
+
+type barrierGroup struct {
+	id           int64
+	req          *queue.Request
+	participants []int
+	contexts     []*requestContext
+	results      []*queue.BarrierMemberResult
+	completed    int
+}
+
+var errRequestSerialization = errors.New("request serialization failed")
+
+type serializationError struct {
+	err error
+}
+
+func (e *serializationError) Error() string {
+	return fmt.Sprintf("program serialization failed: %v", e.err)
+}
+
+func (e *serializationError) Unwrap() error {
+	return e.err
+}
+
+func (e *serializationError) Is(target error) bool {
+	return target == errRequestSerialization
 }
 
 type runnerStats struct {
@@ -270,91 +308,15 @@ func (runner *Runner) sendStateRequest() error {
 	return flatrpc.Send(runner.conn, msg)
 }
 
-func (runner *Runner) sendRequest(req *queue.Request) error {
-	if err := req.Validate(); err != nil {
-		panic(err)
-	}
-	runner.nextRequestID++
-	id := runner.nextRequestID
-	var flags flatrpc.RequestFlag
-	if req.ReturnOutput {
-		flags |= flatrpc.RequestFlagReturnOutput
-	}
-	if req.ReturnError {
-		flags |= flatrpc.RequestFlagReturnError
-	}
-	allSignal := make([]int32, len(req.ReturnAllSignal))
-	for i, call := range req.ReturnAllSignal {
-		allSignal[i] = int32(call)
-	}
-	opts := req.ExecOpts
-	if runner.debug {
-		opts.EnvFlags |= flatrpc.ExecEnvDebug
-	}
-	var data []byte
-	switch req.Type {
-	case flatrpc.RequestTypeProgram:
-		progData, err := req.Prog.SerializeForExec()
-		if err != nil {
-			// It's bad if we systematically fail to serialize programs,
-			// but so far we don't have a better handling than counting this.
-			// This error is observed a lot on the seeded syz_mount_image calls.
-			runner.stats.statExecBufferTooSmall.Add(1)
-			req.Done(&queue.Result{
-				Status: queue.ExecFailure,
-				Err:    fmt.Errorf("program serialization failed: %w", err),
-			})
-			return nil
-		}
-		data = progData
-	case flatrpc.RequestTypeBinary:
-		fileData, err := os.ReadFile(req.BinaryFile)
-		if err != nil {
-			req.Done(&queue.Result{
-				Status: queue.ExecFailure,
-				Err:    err,
-			})
-			return nil
-		}
-		data = fileData
-	case flatrpc.RequestTypeGlob:
-		data = append([]byte(req.GlobPattern), 0)
-		flags |= flatrpc.RequestFlagReturnOutput
-	default:
-		panic("unhandled request type")
-	}
-	var avoid uint64
-	for _, id := range req.Avoid {
-		if id.VM == runner.id {
-			avoid |= uint64(1 << id.Proc)
-		}
-	}
-	msg := &flatrpc.HostMessage{
-		Msg: &flatrpc.HostMessages{
-			Type: flatrpc.HostMessagesRawExecRequest,
-			Value: &flatrpc.ExecRequest{
-				Id:        id,
-				Type:      req.Type,
-				Avoid:     avoid,
-				Data:      data,
-				Flags:     flags,
-				ExecOpts:  &opts,
-				AllSignal: allSignal,
-			},
-		},
-	}
-	runner.requests[id] = req
-	return flatrpc.Send(runner.conn, msg)
-}
-
 func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) error {
-	req := runner.requests[msg.Id]
-	if req == nil {
+	ctx := runner.requests[msg.Id]
+	if ctx == nil {
 		if runner.hanged[msg.Id] {
 			return nil
 		}
 		return fmt.Errorf("can't find executing request %v", msg.Id)
 	}
+	req := ctx.req
 	proc := int(msg.ProcId)
 	if proc < 0 || proc >= prog.MaxPids {
 		return fmt.Errorf("got bad proc id %v", proc)
@@ -373,7 +335,13 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 	var data []byte
 	switch req.Type {
 	case flatrpc.RequestTypeProgram:
-		data = req.Prog.Serialize()
+		prog := ctx.program
+		if prog == nil {
+			prog = req.Prog
+		}
+		if prog != nil {
+			data = prog.Serialize()
+		}
 	case flatrpc.RequestTypeBinary:
 		data = []byte(fmt.Sprintf("executing binary %v\n", req.BinaryFile))
 	case flatrpc.RequestTypeGlob:
@@ -391,13 +359,9 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 }
 
 func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
-	req := runner.requests[msg.Id]
-	if req == nil {
+	ctx := runner.requests[msg.Id]
+	if ctx == nil {
 		if runner.hanged[msg.Id] {
-			// Got result for a program that was previously reported hanged
-			// (probably execution was just extremely slow). Can't report result
-			// to pkg/fuzzer since it already handled completion of the request,
-			// but shouldn't report an error and crash the VM as well.
 			delete(runner.hanged, msg.Id)
 			return nil
 		}
@@ -405,37 +369,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	delete(runner.requests, msg.Id)
 	delete(runner.executing, msg.Id)
-	if req.Type == flatrpc.RequestTypeProgram && msg.Info != nil {
-		for len(msg.Info.Calls) < len(req.Prog.Calls) {
-			msg.Info.Calls = append(msg.Info.Calls, &flatrpc.CallInfo{
-				Error: 999,
-			})
-		}
-		msg.Info.Calls = msg.Info.Calls[:len(req.Prog.Calls)]
-		if msg.Info.Freshness == 0 {
-			runner.stats.statExecutorRestarts.Add(1)
-		}
-		for _, call := range msg.Info.Calls {
-			runner.convertCallInfo(call)
-		}
-		if len(msg.Info.ExtraRaw) != 0 {
-			msg.Info.Extra = msg.Info.ExtraRaw[0]
-			for _, info := range msg.Info.ExtraRaw[1:] {
-				// All processing in the fuzzer later will convert signal/cover to maps and dedup,
-				// so there is little point in deduping here.
-				msg.Info.Extra.Cover = append(msg.Info.Extra.Cover, info.Cover...)
-				msg.Info.Extra.Signal = append(msg.Info.Extra.Signal, info.Signal...)
-			}
-			msg.Info.ExtraRaw = nil
-			runner.convertCallInfo(msg.Info.Extra)
-		}
-		if !runner.cover && req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal != 0 {
-			// Coverage collection is disabled, but signal was requested => use a substitute signal.
-			// Note that we do it after all the processing above in order to prevent it from being
-			// filtered out.
-			addFallbackSignal(req.Prog, msg.Info)
-		}
-	}
+	runner.prepareProgramResult(ctx, msg)
 	status := queue.Success
 	var resErr error
 	if msg.Error != "" {
@@ -443,23 +377,350 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		resErr = errors.New(msg.Error)
 	} else if msg.Hanged {
 		status = queue.Hanged
-		if req.Type == flatrpc.RequestTypeProgram {
-			// We only track the latest executed programs.
-			runner.lastExec.Hanged(int(msg.Id), int(msg.Proc), req.Prog.Serialize(), osutil.MonotonicNano())
+		if ctx.program != nil {
+			runner.lastExec.Hanged(int(msg.Id), int(msg.Proc), ctx.program.Serialize(), osutil.MonotonicNano())
 		}
 		runner.hanged[msg.Id] = true
 	}
-	req.Done(&queue.Result{
-		Executor: queue.ExecutorID{
-			VM:   runner.id,
-			Proc: int(msg.Proc),
-		},
-		Status: status,
-		Info:   msg.Info,
-		Output: slices.Clone(msg.Output),
-		Err:    resErr,
-	})
+	if ctx.barrier == nil {
+		ctx.req.Done(&queue.Result{
+			Executor: queue.ExecutorID{
+				VM:   runner.id,
+				Proc: int(msg.Proc),
+			},
+			Status:              status,
+			Info:                msg.Info,
+			Output:              slices.Clone(msg.Output),
+			Err:                 resErr,
+			BarrierParticipants: msg.BarrierProcs,
+			BarrierGroupID:      msg.BarrierGroupId,
+			BarrierGroupSize:    int(msg.BarrierGroupSize),
+		})
+		return nil
+	}
+	groupID := msg.BarrierGroupId
+	if groupID == 0 {
+		groupID = ctx.barrier.id
+	}
+	groupSize := int(msg.BarrierGroupSize)
+	if groupSize == 0 {
+		groupSize = len(ctx.barrier.participants)
+	}
+	member := &queue.BarrierMemberResult{
+		Index:     ctx.barrierIndex,
+		GroupID:   groupID,
+		GroupSize: groupSize,
+		Proc:      int(msg.Proc),
+		Prog:      ctx.program,
+		Executor:  queue.ExecutorID{VM: runner.id, Proc: int(msg.Proc)},
+		Info:      msg.Info,
+		Output:    slices.Clone(msg.Output),
+		Status:    status,
+		Err:       resErr,
+	}
+	if ctx.barrier.results[ctx.barrierIndex] == nil {
+		ctx.barrier.completed++
+	}
+	ctx.barrier.results[ctx.barrierIndex] = member
+	ctx.barrier.contexts[ctx.barrierIndex] = nil
+	if ctx.barrier.completed == len(ctx.barrier.contexts) {
+		runner.finishBarrierGroup(ctx.barrier)
+	}
 	return nil
+}
+
+func (runner *Runner) sendRequest(req *queue.Request) error {
+	if err := req.Validate(); err != nil {
+		panic(err)
+	}
+	if req.Barrier {
+		log.Logf(0, "Sending barrier request")
+		return runner.sendBarrierRequest(req)
+	}
+	ctx := &requestContext{
+		req:     req,
+		program: req.Prog,
+	}
+	if err := runner.dispatchSingle(ctx); err != nil {
+		if errors.Is(err, errRequestSerialization) {
+			req.Done(&queue.Result{
+				Status: queue.ExecFailure,
+				Err:    err,
+			})
+			return nil
+		}
+		return err
+	}
+	return nil
+}
+
+func (runner *Runner) dispatchSingle(ctx *requestContext) error {
+	id, msg, err := runner.prepareDispatch(ctx)
+	if err != nil {
+		return err
+	}
+	runner.requests[id] = ctx
+	if err := flatrpc.Send(runner.conn, msg); err != nil {
+		delete(runner.requests, id)
+		return err
+	}
+	return nil
+}
+
+func (runner *Runner) sendBarrierRequest(req *queue.Request) error {
+	participants := req.BarrierProcList
+	if len(participants) == 0 {
+		req.SetBarrier(0)
+		return runner.sendRequest(req)
+	}
+	runner.nextBarrierGroupID++
+	groupID := runner.nextBarrierGroupID
+	group := &barrierGroup{
+		id:           groupID,
+		req:          req,
+		participants: append([]int(nil), participants...),
+		contexts:     make([]*requestContext, len(participants)),
+		results:      make([]*queue.BarrierMemberResult, len(participants)),
+	}
+	if runner.barrierGroups == nil {
+		runner.barrierGroups = make(map[int64]*barrierGroup)
+	}
+	runner.barrierGroups[groupID] = group
+	type prepared struct {
+		id  int64
+		msg *flatrpc.HostMessage
+		ctx *requestContext
+	}
+	preparedReqs := make([]prepared, len(participants))
+	for idx := range participants {
+		prog := req.Prog
+		if len(req.BarrierPrograms) > idx && req.BarrierPrograms[idx] != nil {
+			prog = req.BarrierPrograms[idx]
+		}
+		ctx := &requestContext{
+			req:          req,
+			program:      prog,
+			barrier:      group,
+			barrierIndex: idx,
+		}
+		group.contexts[idx] = ctx
+		id, msg, err := runner.prepareDispatch(ctx)
+		if err != nil {
+			delete(runner.barrierGroups, group.id)
+			if errors.Is(err, errRequestSerialization) {
+				req.Done(&queue.Result{
+					Status: queue.ExecFailure,
+					Err:    fmt.Errorf("barrier member %d: %w", idx, err),
+				})
+				return nil
+			}
+			return err
+		}
+		preparedReqs[idx] = prepared{id: id, msg: msg, ctx: ctx}
+	}
+	for _, item := range preparedReqs {
+		runner.requests[item.id] = item.ctx
+		if err := flatrpc.Send(runner.conn, item.msg); err != nil {
+			delete(runner.requests, item.id)
+			delete(runner.barrierGroups, group.id)
+			return err
+		}
+	}
+	return nil
+}
+
+func (runner *Runner) prepareDispatch(ctx *requestContext) (int64, *flatrpc.HostMessage, error) {
+	runner.nextRequestID++
+	id := runner.nextRequestID
+	ctx.requestID = id
+	msg, err := runner.buildExecRequest(id, ctx)
+	if err != nil {
+		return 0, nil, err
+	}
+	return id, msg, nil
+}
+
+func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.HostMessage, error) {
+	req := ctx.req
+	var flags flatrpc.RequestFlag
+	if req.ReturnOutput {
+		flags |= flatrpc.RequestFlagReturnOutput
+	}
+	if req.ReturnError {
+		flags |= flatrpc.RequestFlagReturnError
+	}
+	allSignal := make([]int32, len(req.ReturnAllSignal))
+	for i, call := range req.ReturnAllSignal {
+		allSignal[i] = int32(call)
+	}
+	opts := req.ExecOpts
+	if runner.debug {
+		opts.EnvFlags |= flatrpc.ExecEnvDebug
+	}
+	var data []byte
+	switch req.Type {
+	case flatrpc.RequestTypeProgram:
+		prog := ctx.program
+		if prog == nil {
+			prog = req.Prog
+		}
+		if prog == nil {
+			return nil, &serializationError{err: fmt.Errorf("missing program for request %d", id)}
+		}
+		progData, err := prog.SerializeForExec()
+		if err != nil {
+			runner.stats.statExecBufferTooSmall.Add(1)
+			return nil, &serializationError{err: err}
+		}
+		data = progData
+	case flatrpc.RequestTypeBinary:
+		fileData, err := os.ReadFile(req.BinaryFile)
+		if err != nil {
+			return nil, err
+		}
+		data = fileData
+	case flatrpc.RequestTypeGlob:
+		data = append([]byte(req.GlobPattern), 0)
+		flags |= flatrpc.RequestFlagReturnOutput
+	default:
+		panic("unhandled request type")
+	}
+	var avoid uint64
+	for _, avoidID := range req.Avoid {
+		if avoidID.VM == runner.id {
+			avoid |= uint64(1 << avoidID.Proc)
+		}
+	}
+	execReq := &flatrpc.ExecRequest{
+		Id:        id,
+		Type:      req.Type,
+		Avoid:     avoid,
+		Data:      data,
+		Flags:     flags,
+		ExecOpts:  &opts,
+		AllSignal: allSignal,
+	}
+	if ctx.barrier != nil {
+		execReq.BarrierParticipants = req.BarrierParticipants
+		execReq.BarrierGroupId = ctx.barrier.id
+		execReq.BarrierIndex = int32(ctx.barrierIndex)
+		execReq.BarrierGroupSize = int32(len(ctx.barrier.participants))
+	}
+	msg := &flatrpc.HostMessage{
+		Msg: &flatrpc.HostMessages{
+			Type:  flatrpc.HostMessagesRawExecRequest,
+			Value: execReq,
+		},
+	}
+	return msg, nil
+}
+
+func (runner *Runner) prepareProgramResult(ctx *requestContext, msg *flatrpc.ExecResult) {
+	req := ctx.req
+	if req.Type != flatrpc.RequestTypeProgram || msg.Info == nil {
+		return
+	}
+	prog := ctx.program
+	if prog == nil {
+		prog = req.Prog
+	}
+	if prog == nil {
+		return
+	}
+	for len(msg.Info.Calls) < len(prog.Calls) {
+		msg.Info.Calls = append(msg.Info.Calls, &flatrpc.CallInfo{Error: 999})
+	}
+	msg.Info.Calls = msg.Info.Calls[:len(prog.Calls)]
+	if msg.Info.Freshness == 0 {
+		runner.stats.statExecutorRestarts.Add(1)
+	}
+	for _, call := range msg.Info.Calls {
+		runner.convertCallInfo(call)
+	}
+	if len(msg.Info.ExtraRaw) != 0 {
+		msg.Info.Extra = msg.Info.ExtraRaw[0]
+		for _, info := range msg.Info.ExtraRaw[1:] {
+			msg.Info.Extra.Cover = append(msg.Info.Extra.Cover, info.Cover...)
+			msg.Info.Extra.Signal = append(msg.Info.Extra.Signal, info.Signal...)
+		}
+		msg.Info.ExtraRaw = nil
+		runner.convertCallInfo(msg.Info.Extra)
+	}
+	if !runner.cover && req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal != 0 {
+		addFallbackSignal(prog, msg.Info)
+	}
+}
+
+func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
+	delete(runner.barrierGroups, group.id)
+	members := make([]*queue.BarrierMemberResult, len(group.results))
+	copy(members, group.results)
+	status, resErr := summarizeBarrierStatus(members)
+	log.Logf(0, "barrier group %d finished: status=%s members=%d err=%v", group.id, status.String(), len(members), resErr)
+	var primary *queue.BarrierMemberResult
+	if len(members) != 0 {
+		primary = members[0]
+	}
+	if primary == nil {
+		for _, member := range members {
+			if member != nil {
+				primary = member
+				break
+			}
+		}
+	}
+	groupSize := len(group.participants)
+	for _, member := range members {
+		if member != nil && member.GroupSize != 0 {
+			groupSize = member.GroupSize
+			break
+		}
+	}
+	result := &queue.Result{
+		Status:              status,
+		Err:                 resErr,
+		BarrierParticipants: group.req.BarrierParticipants,
+		BarrierGroupID:      group.id,
+		BarrierGroupSize:    groupSize,
+		BarrierMembers:      members,
+	}
+	if primary != nil {
+		result.Executor = primary.Executor
+		result.Info = primary.Info
+		result.Output = slices.Clone(primary.Output)
+	}
+	group.req.Done(result)
+}
+
+func summarizeBarrierStatus(members []*queue.BarrierMemberResult) (queue.Status, error) {
+	status := queue.Success
+	var resErr error
+	for _, member := range members {
+		if member == nil {
+			continue
+		}
+		switch member.Status {
+		case queue.ExecFailure:
+			return queue.ExecFailure, member.Err
+		case queue.Crashed:
+			status = queue.Crashed
+			if resErr == nil {
+				resErr = member.Err
+			}
+		case queue.Hanged:
+			if status != queue.Crashed {
+				status = queue.Hanged
+				if resErr == nil {
+					resErr = member.Err
+				}
+			}
+		case queue.Restarted:
+			if status == queue.Success {
+				status = queue.Restarted
+			}
+		}
+	}
+	return status, resErr
 }
 
 func (runner *Runner) convertCallInfo(call *flatrpc.CallInfo) {
@@ -475,10 +736,6 @@ func (runner *Runner) convertCallInfo(call *flatrpc.CallInfo) {
 		return false
 	})
 
-	// Check signal belongs to kernel addresses.
-	// Mismatching addresses can mean either corrupted VM memory, or that the fuzzer somehow
-	// managed to inject output signal. If we see any bogus signal, drop whole signal
-	// (we don't want programs that can inject bogus coverage to end up in the corpus).
 	var kernelAddresses targets.KernelAddresses
 	if runner.filterSignal {
 		kernelAddresses = runner.sysTarget.KernelAddresses
@@ -494,12 +751,9 @@ func (runner *Runner) convertCallInfo(call *flatrpc.CallInfo) {
 		}
 	}
 
-	// Filter out kernel physical memory addresses.
-	// These are internal kernel comparisons and should not be interesting.
 	dataStart, dataEnd := kernelAddresses.DataStart, kernelAddresses.DataEnd
 	if len(call.Comps) != 0 && (textStart != 0 || dataStart != 0) {
 		if runner.sysTarget.PtrSize == 4 {
-			// These will appear sign-extended in comparison operands.
 			textStart = uint64(int64(int32(textStart)))
 			textEnd = uint64(int64(int32(textEnd)))
 			dataStart = uint64(int64(int32(dataStart)))
@@ -558,22 +812,42 @@ func (runner *Runner) Shutdown(crashed bool, extraExecs ...report.ExecutorInfo) 
 	}
 	records := runner.lastExec.Collect()
 	for _, info := range extraExecs {
-		req := runner.requests[int64(info.ExecID)]
-		// If the request is in executing, it's also already in the records slice.
-		if req != nil && !runner.executing[int64(info.ExecID)] {
-			records = append(records, ExecRecord{
-				ID:   info.ExecID,
-				Proc: info.ProcID,
-				Prog: req.Prog.Serialize(),
-			})
+		ctx := runner.requests[int64(info.ExecID)]
+		if ctx != nil && !runner.executing[int64(info.ExecID)] {
+			progData := []byte(nil)
+			if ctx.program != nil {
+				progData = ctx.program.Serialize()
+			} else if ctx.req != nil && ctx.req.Prog != nil {
+				progData = ctx.req.Prog.Serialize()
+			}
+			if progData != nil {
+				records = append(records, ExecRecord{
+					ID:   info.ExecID,
+					Proc: info.ProcID,
+					Prog: progData,
+				})
+			}
 		}
 	}
-	for id, req := range runner.requests {
-		status := queue.Restarted
-		if crashed && runner.executing[id] {
-			status = queue.Crashed
+	type shutdownState struct {
+		status queue.Status
+	}
+	pending := make(map[*queue.Request]*shutdownState)
+	for id, ctx := range runner.requests {
+		if ctx == nil || ctx.req == nil {
+			continue
 		}
-		req.Done(&queue.Result{Status: status})
+		state := pending[ctx.req]
+		if state == nil {
+			state = &shutdownState{status: queue.Restarted}
+			pending[ctx.req] = state
+		}
+		if crashed && runner.executing[id] {
+			state.status = queue.Crashed
+		}
+	}
+	for req, state := range pending {
+		req.Done(&queue.Result{Status: state.status})
 	}
 	return records
 }

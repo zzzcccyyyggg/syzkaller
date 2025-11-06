@@ -8,10 +8,12 @@
 #include <unistd.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <deque>
 #include <iomanip>
 #include <memory>
 #include <optional>
+#include <unordered_map>
 #include <sstream>
 #include <string>
 #include <utility>
@@ -108,11 +110,13 @@ private:
 class Proc
 {
 public:
-	Proc(Connection& conn, const char* bin, ProcIDPool& proc_id_pool, int& restarting, const bool& corpus_triaged, int max_signal_fd,
-	     int cover_filter_fd, ProcOpts opts)
+	Proc(Connection& conn, const char* bin, ProcIDPool& proc_id_pool, int slot, int total_slots, int& restarting, const bool& corpus_triaged,
+	     int max_signal_fd, int cover_filter_fd, ProcOpts opts)
 	    : conn_(conn),
 	      bin_(bin),
 	      proc_id_pool_(proc_id_pool),
+	      slot_(slot),
+	      slots_mask_(total_slots >= 64 ? ~0ULL : ((1ull << total_slots) - 1)),
 	      id_(proc_id_pool.Alloc()),
 	      restarting_(restarting),
 	      corpus_triaged_(corpus_triaged),
@@ -130,9 +134,9 @@ public:
 	{
 		if (state_ != State::Started && state_ != State::Idle)
 			return false;
-		if (((~msg.avoid) & proc_id_pool_.Mask()) == 0)
+		if (((~msg.avoid) & slots_mask_) == 0)
 			msg.avoid = 0;
-		if (msg.avoid & (1ull << id_))
+		if (msg.avoid & (1ull << slot_))
 			return false;
 		if (msg_)
 			fail("already have pending msg");
@@ -152,6 +156,30 @@ public:
 		else
 			Execute();
 		return true;
+	}
+
+	bool IsIdle() const
+	{
+		return state_ == State::Idle && !msg_;
+	}
+
+	int ExecId() const
+	{
+		return id_;
+	}
+
+	bool CanRun(const rpc::ExecRequestRawT& msg) const
+	{
+		if (!IsIdle())
+			return false;
+		if (msg.avoid & (1ull << slot_))
+			return false;
+		return true;
+	}
+
+	int Id() const
+	{
+		return slot_;
 	}
 
 	void Arm(Select& select)
@@ -212,6 +240,8 @@ private:
 	Connection& conn_;
 	const char* const bin_;
 	ProcIDPool& proc_id_pool_;
+	const int slot_;
+	const uint64 slots_mask_;
 	int id_;
 	int& restarting_;
 	const bool& corpus_triaged_;
@@ -240,7 +270,8 @@ private:
 
 	friend std::ostream& operator<<(std::ostream& ss, const Proc& proc)
 	{
-		ss << "id=" << proc.id_
+		ss << "slot=" << proc.slot_
+		   << " exec_id=" << proc.id_
 		   << " state=" << static_cast<int>(proc.state_)
 		   << " freshness=" << proc.freshness_
 		   << " attempts=" << proc.attempts_
@@ -262,10 +293,11 @@ private:
 
 	void Restart()
 	{
-		debug("proc %d: restarting subprocess, current state %u attempts %llu\n", id_, state_, attempts_);
+		debug("proc slot %d (exec %d): restarting subprocess, current state %u attempts %llu\n",
+		      slot_, id_, state_, attempts_);
 		int status = process_->KillAndWait();
 		process_.reset();
-		debug("proc %d: subprocess exit status %d\n", id_, status);
+		debug("proc slot %d (exec %d): subprocess exit status %d\n", slot_, id_, status);
 		if (++attempts_ > 20) {
 			while (ReadOutput())
 				;
@@ -276,8 +308,8 @@ private:
 				fprintf(stderr, "output truncated: %zd/%zd (errno=%d)\n",
 					wrote, output_.size(), errno);
 			uint64 req_id = msg_ ? msg_->id : -1;
-			failmsg("repeatedly failed to execute the program", "proc=%d req=%lld state=%d status=%d",
-				id_, req_id, state_, status);
+			failmsg("repeatedly failed to execute the program", "slot=%d exec=%d req=%lld state=%d status=%d",
+				slot_, id_, req_id, state_, status);
 		}
 		// Ignore all other errors.
 		// Without fork server executor can legitimately exit (program contains exit_group),
@@ -296,7 +328,7 @@ private:
 				// If the process has hanged, it may still be using per-proc resources,
 				// so allocate a fresh proc id.
 				int new_id = proc_id_pool_.Alloc(id_);
-				debug("proc %d: changing proc id to %d\n", id_, new_id);
+				debug("proc slot %d (exec %d): changing exec id to %d\n", slot_, id_, new_id);
 				id_ = new_id;
 			}
 		} else if (attempts_ > 3)
@@ -362,7 +394,8 @@ private:
 	{
 		if (state_ != State::Started || !msg_)
 			fail("wrong handshake state");
-		debug("proc %d: handshaking to execute request %llu\n", id_, static_cast<uint64>(msg_->id));
+		debug("proc slot %d (exec %d): handshaking to execute request %llu\n",
+			  slot_, id_, static_cast<uint64>(msg_->id));
 		ChangeState(State::Handshaking);
 		exec_start_ = current_time_ms();
 		req_type_ = msg_->type;
@@ -390,7 +423,15 @@ private:
 		if (state_ != State::Idle || !msg_)
 			fail("wrong state for execute");
 
-		debug("proc %d: start executing request %llu\n", id_, static_cast<uint64>(msg_->id));
+		debug("proc slot %d (exec %d): start executing request %llu\n",
+		      slot_, id_, static_cast<uint64>(msg_->id));
+		if (msg_->barrier_group_size > 0) {
+			debug("proc slot %d (exec %d): barrier start group=%lld index=%lld size=%lld participants=0x%llx\n",
+			      slot_, id_, static_cast<long long>(msg_->barrier_group_id),
+			      static_cast<long long>(msg_->barrier_index),
+			      static_cast<long long>(msg_->barrier_group_size),
+			      static_cast<unsigned long long>(msg_->barrier_participants));
+		}
 
 		rpc::ExecutingMessageRawT exec;
 		exec.id = msg_->id;
@@ -426,6 +467,9 @@ private:
 		    .exec_flags = static_cast<uint64>(msg_->exec_opts->exec_flags()),
 		    .all_call_signal = all_call_signal,
 		    .all_extra_signal = all_extra_signal,
+		    .barrier_group_id = msg_->barrier_group_id,
+		    .barrier_index = msg_->barrier_index,
+		    .barrier_group_size = msg_->barrier_group_size,
 		};
 		exec_start_ = current_time_ms();
 		ChangeState(State::Executing);
@@ -457,7 +501,14 @@ private:
 		uint32 num_calls = 0;
 		if (msg_->type == rpc::RequestType::Program)
 			num_calls = read_input(&prog_data);
-		auto data = finish_output(resp_mem_, id_, msg_->id, num_calls, elapsed, freshness_++, status, hanged, output);
+		auto data = finish_output(resp_mem_, id_, msg_->id, num_calls, elapsed, freshness_++, status, hanged, output,
+				 msg_->barrier_participants, msg_->barrier_group_id, msg_->barrier_index, msg_->barrier_group_size);
+		if (msg_->barrier_group_size > 0) {
+			debug("proc slot %d (exec %d): barrier finish group=%lld index=%lld size=%lld status=%u hanged=%d\n",
+			      slot_, id_, static_cast<long long>(msg_->barrier_group_id),
+			      static_cast<long long>(msg_->barrier_index),
+			      static_cast<long long>(msg_->barrier_group_size), status, hanged);
+		}
 		conn_.Send(data.data(), data.size());
 
 		resp_mem_->Reset();
@@ -480,17 +531,17 @@ private:
 				break;
 		}
 		if (n == 0) {
-			debug("proc %d: response pipe EOF\n", id_);
+			debug("proc slot %d (exec %d): response pipe EOF\n", slot_, id_);
 			return false;
 		}
 		if (n != sizeof(status))
 			failmsg("proc resp pipe read failed", "n=%zd", n);
 		if (state_ == State::Handshaking) {
-			debug("proc %d: got handshake reply\n", id_);
+			debug("proc slot %d (exec %d): got handshake reply\n", slot_, id_);
 			ChangeState(State::Idle);
 			Execute();
 		} else if (state_ == State::Executing) {
-			debug("proc %d: got execute reply\n", id_);
+			debug("proc slot %d (exec %d): got execute reply\n", slot_, id_);
 			HandleCompletion(status);
 			if (out_of_requests)
 				wait_start_ = current_time_ms();
@@ -513,11 +564,10 @@ private:
 			fail("proc stdout read failed");
 		}
 		if (n == 0) {
-			debug("proc %d: output pipe EOF\n", id_);
+			debug("proc slot %d (exec %d): output pipe EOF\n", slot_, id_);
 			return false;
 		}
 		if (flag_debug) {
-			const bool has_nl = output_.back() == '\n';
 			output_.resize(output_.size() + 1);
 			char* output = reinterpret_cast<char*>(output_.data()) + debug_output_pos_;
 			// During machine check we can execute some requests that legitimately fail.
@@ -529,7 +579,7 @@ private:
 				if (syzfail)
 					memcpy(syzfail, "NOTFAIL", strlen("NOTFAIL"));
 			}
-			debug("proc %d: got output: %s%s", id_, output, has_nl ? "" : "\n");
+			// debug("proc slot %d (exec %d): got output: %s%s", slot_, id_, output, has_nl ? "" : "\n");
 			output_.resize(output_.size() - 1);
 			debug_output_pos_ = output_.size();
 		}
@@ -557,14 +607,22 @@ public:
 		int max_signal_fd = max_signal_ ? max_signal_->FD() : -1;
 		int cover_filter_fd = cover_filter_ ? cover_filter_->FD() : -1;
 		for (int i = 0; i < num_procs; i++)
-			procs_.emplace_back(new Proc(conn, bin, *proc_id_pool_, restarting_, corpus_triaged_,
-						     max_signal_fd, cover_filter_fd, proc_opts_));
+			procs_.emplace_back(new Proc(conn, bin, *proc_id_pool_, i, num_procs, restarting_, corpus_triaged_,
+					     max_signal_fd, cover_filter_fd, proc_opts_));
 
 		for (;;)
 			Loop();
 	}
 
 private:
+	struct BarrierGroupState {
+		uint64 participants_mask = 0;
+		std::vector<int> proc_slots;
+		std::vector<std::optional<rpc::ExecRequestRawT>> members;
+		size_t ready = 0;
+		bool queued = false;
+	};
+
 	Connection& conn_;
 	const int vm_index_;
 	std::optional<CoverFilter> max_signal_;
@@ -572,6 +630,8 @@ private:
 	std::optional<ProcIDPool> proc_id_pool_;
 	std::vector<std::unique_ptr<Proc>> procs_;
 	std::deque<rpc::ExecRequestRawT> requests_;
+	std::unordered_map<int64_t, BarrierGroupState> barrier_groups_;
+	std::deque<int64_t> pending_barriers_;
 	std::vector<std::string> leak_frames_;
 	int restarting_ = 0;
 	bool corpus_triaged_ = false;
@@ -621,9 +681,14 @@ private:
 				failmsg("unknown host message type", "type=%d", static_cast<int>(raw.msg.type));
 		}
 
+		DispatchBarrierGroups();
+		uint64 reserved_mask = PendingBarrierMask();
+
 		for (auto& proc : procs_) {
 			proc->Ready(select, now, requests_.empty());
 			if (!requests_.empty()) {
+				if (reserved_mask & (1ull << proc->Id()))
+					continue;
 				if (proc->Execute(requests_.front()))
 					requests_.pop_front();
 			}
@@ -742,6 +807,11 @@ private:
 		      static_cast<uint64>(msg.exec_opts->env_flags()),
 		      static_cast<uint64>(msg.exec_opts->exec_flags()),
 		      msg.data.size());
+		if (msg.exec_opts && IsSet(msg.exec_opts->exec_flags(), rpc::ExecFlag::Barrier) &&
+		    msg.barrier_group_size > 1) {
+			HandleBarrierRequest(msg);
+			return;
+		}
 		if (msg.type == rpc::RequestType::Binary) {
 			ExecuteBinary(msg);
 			return;
@@ -780,6 +850,155 @@ private:
 		rpc::ExecutorMessageRawT raw;
 		raw.msg.Set(std::move(res));
 		conn_.Send(raw);
+	}
+
+	void HandleBarrierRequest(rpc::ExecRequestRawT& msg)
+	{
+		int64_t group_id = msg.barrier_group_id;
+		auto& group = barrier_groups_[group_id];
+		if (group.members.empty()) {
+			group.participants_mask = msg.barrier_participants;
+			group.proc_slots = EnumerateMask(group.participants_mask);
+			size_t expected = static_cast<size_t>(msg.barrier_group_size);
+			const size_t participants = group.proc_slots.size();
+			if (participants != 0) {
+				if (expected == 0 || expected != participants)
+					expected = participants;
+			} else if (expected == 0) {
+				expected = 1;
+			}
+			group.members.resize(expected);
+		}
+		size_t idx = msg.barrier_index >= 0 ? static_cast<size_t>(msg.barrier_index) : 0;
+		if (idx >= group.members.size())
+			group.members.resize(idx + 1);
+		if (group.members[idx].has_value())
+			failmsg("duplicate barrier member", "group=%lld index=%zu", (long long)group_id, idx);
+		debug("runner: barrier member queued group=%lld index=%lld total=%zu mask=0x%llx\n",
+		      static_cast<long long>(group_id), static_cast<long long>(msg.barrier_index),
+		      group.members.size(), static_cast<unsigned long long>(group.participants_mask));
+		group.members[idx].emplace(std::move(msg));
+		group.ready++;
+		debug("runner: barrier group=%lld progress=%zu/%zu\n", static_cast<long long>(group_id),
+		      group.ready, group.members.size());
+		if (!group.queued && group.ready == group.members.size()) {
+			pending_barriers_.push_back(group_id);
+			group.queued = true;
+			debug("runner: barrier group=%lld ready for dispatch (%zu members)\n",
+			      static_cast<long long>(group_id), group.members.size());
+		}
+	}
+
+	void DispatchBarrierGroups()
+	{
+		while (!pending_barriers_.empty()) {
+			auto it = barrier_groups_.find(pending_barriers_.front());
+			if (it == barrier_groups_.end()) {
+				pending_barriers_.pop_front();
+				continue;
+			}
+			if (!TryDispatchBarrier(pending_barriers_.front(), it->second))
+				break;
+			barrier_groups_.erase(it);
+			pending_barriers_.pop_front();
+		}
+	}
+
+	uint64 PendingBarrierMask()
+	{
+		while (!pending_barriers_.empty()) {
+			auto it = barrier_groups_.find(pending_barriers_.front());
+			if (it == barrier_groups_.end()) {
+				pending_barriers_.pop_front();
+				continue;
+			}
+			return it->second.participants_mask;
+		}
+		return 0;
+	}
+
+	bool TryDispatchBarrier(int64_t group_id, BarrierGroupState& group)
+	{
+		if (group.ready != group.members.size() || group.members.empty())
+			return false;
+		std::vector<Proc*> selected(group.members.size(), nullptr);
+		if (!group.proc_slots.empty()) {
+			if (group.proc_slots.size() != group.members.size())
+				return false;
+			for (size_t i = 0; i < group.members.size(); i++) {
+				if (!group.members[i].has_value())
+					return false;
+				Proc* proc = ProcBySlot(group.proc_slots[i]);
+				if (!proc || !proc->CanRun(*group.members[i]))
+					return false;
+				selected[i] = proc;
+			}
+		} else {
+			std::vector<Proc*> idle;
+			for (auto& proc : procs_) {
+				if (proc->IsIdle())
+					idle.push_back(proc.get());
+			}
+			if (idle.size() < group.members.size())
+				return false;
+			std::vector<bool> used(idle.size(), false);
+			for (size_t i = 0; i < group.members.size(); i++) {
+				if (!group.members[i].has_value())
+					return false;
+				bool assigned = false;
+				for (size_t j = 0; j < idle.size(); j++) {
+					if (used[j])
+						continue;
+					if (!idle[j]->CanRun(*group.members[i]))
+						continue;
+					selected[i] = idle[j];
+					used[j] = true;
+					assigned = true;
+					break;
+				}
+				if (!assigned)
+					return false;
+			}
+		}
+		debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",
+		      static_cast<long long>(group_id), group.members.size(),
+		      static_cast<unsigned long long>(group.participants_mask));
+		for (size_t i = 0; i < selected.size(); i++) {
+			if (!selected[i])
+				return false;
+			auto& member = *group.members[i];
+			debug("runner: barrier group=%lld member=%zu -> proc=%d index=%lld size=%lld\n",
+			      static_cast<long long>(group_id), i, selected[i]->Id(),
+			      static_cast<long long>(member.barrier_index),
+			      static_cast<long long>(member.barrier_group_size));
+			if (!selected[i]->Execute(*group.members[i]))
+				failmsg("failed to dispatch barrier member", "group=%lld index=%zu proc=%d",
+				        (long long)group_id, i, selected[i]->Id());
+			group.members[i].reset();
+		}
+		return true;
+	}
+
+	Proc* ProcBySlot(int slot)
+	{
+		for (auto& proc : procs_) {
+			if (proc->Id() == slot)
+				return proc.get();
+		}
+		return nullptr;
+	}
+
+	static std::vector<int> EnumerateMask(uint64 mask)
+	{
+		std::vector<int> ids;
+		int bit = 0;
+		while (mask) {
+			if (mask & 1)
+				ids.push_back(bit);
+			mask >>= 1;
+			bit++;
+		}
+		return ids;
 	}
 
 	void ExecuteBinary(rpc::ExecRequestRawT& msg)

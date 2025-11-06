@@ -258,6 +258,11 @@ type Experimental struct {
 
 	// Enable dynamic discovery and fuzzing of KFuzzTest targets.
 	EnableKFuzzTest bool `json:"enable_kfuzztest"`
+
+	// Enable synchronized barrier execution for fuzzing requests. When enabled,
+	// barrier_procs must specify at least two executor proc indices.
+	BarrierMode  bool  `json:"barrier_mode"`
+	BarrierProcs []int `json:"barrier_procs,omitempty"`
 }
 
 type FocusArea struct {

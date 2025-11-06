@@ -394,6 +394,7 @@ const (
 	ExecFlagDedupCover    ExecFlag = 4
 	ExecFlagCollectComps  ExecFlag = 8
 	ExecFlagThreaded      ExecFlag = 16
+	ExecFlagBarrier       ExecFlag = 32
 )
 
 var EnumNamesExecFlag = map[ExecFlag]string{
@@ -402,6 +403,7 @@ var EnumNamesExecFlag = map[ExecFlag]string{
 	ExecFlagDedupCover:    "DedupCover",
 	ExecFlagCollectComps:  "CollectComps",
 	ExecFlagThreaded:      "Threaded",
+	ExecFlagBarrier:       "Barrier",
 }
 
 var EnumValuesExecFlag = map[string]ExecFlag{
@@ -410,6 +412,7 @@ var EnumValuesExecFlag = map[string]ExecFlag{
 	"DedupCover":    ExecFlagDedupCover,
 	"CollectComps":  ExecFlagCollectComps,
 	"Threaded":      ExecFlagThreaded,
+	"Barrier":       ExecFlagBarrier,
 }
 
 func (v ExecFlag) String() string {
@@ -1960,13 +1963,17 @@ func CreateExecOptsRaw(builder *flatbuffers.Builder, envFlags ExecEnv, execFlags
 }
 
 type ExecRequestRawT struct {
-	Id        int64         `json:"id"`
-	Type      RequestType   `json:"type"`
-	Avoid     uint64        `json:"avoid"`
-	Data      []byte        `json:"data"`
-	ExecOpts  *ExecOptsRawT `json:"exec_opts"`
-	Flags     RequestFlag   `json:"flags"`
-	AllSignal []int32       `json:"all_signal"`
+	Id                  int64         `json:"id"`
+	Type                RequestType   `json:"type"`
+	Avoid               uint64        `json:"avoid"`
+	Data                []byte        `json:"data"`
+	ExecOpts            *ExecOptsRawT `json:"exec_opts"`
+	Flags               RequestFlag   `json:"flags"`
+	AllSignal           []int32       `json:"all_signal"`
+	BarrierParticipants uint64        `json:"barrier_participants"`
+	BarrierGroupId      int64         `json:"barrier_group_id"`
+	BarrierIndex        int32         `json:"barrier_index"`
+	BarrierGroupSize    int32         `json:"barrier_group_size"`
 }
 
 func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -1995,6 +2002,10 @@ func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffset
 	ExecRequestRawAddExecOpts(builder, execOptsOffset)
 	ExecRequestRawAddFlags(builder, t.Flags)
 	ExecRequestRawAddAllSignal(builder, allSignalOffset)
+	ExecRequestRawAddBarrierParticipants(builder, t.BarrierParticipants)
+	ExecRequestRawAddBarrierGroupId(builder, t.BarrierGroupId)
+	ExecRequestRawAddBarrierIndex(builder, t.BarrierIndex)
+	ExecRequestRawAddBarrierGroupSize(builder, t.BarrierGroupSize)
 	return ExecRequestRawEnd(builder)
 }
 
@@ -2010,6 +2021,10 @@ func (rcv *ExecRequestRaw) UnPackTo(t *ExecRequestRawT) {
 	for j := 0; j < allSignalLength; j++ {
 		t.AllSignal[j] = rcv.AllSignal(j)
 	}
+	t.BarrierParticipants = rcv.BarrierParticipants()
+	t.BarrierGroupId = rcv.BarrierGroupId()
+	t.BarrierIndex = rcv.BarrierIndex()
+	t.BarrierGroupSize = rcv.BarrierGroupSize()
 }
 
 func (rcv *ExecRequestRaw) UnPack() *ExecRequestRawT {
@@ -2169,8 +2184,56 @@ func (rcv *ExecRequestRaw) MutateAllSignal(j int, n int32) bool {
 	return false
 }
 
+func (rcv *ExecRequestRaw) BarrierParticipants() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateBarrierParticipants(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(18, n)
+}
+
+func (rcv *ExecRequestRaw) BarrierGroupId() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateBarrierGroupId(n int64) bool {
+	return rcv._tab.MutateInt64Slot(20, n)
+}
+
+func (rcv *ExecRequestRaw) BarrierIndex() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateBarrierIndex(n int32) bool {
+	return rcv._tab.MutateInt32Slot(22, n)
+}
+
+func (rcv *ExecRequestRaw) BarrierGroupSize() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateBarrierGroupSize(n int32) bool {
+	return rcv._tab.MutateInt32Slot(24, n)
+}
+
 func ExecRequestRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(7)
+	builder.StartObject(11)
 }
 func ExecRequestRawAddId(builder *flatbuffers.Builder, id int64) {
 	builder.PrependInt64Slot(0, id, 0)
@@ -2198,6 +2261,18 @@ func ExecRequestRawAddAllSignal(builder *flatbuffers.Builder, allSignal flatbuff
 }
 func ExecRequestRawStartAllSignalVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
 	return builder.StartVector(4, numElems, 4)
+}
+func ExecRequestRawAddBarrierParticipants(builder *flatbuffers.Builder, barrierParticipants uint64) {
+	builder.PrependUint64Slot(7, barrierParticipants, 0)
+}
+func ExecRequestRawAddBarrierGroupId(builder *flatbuffers.Builder, barrierGroupId int64) {
+	builder.PrependInt64Slot(8, barrierGroupId, 0)
+}
+func ExecRequestRawAddBarrierIndex(builder *flatbuffers.Builder, barrierIndex int32) {
+	builder.PrependInt32Slot(9, barrierIndex, 0)
+}
+func ExecRequestRawAddBarrierGroupSize(builder *flatbuffers.Builder, barrierGroupSize int32) {
+	builder.PrependInt32Slot(10, barrierGroupSize, 0)
 }
 func ExecRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
@@ -3073,12 +3148,16 @@ func ProgInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 }
 
 type ExecResultRawT struct {
-	Id     int64         `json:"id"`
-	Proc   int32         `json:"proc"`
-	Output []byte        `json:"output"`
-	Hanged bool          `json:"hanged"`
-	Error  string        `json:"error"`
-	Info   *ProgInfoRawT `json:"info"`
+	Id               int64         `json:"id"`
+	Proc             int32         `json:"proc"`
+	Output           []byte        `json:"output"`
+	Hanged           bool          `json:"hanged"`
+	Error            string        `json:"error"`
+	Info             *ProgInfoRawT `json:"info"`
+	BarrierProcs     uint64        `json:"barrier_procs"`
+	BarrierGroupId   int64         `json:"barrier_group_id"`
+	BarrierIndex     int32         `json:"barrier_index"`
+	BarrierGroupSize int32         `json:"barrier_group_size"`
 }
 
 func (t *ExecResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -3098,6 +3177,10 @@ func (t *ExecResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT
 	ExecResultRawAddHanged(builder, t.Hanged)
 	ExecResultRawAddError(builder, errorOffset)
 	ExecResultRawAddInfo(builder, infoOffset)
+	ExecResultRawAddBarrierProcs(builder, t.BarrierProcs)
+	ExecResultRawAddBarrierGroupId(builder, t.BarrierGroupId)
+	ExecResultRawAddBarrierIndex(builder, t.BarrierIndex)
+	ExecResultRawAddBarrierGroupSize(builder, t.BarrierGroupSize)
 	return ExecResultRawEnd(builder)
 }
 
@@ -3108,6 +3191,10 @@ func (rcv *ExecResultRaw) UnPackTo(t *ExecResultRawT) {
 	t.Hanged = rcv.Hanged()
 	t.Error = string(rcv.Error())
 	t.Info = rcv.Info(nil).UnPack()
+	t.BarrierProcs = rcv.BarrierProcs()
+	t.BarrierGroupId = rcv.BarrierGroupId()
+	t.BarrierIndex = rcv.BarrierIndex()
+	t.BarrierGroupSize = rcv.BarrierGroupSize()
 }
 
 func (rcv *ExecResultRaw) UnPack() *ExecResultRawT {
@@ -3237,8 +3324,56 @@ func (rcv *ExecResultRaw) Info(obj *ProgInfoRaw) *ProgInfoRaw {
 	return nil
 }
 
+func (rcv *ExecResultRaw) BarrierProcs() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecResultRaw) MutateBarrierProcs(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(16, n)
+}
+
+func (rcv *ExecResultRaw) BarrierGroupId() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecResultRaw) MutateBarrierGroupId(n int64) bool {
+	return rcv._tab.MutateInt64Slot(18, n)
+}
+
+func (rcv *ExecResultRaw) BarrierIndex() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecResultRaw) MutateBarrierIndex(n int32) bool {
+	return rcv._tab.MutateInt32Slot(20, n)
+}
+
+func (rcv *ExecResultRaw) BarrierGroupSize() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecResultRaw) MutateBarrierGroupSize(n int32) bool {
+	return rcv._tab.MutateInt32Slot(22, n)
+}
+
 func ExecResultRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(6)
+	builder.StartObject(10)
 }
 func ExecResultRawAddId(builder *flatbuffers.Builder, id int64) {
 	builder.PrependInt64Slot(0, id, 0)
@@ -3260,6 +3395,18 @@ func ExecResultRawAddError(builder *flatbuffers.Builder, error flatbuffers.UOffs
 }
 func ExecResultRawAddInfo(builder *flatbuffers.Builder, info flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(info), 0)
+}
+func ExecResultRawAddBarrierProcs(builder *flatbuffers.Builder, barrierProcs uint64) {
+	builder.PrependUint64Slot(6, barrierProcs, 0)
+}
+func ExecResultRawAddBarrierGroupId(builder *flatbuffers.Builder, barrierGroupId int64) {
+	builder.PrependInt64Slot(7, barrierGroupId, 0)
+}
+func ExecResultRawAddBarrierIndex(builder *flatbuffers.Builder, barrierIndex int32) {
+	builder.PrependInt32Slot(8, barrierIndex, 0)
+}
+func ExecResultRawAddBarrierGroupSize(builder *flatbuffers.Builder, barrierGroupSize int32) {
+	builder.PrependInt32Slot(9, barrierGroupSize, 0)
 }
 func ExecResultRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

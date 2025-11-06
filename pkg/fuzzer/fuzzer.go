@@ -6,6 +6,7 @@ package fuzzer
 import (
 	"context"
 	"fmt"
+	"math/bits"
 	"math/rand"
 	"runtime"
 	"sort"
@@ -222,6 +223,8 @@ type Config struct {
 	NewInputFilter func(call string) bool
 	PatchTest      bool
 	ModeKFuzzTest  bool
+	BarrierMode    bool
+	BarrierMask    uint64
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -300,8 +303,58 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 			Stat: fuzzer.statExecCollide,
 		}
 	}
+	fuzzer.applyBarrier(req)
 	fuzzer.prepare(req, 0, 0)
 	return req
+}
+
+func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
+	if req == nil {
+		return
+	}
+	mask := fuzzer.Config.BarrierMask
+	if !fuzzer.Config.BarrierMode || mask == 0 {
+		req.SetBarrier(0)
+		return
+	}
+	if bits.OnesCount64(mask) < 2 {
+		fuzzer.Logf(1, "barrier mask %#x has less than 2 participants, disabling", mask)
+		req.SetBarrier(0)
+		return
+	}
+	req.SetBarrier(mask)
+	programs := fuzzer.buildBarrierPrograms(req, mask)
+	if err := req.SetBarrierPrograms(programs); err != nil {
+		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
+		req.SetBarrier(0)
+	}
+}
+
+func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*prog.Prog {
+	count := bits.OnesCount64(mask)
+	if count == 0 {
+		return nil
+	}
+	programs := make([]*prog.Prog, count)
+	programs[0] = req.Prog
+	if count == 1 {
+		return programs
+	}
+	rnd := fuzzer.rand()
+	for i := 1; i < count; i++ {
+		candidate := fuzzer.Config.Corpus.ChooseProgram(rnd)
+		if candidate == nil {
+			programs[i] = req.Prog.Clone()
+			continue
+		}
+		programs[i] = candidate.Clone()
+	}
+	for i := range programs {
+		if programs[i] == nil {
+			programs[i] = req.Prog.Clone()
+		}
+	}
+	return programs
 }
 
 func (fuzzer *Fuzzer) startJob(stat *stat.Val, newJob job) {
@@ -371,6 +424,7 @@ func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
 			Stat:      fuzzer.statExecCandidate,
 			Important: true,
 		}
+		fuzzer.applyBarrier(req)
 		fuzzer.enqueue(fuzzer.candidateQueue, req, candidate.Flags|progCandidate, 0)
 	}
 }

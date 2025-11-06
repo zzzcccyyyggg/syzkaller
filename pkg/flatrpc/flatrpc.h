@@ -638,49 +638,34 @@ enum class ExecFlag : uint64_t {
   DedupCover = 4ULL,
   CollectComps = 8ULL,
   Threaded = 16ULL,
+  Barrier = 32ULL,
   NONE = 0,
-  ANY = 31ULL
+  ANY = 63ULL
 };
 FLATBUFFERS_DEFINE_BITMASK_OPERATORS(ExecFlag, uint64_t)
 
-inline const ExecFlag (&EnumValuesExecFlag())[5] {
+inline const ExecFlag (&EnumValuesExecFlag())[6] {
   static const ExecFlag values[] = {
     ExecFlag::CollectSignal,
     ExecFlag::CollectCover,
     ExecFlag::DedupCover,
     ExecFlag::CollectComps,
-    ExecFlag::Threaded
+    ExecFlag::Threaded,
+    ExecFlag::Barrier
   };
   return values;
 }
 
-inline const char * const *EnumNamesExecFlag() {
-  static const char * const names[17] = {
-    "CollectSignal",
-    "CollectCover",
-    "",
-    "DedupCover",
-    "",
-    "",
-    "",
-    "CollectComps",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "",
-    "Threaded",
-    nullptr
-  };
-  return names;
-}
-
 inline const char *EnumNameExecFlag(ExecFlag e) {
-  if (flatbuffers::IsOutRange(e, ExecFlag::CollectSignal, ExecFlag::Threaded)) return "";
-  const size_t index = static_cast<size_t>(e) - static_cast<size_t>(ExecFlag::CollectSignal);
-  return EnumNamesExecFlag()[index];
+  switch (e) {
+    case ExecFlag::CollectSignal: return "CollectSignal";
+    case ExecFlag::CollectCover: return "CollectCover";
+    case ExecFlag::DedupCover: return "DedupCover";
+    case ExecFlag::CollectComps: return "CollectComps";
+    case ExecFlag::Threaded: return "Threaded";
+    case ExecFlag::Barrier: return "Barrier";
+    default: return "";
+  }
 }
 
 enum class CallFlag : uint8_t {
@@ -1855,6 +1840,10 @@ struct ExecRequestRawT : public flatbuffers::NativeTable {
   std::unique_ptr<rpc::ExecOptsRaw> exec_opts{};
   rpc::RequestFlag flags = static_cast<rpc::RequestFlag>(0);
   std::vector<int32_t> all_signal{};
+  uint64_t barrier_participants = 0;
+  int64_t barrier_group_id = 0;
+  int32_t barrier_index = 0;
+  int32_t barrier_group_size = 0;
   ExecRequestRawT() = default;
   ExecRequestRawT(const ExecRequestRawT &o);
   ExecRequestRawT(ExecRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -1871,7 +1860,11 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_DATA = 10,
     VT_EXEC_OPTS = 12,
     VT_FLAGS = 14,
-    VT_ALL_SIGNAL = 16
+    VT_ALL_SIGNAL = 16,
+    VT_BARRIER_PARTICIPANTS = 18,
+    VT_BARRIER_GROUP_ID = 20,
+    VT_BARRIER_INDEX = 22,
+    VT_BARRIER_GROUP_SIZE = 24
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -1894,6 +1887,18 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   const flatbuffers::Vector<int32_t> *all_signal() const {
     return GetPointer<const flatbuffers::Vector<int32_t> *>(VT_ALL_SIGNAL);
   }
+  uint64_t barrier_participants() const {
+    return GetField<uint64_t>(VT_BARRIER_PARTICIPANTS, 0);
+  }
+  int64_t barrier_group_id() const {
+    return GetField<int64_t>(VT_BARRIER_GROUP_ID, 0);
+  }
+  int32_t barrier_index() const {
+    return GetField<int32_t>(VT_BARRIER_INDEX, 0);
+  }
+  int32_t barrier_group_size() const {
+    return GetField<int32_t>(VT_BARRIER_GROUP_SIZE, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_ID, 8) &&
@@ -1905,6 +1910,10 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyField<uint64_t>(verifier, VT_FLAGS, 8) &&
            VerifyOffset(verifier, VT_ALL_SIGNAL) &&
            verifier.VerifyVector(all_signal()) &&
+           VerifyField<uint64_t>(verifier, VT_BARRIER_PARTICIPANTS, 8) &&
+           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID, 8) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX, 4) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE, 4) &&
            verifier.EndTable();
   }
   ExecRequestRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -1937,6 +1946,18 @@ struct ExecRequestRawBuilder {
   void add_all_signal(flatbuffers::Offset<flatbuffers::Vector<int32_t>> all_signal) {
     fbb_.AddOffset(ExecRequestRaw::VT_ALL_SIGNAL, all_signal);
   }
+  void add_barrier_participants(uint64_t barrier_participants) {
+    fbb_.AddElement<uint64_t>(ExecRequestRaw::VT_BARRIER_PARTICIPANTS, barrier_participants, 0);
+  }
+  void add_barrier_group_id(int64_t barrier_group_id) {
+    fbb_.AddElement<int64_t>(ExecRequestRaw::VT_BARRIER_GROUP_ID, barrier_group_id, 0);
+  }
+  void add_barrier_index(int32_t barrier_index) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_BARRIER_INDEX, barrier_index, 0);
+  }
+  void add_barrier_group_size(int32_t barrier_group_size) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_BARRIER_GROUP_SIZE, barrier_group_size, 0);
+  }
   explicit ExecRequestRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -1956,12 +1977,20 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> data = 0,
     const rpc::ExecOptsRaw *exec_opts = nullptr,
     rpc::RequestFlag flags = static_cast<rpc::RequestFlag>(0),
-    flatbuffers::Offset<flatbuffers::Vector<int32_t>> all_signal = 0) {
+    flatbuffers::Offset<flatbuffers::Vector<int32_t>> all_signal = 0,
+    uint64_t barrier_participants = 0,
+    int64_t barrier_group_id = 0,
+    int32_t barrier_index = 0,
+    int32_t barrier_group_size = 0) {
   ExecRequestRawBuilder builder_(_fbb);
+  builder_.add_barrier_group_id(barrier_group_id);
+  builder_.add_barrier_participants(barrier_participants);
   builder_.add_flags(flags);
   builder_.add_avoid(avoid);
   builder_.add_type(type);
   builder_.add_id(id);
+  builder_.add_barrier_group_size(barrier_group_size);
+  builder_.add_barrier_index(barrier_index);
   builder_.add_all_signal(all_signal);
   builder_.add_exec_opts(exec_opts);
   builder_.add_data(data);
@@ -1976,7 +2005,11 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     const std::vector<uint8_t> *data = nullptr,
     const rpc::ExecOptsRaw *exec_opts = nullptr,
     rpc::RequestFlag flags = static_cast<rpc::RequestFlag>(0),
-    const std::vector<int32_t> *all_signal = nullptr) {
+    const std::vector<int32_t> *all_signal = nullptr,
+    uint64_t barrier_participants = 0,
+    int64_t barrier_group_id = 0,
+    int32_t barrier_index = 0,
+    int32_t barrier_group_size = 0) {
   auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
   auto all_signal__ = all_signal ? _fbb.CreateVector<int32_t>(*all_signal) : 0;
   return rpc::CreateExecRequestRaw(
@@ -1987,7 +2020,11 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
       data__,
       exec_opts,
       flags,
-      all_signal__);
+      all_signal__,
+      barrier_participants,
+      barrier_group_id,
+      barrier_index,
+      barrier_group_size);
 }
 
 flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -2466,6 +2503,10 @@ struct ExecResultRawT : public flatbuffers::NativeTable {
   bool hanged = false;
   std::string error{};
   std::unique_ptr<rpc::ProgInfoRawT> info{};
+  uint64_t barrier_procs = 0;
+  int64_t barrier_group_id = 0;
+  int32_t barrier_index = 0;
+  int32_t barrier_group_size = 0;
   ExecResultRawT() = default;
   ExecResultRawT(const ExecResultRawT &o);
   ExecResultRawT(ExecResultRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -2481,7 +2522,11 @@ struct ExecResultRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_OUTPUT = 8,
     VT_HANGED = 10,
     VT_ERROR = 12,
-    VT_INFO = 14
+    VT_INFO = 14,
+    VT_BARRIER_PROCS = 16,
+    VT_BARRIER_GROUP_ID = 18,
+    VT_BARRIER_INDEX = 20,
+    VT_BARRIER_GROUP_SIZE = 22
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -2501,6 +2546,18 @@ struct ExecResultRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   const rpc::ProgInfoRaw *info() const {
     return GetPointer<const rpc::ProgInfoRaw *>(VT_INFO);
   }
+  uint64_t barrier_procs() const {
+    return GetField<uint64_t>(VT_BARRIER_PROCS, 0);
+  }
+  int64_t barrier_group_id() const {
+    return GetField<int64_t>(VT_BARRIER_GROUP_ID, 0);
+  }
+  int32_t barrier_index() const {
+    return GetField<int32_t>(VT_BARRIER_INDEX, 0);
+  }
+  int32_t barrier_group_size() const {
+    return GetField<int32_t>(VT_BARRIER_GROUP_SIZE, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_ID, 8) &&
@@ -2512,6 +2569,10 @@ struct ExecResultRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            verifier.VerifyString(error()) &&
            VerifyOffset(verifier, VT_INFO) &&
            verifier.VerifyTable(info()) &&
+           VerifyField<uint64_t>(verifier, VT_BARRIER_PROCS, 8) &&
+           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID, 8) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX, 4) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE, 4) &&
            verifier.EndTable();
   }
   ExecResultRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2541,6 +2602,18 @@ struct ExecResultRawBuilder {
   void add_info(flatbuffers::Offset<rpc::ProgInfoRaw> info) {
     fbb_.AddOffset(ExecResultRaw::VT_INFO, info);
   }
+  void add_barrier_procs(uint64_t barrier_procs) {
+    fbb_.AddElement<uint64_t>(ExecResultRaw::VT_BARRIER_PROCS, barrier_procs, 0);
+  }
+  void add_barrier_group_id(int64_t barrier_group_id) {
+    fbb_.AddElement<int64_t>(ExecResultRaw::VT_BARRIER_GROUP_ID, barrier_group_id, 0);
+  }
+  void add_barrier_index(int32_t barrier_index) {
+    fbb_.AddElement<int32_t>(ExecResultRaw::VT_BARRIER_INDEX, barrier_index, 0);
+  }
+  void add_barrier_group_size(int32_t barrier_group_size) {
+    fbb_.AddElement<int32_t>(ExecResultRaw::VT_BARRIER_GROUP_SIZE, barrier_group_size, 0);
+  }
   explicit ExecResultRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2559,8 +2632,16 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> output = 0,
     bool hanged = false,
     flatbuffers::Offset<flatbuffers::String> error = 0,
-    flatbuffers::Offset<rpc::ProgInfoRaw> info = 0) {
+    flatbuffers::Offset<rpc::ProgInfoRaw> info = 0,
+    uint64_t barrier_procs = 0,
+    int64_t barrier_group_id = 0,
+    int32_t barrier_index = 0,
+    int32_t barrier_group_size = 0) {
   ExecResultRawBuilder builder_(_fbb);
+  builder_.add_barrier_group_size(barrier_group_size);
+  builder_.add_barrier_index(barrier_index);
+  builder_.add_barrier_group_id(barrier_group_id);
+  builder_.add_barrier_procs(barrier_procs);
   builder_.add_id(id);
   builder_.add_info(info);
   builder_.add_error(error);
@@ -2577,7 +2658,11 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRawDirect(
     const std::vector<uint8_t> *output = nullptr,
     bool hanged = false,
     const char *error = nullptr,
-    flatbuffers::Offset<rpc::ProgInfoRaw> info = 0) {
+    flatbuffers::Offset<rpc::ProgInfoRaw> info = 0,
+    uint64_t barrier_procs = 0,
+    int64_t barrier_group_id = 0,
+    int32_t barrier_index = 0,
+    int32_t barrier_group_size = 0) {
   auto output__ = output ? _fbb.CreateVector<uint8_t>(*output) : 0;
   auto error__ = error ? _fbb.CreateString(error) : 0;
   return rpc::CreateExecResultRaw(
@@ -2587,7 +2672,11 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRawDirect(
       output__,
       hanged,
       error__,
-      info);
+      info,
+      barrier_procs,
+      barrier_group_id,
+      barrier_index,
+      barrier_group_size);
 }
 
 flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecResultRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -3328,7 +3417,11 @@ inline ExecRequestRawT::ExecRequestRawT(const ExecRequestRawT &o)
         data(o.data),
         exec_opts((o.exec_opts) ? new rpc::ExecOptsRaw(*o.exec_opts) : nullptr),
         flags(o.flags),
-        all_signal(o.all_signal) {
+        all_signal(o.all_signal),
+        barrier_participants(o.barrier_participants),
+        barrier_group_id(o.barrier_group_id),
+        barrier_index(o.barrier_index),
+        barrier_group_size(o.barrier_group_size) {
 }
 
 inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT {
@@ -3339,6 +3432,10 @@ inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFER
   std::swap(exec_opts, o.exec_opts);
   std::swap(flags, o.flags);
   std::swap(all_signal, o.all_signal);
+  std::swap(barrier_participants, o.barrier_participants);
+  std::swap(barrier_group_id, o.barrier_group_id);
+  std::swap(barrier_index, o.barrier_index);
+  std::swap(barrier_group_size, o.barrier_group_size);
   return *this;
 }
 
@@ -3358,6 +3455,10 @@ inline void ExecRequestRaw::UnPackTo(ExecRequestRawT *_o, const flatbuffers::res
   { auto _e = exec_opts(); if (_e) _o->exec_opts = std::unique_ptr<rpc::ExecOptsRaw>(new rpc::ExecOptsRaw(*_e)); }
   { auto _e = flags(); _o->flags = _e; }
   { auto _e = all_signal(); if (_e) { _o->all_signal.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->all_signal[_i] = _e->Get(_i); } } }
+  { auto _e = barrier_participants(); _o->barrier_participants = _e; }
+  { auto _e = barrier_group_id(); _o->barrier_group_id = _e; }
+  { auto _e = barrier_index(); _o->barrier_index = _e; }
+  { auto _e = barrier_group_size(); _o->barrier_group_size = _e; }
 }
 
 inline flatbuffers::Offset<ExecRequestRaw> ExecRequestRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -3375,6 +3476,10 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _exec_opts = _o->exec_opts ? _o->exec_opts.get() : nullptr;
   auto _flags = _o->flags;
   auto _all_signal = _o->all_signal.size() ? _fbb.CreateVector(_o->all_signal) : 0;
+  auto _barrier_participants = _o->barrier_participants;
+  auto _barrier_group_id = _o->barrier_group_id;
+  auto _barrier_index = _o->barrier_index;
+  auto _barrier_group_size = _o->barrier_group_size;
   return rpc::CreateExecRequestRaw(
       _fbb,
       _id,
@@ -3383,7 +3488,11 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
       _data,
       _exec_opts,
       _flags,
-      _all_signal);
+      _all_signal,
+      _barrier_participants,
+      _barrier_group_id,
+      _barrier_index,
+      _barrier_group_size);
 }
 
 inline SignalUpdateRawT *SignalUpdateRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -3594,7 +3703,11 @@ inline ExecResultRawT::ExecResultRawT(const ExecResultRawT &o)
         output(o.output),
         hanged(o.hanged),
         error(o.error),
-        info((o.info) ? new rpc::ProgInfoRawT(*o.info) : nullptr) {
+        info((o.info) ? new rpc::ProgInfoRawT(*o.info) : nullptr),
+        barrier_procs(o.barrier_procs),
+        barrier_group_id(o.barrier_group_id),
+        barrier_index(o.barrier_index),
+        barrier_group_size(o.barrier_group_size) {
 }
 
 inline ExecResultRawT &ExecResultRawT::operator=(ExecResultRawT o) FLATBUFFERS_NOEXCEPT {
@@ -3604,6 +3717,10 @@ inline ExecResultRawT &ExecResultRawT::operator=(ExecResultRawT o) FLATBUFFERS_N
   std::swap(hanged, o.hanged);
   std::swap(error, o.error);
   std::swap(info, o.info);
+  std::swap(barrier_procs, o.barrier_procs);
+  std::swap(barrier_group_id, o.barrier_group_id);
+  std::swap(barrier_index, o.barrier_index);
+  std::swap(barrier_group_size, o.barrier_group_size);
   return *this;
 }
 
@@ -3622,6 +3739,10 @@ inline void ExecResultRaw::UnPackTo(ExecResultRawT *_o, const flatbuffers::resol
   { auto _e = hanged(); _o->hanged = _e; }
   { auto _e = error(); if (_e) _o->error = _e->str(); }
   { auto _e = info(); if (_e) _o->info = std::unique_ptr<rpc::ProgInfoRawT>(_e->UnPack(_resolver)); }
+  { auto _e = barrier_procs(); _o->barrier_procs = _e; }
+  { auto _e = barrier_group_id(); _o->barrier_group_id = _e; }
+  { auto _e = barrier_index(); _o->barrier_index = _e; }
+  { auto _e = barrier_group_size(); _o->barrier_group_size = _e; }
 }
 
 inline flatbuffers::Offset<ExecResultRaw> ExecResultRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecResultRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -3638,6 +3759,10 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(flatbuffers::FlatB
   auto _hanged = _o->hanged;
   auto _error = _o->error.empty() ? 0 : _fbb.CreateString(_o->error);
   auto _info = _o->info ? CreateProgInfoRaw(_fbb, _o->info.get(), _rehasher) : 0;
+  auto _barrier_procs = _o->barrier_procs;
+  auto _barrier_group_id = _o->barrier_group_id;
+  auto _barrier_index = _o->barrier_index;
+  auto _barrier_group_size = _o->barrier_group_size;
   return rpc::CreateExecResultRaw(
       _fbb,
       _id,
@@ -3645,7 +3770,11 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(flatbuffers::FlatB
       _output,
       _hanged,
       _error,
-      _info);
+      _info,
+      _barrier_procs,
+    _barrier_group_id,
+    _barrier_index,
+    _barrier_group_size);
 }
 
 inline StateResultRawT *StateResultRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

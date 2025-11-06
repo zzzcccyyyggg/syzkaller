@@ -6,6 +6,7 @@ package mgrconfig
 import (
 	"bytes"
 	"fmt"
+	"math/bits"
 	"os"
 	"path/filepath"
 	"regexp"
@@ -37,6 +38,8 @@ type Derived struct {
 	Syscalls      []int
 	NoMutateCalls map[int]bool // Set of IDs of syscalls which should not be mutated.
 	Timeouts      targets.Timeouts
+
+	BarrierMask uint64
 
 	// Special debugging/development mode specified by VM type "none".
 	// In this mode syz-manager does not start any VMs, but instead a user is supposed
@@ -207,6 +210,9 @@ func Complete(cfg *Config) error {
 	if err := cfg.completeFocusAreas(); err != nil {
 		return err
 	}
+	if err := cfg.initBarrierMask(); err != nil {
+		return err
+	}
 	cfg.initTimeouts()
 	cfg.VMLess = cfg.Type == "none"
 	return nil
@@ -241,6 +247,35 @@ func (cfg *Config) completeServices() error {
 			return err
 		}
 	}
+	return nil
+}
+
+func (cfg *Config) initBarrierMask() error {
+	if !cfg.Experimental.BarrierMode {
+		cfg.BarrierMask = 0
+		return nil
+	}
+	if len(cfg.Experimental.BarrierProcs) == 0 {
+		return fmt.Errorf("experimental.barrier_procs must be set when barrier_mode is enabled")
+	}
+	var mask uint64
+	for _, proc := range cfg.Experimental.BarrierProcs {
+		if proc < 0 || proc >= prog.MaxPids {
+			return fmt.Errorf("barrier proc %d out of range [0, %d]", proc, prog.MaxPids-1)
+		}
+		if proc >= cfg.Procs {
+			return fmt.Errorf("barrier proc %d exceeds configured procs=%d", proc, cfg.Procs)
+		}
+		bit := uint64(1) << uint(proc)
+		if mask&bit != 0 {
+			return fmt.Errorf("barrier proc %d listed multiple times", proc)
+		}
+		mask |= bit
+	}
+	if bits.OnesCount64(mask) < 2 {
+		return fmt.Errorf("barrier requires at least two distinct procs, got %v", cfg.Experimental.BarrierProcs)
+	}
+	cfg.BarrierMask = mask
 	return nil
 }
 

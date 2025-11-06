@@ -201,18 +201,33 @@ flush_cache_range(void* addr, uint64 size)
 
 	// 1. Clean D-cache over the whole range to the Point of Unification.
 	for (uint64 i = start; i < end; i += MAX_CACHE_LINE_SIZE)
-		asm volatile("dc cvau, %[addr]" : : [addr] "r"(i) : "memory");
+		asm volatile("dc cvau, %[addr]"
+			     :
+			     : [addr] "r"(i)
+			     : "memory");
 	// 2. Wait for the D-cache clean to complete.
-	asm volatile("dsb sy" : : : "memory");
+	asm volatile("dsb sy"
+		     :
+		     :
+		     : "memory");
 
 	// 3. Invalidate I-cache over the whole range.
 	for (uint64 i = start; i < end; i += MAX_CACHE_LINE_SIZE)
-		asm volatile("ic ivau, %[addr]" : : [addr] "r"(i) : "memory");
+		asm volatile("ic ivau, %[addr]"
+			     :
+			     : [addr] "r"(i)
+			     : "memory");
 	// 4. Wait for the I-cache invalidate to complete.
-	asm volatile("dsb sy" : : : "memory");
+	asm volatile("dsb sy"
+		     :
+		     :
+		     : "memory");
 
 	// 5. Flush pipeline to force re-fetch of new instruction.
-	asm volatile("isb" : : : "memory");
+	asm volatile("isb"
+		     :
+		     :
+		     : "memory");
 }
 
 GUEST_CODE static noinline void guest_execute_code(uint32* insns, uint64 size)
@@ -280,7 +295,10 @@ guest_handle_mrs(uint64 reg)
 GUEST_CODE static noinline void
 guest_handle_eret(uint64 unused)
 {
-	asm("eret\n" : : : "memory");
+	asm("eret\n"
+	    :
+	    :
+	    : "memory");
 }
 
 // Write value to a system register using an MSR instruction.

@@ -45,11 +45,13 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 	p := fuzzer.target.Generate(rnd,
 		fuzzer.RecommendedCalls(),
 		fuzzer.ChoiceTable())
-	return &queue.Request{
+	req := &queue.Request{
 		Prog:     p,
 		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 		Stat:     fuzzer.statExecGenerate,
 	}
+	fuzzer.applyBarrier(req)
+	return req
 }
 
 func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
@@ -64,11 +66,13 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		fuzzer.Config.NoMutateCalls,
 		fuzzer.Config.Corpus.Programs(),
 	)
-	return &queue.Request{
+	req := &queue.Request{
 		Prog:     newP,
 		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 		Stat:     fuzzer.statExecFuzz,
 	}
+	fuzzer.applyBarrier(req)
+	return req
 }
 
 // triageJob are programs for which we noticed potential new coverage during
@@ -133,6 +137,7 @@ const (
 func (job *triageJob) execute(req *queue.Request, flags ProgFlags) *queue.Result {
 	defer job.info.Execs.Add(1)
 	req.Important = true // All triage executions are important.
+	job.fuzzer.applyBarrier(req)
 	return job.fuzzer.executeWithFlags(job.queue, req, flags)
 }
 
@@ -456,11 +461,13 @@ func (job *smashJob) run(fuzzer *Fuzzer) {
 			fuzzer.ChoiceTable(),
 			fuzzer.Config.NoMutateCalls,
 			fuzzer.Config.Corpus.Programs())
-		result := fuzzer.execute(job.exec, &queue.Request{
+		req := &queue.Request{
 			Prog:     p,
 			ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 			Stat:     fuzzer.statExecSmash,
-		})
+		}
+		fuzzer.applyBarrier(req)
+		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
 		}
@@ -506,10 +513,12 @@ func (job *faultInjectionJob) run(fuzzer *Fuzzer) {
 			job.call, nth)
 		newProg := job.p.Clone()
 		newProg.Calls[job.call].Props.FailNth = nth
-		result := fuzzer.execute(job.exec, &queue.Request{
+		req := &queue.Request{
 			Prog: newProg,
 			Stat: fuzzer.statExecFaultInject,
-		})
+		}
+		fuzzer.applyBarrier(req)
+		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
 		}
@@ -536,11 +545,13 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
 
 	var comps prog.CompMap
 	for i := 0; i < 3; i++ {
-		result := fuzzer.execute(job.exec, &queue.Request{
+		req := &queue.Request{
 			Prog:     p,
 			ExecOpts: setFlags(flatrpc.ExecFlagCollectComps),
 			Stat:     fuzzer.statExecSeed,
-		})
+		}
+		fuzzer.applyBarrier(req)
+		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
 		}
@@ -569,11 +580,13 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
 	p.MutateWithHints(job.call, comps,
 		func(p *prog.Prog) bool {
 			defer job.info.Execs.Add(1)
-			result := fuzzer.execute(job.exec, &queue.Request{
+			req := &queue.Request{
 				Prog:     p,
 				ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 				Stat:     fuzzer.statExecHint,
-			})
+			}
+			fuzzer.applyBarrier(req)
+			result := fuzzer.execute(job.exec, req)
 			return !result.Stop()
 		})
 }
