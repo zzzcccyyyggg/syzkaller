@@ -281,6 +281,17 @@ func verifyExecResult(res *ExecResultRaw, rawSize int) error {
 	if info.Extra(&call) != nil {
 		size += callSize(&call)
 	}
+	if ddrd := info.Ddrd(nil); ddrd != nil {
+		const maxVec = 1 << 30
+		size += min(maxVec, ddrd.UafPairsLength()) * int(unsafe.Sizeof(DdrdUafPairRaw{}))
+		var ext DdrdExtendedUafPairRaw
+		for i := 0; i < ddrd.ExtendedUafLength(); i++ {
+			if ddrd.ExtendedUaf(&ext, i) {
+				size += int(unsafe.Sizeof(DdrdExtendedUafPairRaw{}))
+				size += min(maxVec, ext.AccessHistoryLength()) * int(unsafe.Sizeof(DdrdSerializedAccessRaw{}))
+			}
+		}
+	}
 	if size > rawSize {
 		return fmt.Errorf("corrupted message: total size %v, size of elements %v",
 			rawSize, size)

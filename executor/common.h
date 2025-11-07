@@ -737,6 +737,10 @@ static void loop(void)
 			errno = 0;
 			fail("child failed");
 		}
+#if GOOS_linux
+	// Ensure the parent process resets the UKC controller state after each run.
+	ukc_enter_monitor_mode();
+#endif
 		reply_execute(0);
 #endif
 #if SYZ_EXECUTOR || SYZ_USE_TMP_DIR
@@ -752,6 +756,7 @@ static void loop(void)
 #else
 static void loop(void)
 {
+	fprintf(stderr, "### start\n");
 	execute_one();
 }
 #endif

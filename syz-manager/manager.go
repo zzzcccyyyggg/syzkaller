@@ -292,7 +292,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		reportGenerator:    manager.ReportGeneratorCache(cfg),
 	}
 	if *flagDebug {
-		mgr.cfg.Procs = 1
+		mgr.cfg.Procs = 2
 	}
 	mgr.http = &manager.HTTPServer{
 		// Note that if cfg.HTTP == "", we don't start the server.

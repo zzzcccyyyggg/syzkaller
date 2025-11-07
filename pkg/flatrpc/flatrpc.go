@@ -389,30 +389,39 @@ func (v ExecEnv) String() string {
 type ExecFlag uint64
 
 const (
-	ExecFlagCollectSignal ExecFlag = 1
-	ExecFlagCollectCover  ExecFlag = 2
-	ExecFlagDedupCover    ExecFlag = 4
-	ExecFlagCollectComps  ExecFlag = 8
-	ExecFlagThreaded      ExecFlag = 16
-	ExecFlagBarrier       ExecFlag = 32
+	ExecFlagCollectSignal       ExecFlag = 1
+	ExecFlagCollectCover        ExecFlag = 2
+	ExecFlagDedupCover          ExecFlag = 4
+	ExecFlagCollectComps        ExecFlag = 8
+	ExecFlagThreaded            ExecFlag = 16
+	ExecFlagBarrier             ExecFlag = 32
+	ExecFlagCollectDdrdUaf      ExecFlag = 64
+	ExecFlagCollectDdrdRace     ExecFlag = 128
+	ExecFlagCollectDdrdExtended ExecFlag = 256
 )
 
 var EnumNamesExecFlag = map[ExecFlag]string{
-	ExecFlagCollectSignal: "CollectSignal",
-	ExecFlagCollectCover:  "CollectCover",
-	ExecFlagDedupCover:    "DedupCover",
-	ExecFlagCollectComps:  "CollectComps",
-	ExecFlagThreaded:      "Threaded",
-	ExecFlagBarrier:       "Barrier",
+	ExecFlagCollectSignal:       "CollectSignal",
+	ExecFlagCollectCover:        "CollectCover",
+	ExecFlagDedupCover:          "DedupCover",
+	ExecFlagCollectComps:        "CollectComps",
+	ExecFlagThreaded:            "Threaded",
+	ExecFlagBarrier:             "Barrier",
+	ExecFlagCollectDdrdUaf:      "CollectDdrdUaf",
+	ExecFlagCollectDdrdRace:     "CollectDdrdRace",
+	ExecFlagCollectDdrdExtended: "CollectDdrdExtended",
 }
 
 var EnumValuesExecFlag = map[string]ExecFlag{
-	"CollectSignal": ExecFlagCollectSignal,
-	"CollectCover":  ExecFlagCollectCover,
-	"DedupCover":    ExecFlagDedupCover,
-	"CollectComps":  ExecFlagCollectComps,
-	"Threaded":      ExecFlagThreaded,
-	"Barrier":       ExecFlagBarrier,
+	"CollectSignal":       ExecFlagCollectSignal,
+	"CollectCover":        ExecFlagCollectCover,
+	"DedupCover":          ExecFlagDedupCover,
+	"CollectComps":        ExecFlagCollectComps,
+	"Threaded":            ExecFlagThreaded,
+	"Barrier":             ExecFlagBarrier,
+	"CollectDdrdUaf":      ExecFlagCollectDdrdUaf,
+	"CollectDdrdRace":     ExecFlagCollectDdrdRace,
+	"CollectDdrdExtended": ExecFlagCollectDdrdExtended,
 }
 
 func (v ExecFlag) String() string {
@@ -2944,6 +2953,7 @@ type ProgInfoRawT struct {
 	Extra     *CallInfoRawT   `json:"extra"`
 	Elapsed   uint64          `json:"elapsed"`
 	Freshness uint64          `json:"freshness"`
+	Ddrd      *DdrdRawT       `json:"ddrd"`
 }
 
 func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -2977,12 +2987,14 @@ func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 		extraRawOffset = builder.EndVector(extraRawLength)
 	}
 	extraOffset := t.Extra.Pack(builder)
+	ddrdOffset := t.Ddrd.Pack(builder)
 	ProgInfoRawStart(builder)
 	ProgInfoRawAddCalls(builder, callsOffset)
 	ProgInfoRawAddExtraRaw(builder, extraRawOffset)
 	ProgInfoRawAddExtra(builder, extraOffset)
 	ProgInfoRawAddElapsed(builder, t.Elapsed)
 	ProgInfoRawAddFreshness(builder, t.Freshness)
+	ProgInfoRawAddDdrd(builder, ddrdOffset)
 	return ProgInfoRawEnd(builder)
 }
 
@@ -3004,6 +3016,7 @@ func (rcv *ProgInfoRaw) UnPackTo(t *ProgInfoRawT) {
 	t.Extra = rcv.Extra(nil).UnPack()
 	t.Elapsed = rcv.Elapsed()
 	t.Freshness = rcv.Freshness()
+	t.Ddrd = rcv.Ddrd(nil).UnPack()
 }
 
 func (rcv *ProgInfoRaw) UnPack() *ProgInfoRawT {
@@ -3119,8 +3132,21 @@ func (rcv *ProgInfoRaw) MutateFreshness(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(12, n)
 }
 
+func (rcv *ProgInfoRaw) Ddrd(obj *DdrdRaw) *DdrdRaw {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DdrdRaw)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
 func ProgInfoRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(5)
+	builder.StartObject(6)
 }
 func ProgInfoRawAddCalls(builder *flatbuffers.Builder, calls flatbuffers.UOffsetT) {
 	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(calls), 0)
@@ -3143,7 +3169,780 @@ func ProgInfoRawAddElapsed(builder *flatbuffers.Builder, elapsed uint64) {
 func ProgInfoRawAddFreshness(builder *flatbuffers.Builder, freshness uint64) {
 	builder.PrependUint64Slot(4, freshness, 0)
 }
+func ProgInfoRawAddDdrd(builder *flatbuffers.Builder, ddrd flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(5, flatbuffers.UOffsetT(ddrd), 0)
+}
 func ProgInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+
+type DdrdRawT struct {
+	UafPairs    []*DdrdUafPairRawT         `json:"uaf_pairs"`
+	ExtendedUaf []*DdrdExtendedUafPairRawT `json:"extended_uaf"`
+}
+
+func (t *DdrdRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	uafPairsOffset := flatbuffers.UOffsetT(0)
+	if t.UafPairs != nil {
+		uafPairsLength := len(t.UafPairs)
+		uafPairsOffsets := make([]flatbuffers.UOffsetT, uafPairsLength)
+		for j := 0; j < uafPairsLength; j++ {
+			uafPairsOffsets[j] = t.UafPairs[j].Pack(builder)
+		}
+		DdrdRawStartUafPairsVector(builder, uafPairsLength)
+		for j := uafPairsLength - 1; j >= 0; j-- {
+			builder.PrependUOffsetT(uafPairsOffsets[j])
+		}
+		uafPairsOffset = builder.EndVector(uafPairsLength)
+	}
+	extendedUafOffset := flatbuffers.UOffsetT(0)
+	if t.ExtendedUaf != nil {
+		extendedUafLength := len(t.ExtendedUaf)
+		extendedUafOffsets := make([]flatbuffers.UOffsetT, extendedUafLength)
+		for j := 0; j < extendedUafLength; j++ {
+			extendedUafOffsets[j] = t.ExtendedUaf[j].Pack(builder)
+		}
+		DdrdRawStartExtendedUafVector(builder, extendedUafLength)
+		for j := extendedUafLength - 1; j >= 0; j-- {
+			builder.PrependUOffsetT(extendedUafOffsets[j])
+		}
+		extendedUafOffset = builder.EndVector(extendedUafLength)
+	}
+	DdrdRawStart(builder)
+	DdrdRawAddUafPairs(builder, uafPairsOffset)
+	DdrdRawAddExtendedUaf(builder, extendedUafOffset)
+	return DdrdRawEnd(builder)
+}
+
+func (rcv *DdrdRaw) UnPackTo(t *DdrdRawT) {
+	uafPairsLength := rcv.UafPairsLength()
+	t.UafPairs = make([]*DdrdUafPairRawT, uafPairsLength)
+	for j := 0; j < uafPairsLength; j++ {
+		x := DdrdUafPairRaw{}
+		rcv.UafPairs(&x, j)
+		t.UafPairs[j] = x.UnPack()
+	}
+	extendedUafLength := rcv.ExtendedUafLength()
+	t.ExtendedUaf = make([]*DdrdExtendedUafPairRawT, extendedUafLength)
+	for j := 0; j < extendedUafLength; j++ {
+		x := DdrdExtendedUafPairRaw{}
+		rcv.ExtendedUaf(&x, j)
+		t.ExtendedUaf[j] = x.UnPack()
+	}
+}
+
+func (rcv *DdrdRaw) UnPack() *DdrdRawT {
+	if rcv == nil {
+		return nil
+	}
+	t := &DdrdRawT{}
+	rcv.UnPackTo(t)
+	return t
+}
+
+type DdrdRaw struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsDdrdRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &DdrdRaw{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func GetSizePrefixedRootAsDdrdRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &DdrdRaw{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func (rcv *DdrdRaw) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *DdrdRaw) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *DdrdRaw) UafPairs(obj *DdrdUafPairRaw, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *DdrdRaw) UafPairsLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func (rcv *DdrdRaw) ExtendedUaf(obj *DdrdExtendedUafPairRaw, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *DdrdRaw) ExtendedUafLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func DdrdRawStart(builder *flatbuffers.Builder) {
+	builder.StartObject(2)
+}
+func DdrdRawAddUafPairs(builder *flatbuffers.Builder, uafPairs flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(uafPairs), 0)
+}
+func DdrdRawStartUafPairsVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func DdrdRawAddExtendedUaf(builder *flatbuffers.Builder, extendedUaf flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(1, flatbuffers.UOffsetT(extendedUaf), 0)
+}
+func DdrdRawStartExtendedUafVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func DdrdRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+
+type DdrdUafPairRawT struct {
+	FreeAccessName uint64 `json:"free_access_name"`
+	UseAccessName  uint64 `json:"use_access_name"`
+	FreeCallStack  uint64 `json:"free_call_stack"`
+	UseCallStack   uint64 `json:"use_call_stack"`
+	Signal         uint64 `json:"signal"`
+	TimeDiff       uint64 `json:"time_diff"`
+	FreeSn         int32  `json:"free_sn"`
+	UseSn          int32  `json:"use_sn"`
+	LockType       uint32 `json:"lock_type"`
+	UseAccessType  uint32 `json:"use_access_type"`
+}
+
+func (t *DdrdUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	DdrdUafPairRawStart(builder)
+	DdrdUafPairRawAddFreeAccessName(builder, t.FreeAccessName)
+	DdrdUafPairRawAddUseAccessName(builder, t.UseAccessName)
+	DdrdUafPairRawAddFreeCallStack(builder, t.FreeCallStack)
+	DdrdUafPairRawAddUseCallStack(builder, t.UseCallStack)
+	DdrdUafPairRawAddSignal(builder, t.Signal)
+	DdrdUafPairRawAddTimeDiff(builder, t.TimeDiff)
+	DdrdUafPairRawAddFreeSn(builder, t.FreeSn)
+	DdrdUafPairRawAddUseSn(builder, t.UseSn)
+	DdrdUafPairRawAddLockType(builder, t.LockType)
+	DdrdUafPairRawAddUseAccessType(builder, t.UseAccessType)
+	return DdrdUafPairRawEnd(builder)
+}
+
+func (rcv *DdrdUafPairRaw) UnPackTo(t *DdrdUafPairRawT) {
+	t.FreeAccessName = rcv.FreeAccessName()
+	t.UseAccessName = rcv.UseAccessName()
+	t.FreeCallStack = rcv.FreeCallStack()
+	t.UseCallStack = rcv.UseCallStack()
+	t.Signal = rcv.Signal()
+	t.TimeDiff = rcv.TimeDiff()
+	t.FreeSn = rcv.FreeSn()
+	t.UseSn = rcv.UseSn()
+	t.LockType = rcv.LockType()
+	t.UseAccessType = rcv.UseAccessType()
+}
+
+func (rcv *DdrdUafPairRaw) UnPack() *DdrdUafPairRawT {
+	if rcv == nil {
+		return nil
+	}
+	t := &DdrdUafPairRawT{}
+	rcv.UnPackTo(t)
+	return t
+}
+
+type DdrdUafPairRaw struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsDdrdUafPairRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdUafPairRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &DdrdUafPairRaw{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func GetSizePrefixedRootAsDdrdUafPairRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdUafPairRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &DdrdUafPairRaw{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func (rcv *DdrdUafPairRaw) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *DdrdUafPairRaw) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *DdrdUafPairRaw) FreeAccessName() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeAccessName(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(4, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseAccessName() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseAccessName(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(6, n)
+}
+
+func (rcv *DdrdUafPairRaw) FreeCallStack() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeCallStack(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(8, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseCallStack() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseCallStack(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(10, n)
+}
+
+func (rcv *DdrdUafPairRaw) Signal() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateSignal(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(12, n)
+}
+
+func (rcv *DdrdUafPairRaw) TimeDiff() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateTimeDiff(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(14, n)
+}
+
+func (rcv *DdrdUafPairRaw) FreeSn() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeSn(n int32) bool {
+	return rcv._tab.MutateInt32Slot(16, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseSn() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseSn(n int32) bool {
+	return rcv._tab.MutateInt32Slot(18, n)
+}
+
+func (rcv *DdrdUafPairRaw) LockType() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(20))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateLockType(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(20, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseAccessType() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(22))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseAccessType(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(22, n)
+}
+
+func DdrdUafPairRawStart(builder *flatbuffers.Builder) {
+	builder.StartObject(10)
+}
+func DdrdUafPairRawAddFreeAccessName(builder *flatbuffers.Builder, freeAccessName uint64) {
+	builder.PrependUint64Slot(0, freeAccessName, 0)
+}
+func DdrdUafPairRawAddUseAccessName(builder *flatbuffers.Builder, useAccessName uint64) {
+	builder.PrependUint64Slot(1, useAccessName, 0)
+}
+func DdrdUafPairRawAddFreeCallStack(builder *flatbuffers.Builder, freeCallStack uint64) {
+	builder.PrependUint64Slot(2, freeCallStack, 0)
+}
+func DdrdUafPairRawAddUseCallStack(builder *flatbuffers.Builder, useCallStack uint64) {
+	builder.PrependUint64Slot(3, useCallStack, 0)
+}
+func DdrdUafPairRawAddSignal(builder *flatbuffers.Builder, signal uint64) {
+	builder.PrependUint64Slot(4, signal, 0)
+}
+func DdrdUafPairRawAddTimeDiff(builder *flatbuffers.Builder, timeDiff uint64) {
+	builder.PrependUint64Slot(5, timeDiff, 0)
+}
+func DdrdUafPairRawAddFreeSn(builder *flatbuffers.Builder, freeSn int32) {
+	builder.PrependInt32Slot(6, freeSn, 0)
+}
+func DdrdUafPairRawAddUseSn(builder *flatbuffers.Builder, useSn int32) {
+	builder.PrependInt32Slot(7, useSn, 0)
+}
+func DdrdUafPairRawAddLockType(builder *flatbuffers.Builder, lockType uint32) {
+	builder.PrependUint32Slot(8, lockType, 0)
+}
+func DdrdUafPairRawAddUseAccessType(builder *flatbuffers.Builder, useAccessType uint32) {
+	builder.PrependUint32Slot(9, useAccessType, 0)
+}
+func DdrdUafPairRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+
+type DdrdSerializedAccessRawT struct {
+	VarName       uint64 `json:"var_name"`
+	CallStackHash uint64 `json:"call_stack_hash"`
+	AccessTime    uint64 `json:"access_time"`
+	Sn            uint32 `json:"sn"`
+	AccessType    uint32 `json:"access_type"`
+}
+
+func (t *DdrdSerializedAccessRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	DdrdSerializedAccessRawStart(builder)
+	DdrdSerializedAccessRawAddVarName(builder, t.VarName)
+	DdrdSerializedAccessRawAddCallStackHash(builder, t.CallStackHash)
+	DdrdSerializedAccessRawAddAccessTime(builder, t.AccessTime)
+	DdrdSerializedAccessRawAddSn(builder, t.Sn)
+	DdrdSerializedAccessRawAddAccessType(builder, t.AccessType)
+	return DdrdSerializedAccessRawEnd(builder)
+}
+
+func (rcv *DdrdSerializedAccessRaw) UnPackTo(t *DdrdSerializedAccessRawT) {
+	t.VarName = rcv.VarName()
+	t.CallStackHash = rcv.CallStackHash()
+	t.AccessTime = rcv.AccessTime()
+	t.Sn = rcv.Sn()
+	t.AccessType = rcv.AccessType()
+}
+
+func (rcv *DdrdSerializedAccessRaw) UnPack() *DdrdSerializedAccessRawT {
+	if rcv == nil {
+		return nil
+	}
+	t := &DdrdSerializedAccessRawT{}
+	rcv.UnPackTo(t)
+	return t
+}
+
+type DdrdSerializedAccessRaw struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsDdrdSerializedAccessRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdSerializedAccessRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &DdrdSerializedAccessRaw{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func GetSizePrefixedRootAsDdrdSerializedAccessRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdSerializedAccessRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &DdrdSerializedAccessRaw{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func (rcv *DdrdSerializedAccessRaw) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *DdrdSerializedAccessRaw) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *DdrdSerializedAccessRaw) VarName() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdSerializedAccessRaw) MutateVarName(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(4, n)
+}
+
+func (rcv *DdrdSerializedAccessRaw) CallStackHash() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdSerializedAccessRaw) MutateCallStackHash(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(6, n)
+}
+
+func (rcv *DdrdSerializedAccessRaw) AccessTime() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdSerializedAccessRaw) MutateAccessTime(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(8, n)
+}
+
+func (rcv *DdrdSerializedAccessRaw) Sn() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdSerializedAccessRaw) MutateSn(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(10, n)
+}
+
+func (rcv *DdrdSerializedAccessRaw) AccessType() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdSerializedAccessRaw) MutateAccessType(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(12, n)
+}
+
+func DdrdSerializedAccessRawStart(builder *flatbuffers.Builder) {
+	builder.StartObject(5)
+}
+func DdrdSerializedAccessRawAddVarName(builder *flatbuffers.Builder, varName uint64) {
+	builder.PrependUint64Slot(0, varName, 0)
+}
+func DdrdSerializedAccessRawAddCallStackHash(builder *flatbuffers.Builder, callStackHash uint64) {
+	builder.PrependUint64Slot(1, callStackHash, 0)
+}
+func DdrdSerializedAccessRawAddAccessTime(builder *flatbuffers.Builder, accessTime uint64) {
+	builder.PrependUint64Slot(2, accessTime, 0)
+}
+func DdrdSerializedAccessRawAddSn(builder *flatbuffers.Builder, sn uint32) {
+	builder.PrependUint32Slot(3, sn, 0)
+}
+func DdrdSerializedAccessRawAddAccessType(builder *flatbuffers.Builder, accessType uint32) {
+	builder.PrependUint32Slot(4, accessType, 0)
+}
+func DdrdSerializedAccessRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	return builder.EndObject()
+}
+
+type DdrdExtendedUafPairRawT struct {
+	Basic                  *DdrdUafPairRawT            `json:"basic"`
+	UseThreadHistoryCount  uint32                      `json:"use_thread_history_count"`
+	FreeThreadHistoryCount uint32                      `json:"free_thread_history_count"`
+	UseTargetTime          uint64                      `json:"use_target_time"`
+	FreeTargetTime         uint64                      `json:"free_target_time"`
+	PathDistanceUse        float64                     `json:"path_distance_use"`
+	PathDistanceFree       float64                     `json:"path_distance_free"`
+	AccessHistory          []*DdrdSerializedAccessRawT `json:"access_history"`
+}
+
+func (t *DdrdExtendedUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
+	if t == nil {
+		return 0
+	}
+	basicOffset := t.Basic.Pack(builder)
+	accessHistoryOffset := flatbuffers.UOffsetT(0)
+	if t.AccessHistory != nil {
+		accessHistoryLength := len(t.AccessHistory)
+		accessHistoryOffsets := make([]flatbuffers.UOffsetT, accessHistoryLength)
+		for j := 0; j < accessHistoryLength; j++ {
+			accessHistoryOffsets[j] = t.AccessHistory[j].Pack(builder)
+		}
+		DdrdExtendedUafPairRawStartAccessHistoryVector(builder, accessHistoryLength)
+		for j := accessHistoryLength - 1; j >= 0; j-- {
+			builder.PrependUOffsetT(accessHistoryOffsets[j])
+		}
+		accessHistoryOffset = builder.EndVector(accessHistoryLength)
+	}
+	DdrdExtendedUafPairRawStart(builder)
+	DdrdExtendedUafPairRawAddBasic(builder, basicOffset)
+	DdrdExtendedUafPairRawAddUseThreadHistoryCount(builder, t.UseThreadHistoryCount)
+	DdrdExtendedUafPairRawAddFreeThreadHistoryCount(builder, t.FreeThreadHistoryCount)
+	DdrdExtendedUafPairRawAddUseTargetTime(builder, t.UseTargetTime)
+	DdrdExtendedUafPairRawAddFreeTargetTime(builder, t.FreeTargetTime)
+	DdrdExtendedUafPairRawAddPathDistanceUse(builder, t.PathDistanceUse)
+	DdrdExtendedUafPairRawAddPathDistanceFree(builder, t.PathDistanceFree)
+	DdrdExtendedUafPairRawAddAccessHistory(builder, accessHistoryOffset)
+	return DdrdExtendedUafPairRawEnd(builder)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) UnPackTo(t *DdrdExtendedUafPairRawT) {
+	t.Basic = rcv.Basic(nil).UnPack()
+	t.UseThreadHistoryCount = rcv.UseThreadHistoryCount()
+	t.FreeThreadHistoryCount = rcv.FreeThreadHistoryCount()
+	t.UseTargetTime = rcv.UseTargetTime()
+	t.FreeTargetTime = rcv.FreeTargetTime()
+	t.PathDistanceUse = rcv.PathDistanceUse()
+	t.PathDistanceFree = rcv.PathDistanceFree()
+	accessHistoryLength := rcv.AccessHistoryLength()
+	t.AccessHistory = make([]*DdrdSerializedAccessRawT, accessHistoryLength)
+	for j := 0; j < accessHistoryLength; j++ {
+		x := DdrdSerializedAccessRaw{}
+		rcv.AccessHistory(&x, j)
+		t.AccessHistory[j] = x.UnPack()
+	}
+}
+
+func (rcv *DdrdExtendedUafPairRaw) UnPack() *DdrdExtendedUafPairRawT {
+	if rcv == nil {
+		return nil
+	}
+	t := &DdrdExtendedUafPairRawT{}
+	rcv.UnPackTo(t)
+	return t
+}
+
+type DdrdExtendedUafPairRaw struct {
+	_tab flatbuffers.Table
+}
+
+func GetRootAsDdrdExtendedUafPairRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdExtendedUafPairRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset:])
+	x := &DdrdExtendedUafPairRaw{}
+	x.Init(buf, n+offset)
+	return x
+}
+
+func GetSizePrefixedRootAsDdrdExtendedUafPairRaw(buf []byte, offset flatbuffers.UOffsetT) *DdrdExtendedUafPairRaw {
+	n := flatbuffers.GetUOffsetT(buf[offset+flatbuffers.SizeUint32:])
+	x := &DdrdExtendedUafPairRaw{}
+	x.Init(buf, n+offset+flatbuffers.SizeUint32)
+	return x
+}
+
+func (rcv *DdrdExtendedUafPairRaw) Init(buf []byte, i flatbuffers.UOffsetT) {
+	rcv._tab.Bytes = buf
+	rcv._tab.Pos = i
+}
+
+func (rcv *DdrdExtendedUafPairRaw) Table() flatbuffers.Table {
+	return rcv._tab
+}
+
+func (rcv *DdrdExtendedUafPairRaw) Basic(obj *DdrdUafPairRaw) *DdrdUafPairRaw {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(4))
+	if o != 0 {
+		x := rcv._tab.Indirect(o + rcv._tab.Pos)
+		if obj == nil {
+			obj = new(DdrdUafPairRaw)
+		}
+		obj.Init(rcv._tab.Bytes, x)
+		return obj
+	}
+	return nil
+}
+
+func (rcv *DdrdExtendedUafPairRaw) UseThreadHistoryCount() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(6))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutateUseThreadHistoryCount(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(6, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) FreeThreadHistoryCount() uint32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(8))
+	if o != 0 {
+		return rcv._tab.GetUint32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutateFreeThreadHistoryCount(n uint32) bool {
+	return rcv._tab.MutateUint32Slot(8, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) UseTargetTime() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(10))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutateUseTargetTime(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(10, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) FreeTargetTime() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(12))
+	if o != 0 {
+		return rcv._tab.GetUint64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutateFreeTargetTime(n uint64) bool {
+	return rcv._tab.MutateUint64Slot(12, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) PathDistanceUse() float64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(14))
+	if o != 0 {
+		return rcv._tab.GetFloat64(o + rcv._tab.Pos)
+	}
+	return 0.0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutatePathDistanceUse(n float64) bool {
+	return rcv._tab.MutateFloat64Slot(14, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) PathDistanceFree() float64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(16))
+	if o != 0 {
+		return rcv._tab.GetFloat64(o + rcv._tab.Pos)
+	}
+	return 0.0
+}
+
+func (rcv *DdrdExtendedUafPairRaw) MutatePathDistanceFree(n float64) bool {
+	return rcv._tab.MutateFloat64Slot(16, n)
+}
+
+func (rcv *DdrdExtendedUafPairRaw) AccessHistory(obj *DdrdSerializedAccessRaw, j int) bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		x := rcv._tab.Vector(o)
+		x += flatbuffers.UOffsetT(j) * 4
+		x = rcv._tab.Indirect(x)
+		obj.Init(rcv._tab.Bytes, x)
+		return true
+	}
+	return false
+}
+
+func (rcv *DdrdExtendedUafPairRaw) AccessHistoryLength() int {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(18))
+	if o != 0 {
+		return rcv._tab.VectorLen(o)
+	}
+	return 0
+}
+
+func DdrdExtendedUafPairRawStart(builder *flatbuffers.Builder) {
+	builder.StartObject(8)
+}
+func DdrdExtendedUafPairRawAddBasic(builder *flatbuffers.Builder, basic flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(0, flatbuffers.UOffsetT(basic), 0)
+}
+func DdrdExtendedUafPairRawAddUseThreadHistoryCount(builder *flatbuffers.Builder, useThreadHistoryCount uint32) {
+	builder.PrependUint32Slot(1, useThreadHistoryCount, 0)
+}
+func DdrdExtendedUafPairRawAddFreeThreadHistoryCount(builder *flatbuffers.Builder, freeThreadHistoryCount uint32) {
+	builder.PrependUint32Slot(2, freeThreadHistoryCount, 0)
+}
+func DdrdExtendedUafPairRawAddUseTargetTime(builder *flatbuffers.Builder, useTargetTime uint64) {
+	builder.PrependUint64Slot(3, useTargetTime, 0)
+}
+func DdrdExtendedUafPairRawAddFreeTargetTime(builder *flatbuffers.Builder, freeTargetTime uint64) {
+	builder.PrependUint64Slot(4, freeTargetTime, 0)
+}
+func DdrdExtendedUafPairRawAddPathDistanceUse(builder *flatbuffers.Builder, pathDistanceUse float64) {
+	builder.PrependFloat64Slot(5, pathDistanceUse, 0.0)
+}
+func DdrdExtendedUafPairRawAddPathDistanceFree(builder *flatbuffers.Builder, pathDistanceFree float64) {
+	builder.PrependFloat64Slot(6, pathDistanceFree, 0.0)
+}
+func DdrdExtendedUafPairRawAddAccessHistory(builder *flatbuffers.Builder, accessHistory flatbuffers.UOffsetT) {
+	builder.PrependUOffsetTSlot(7, flatbuffers.UOffsetT(accessHistory), 0)
+}
+func DdrdExtendedUafPairRawStartAccessHistoryVector(builder *flatbuffers.Builder, numElems int) flatbuffers.UOffsetT {
+	return builder.StartVector(4, numElems, 4)
+}
+func DdrdExtendedUafPairRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
 

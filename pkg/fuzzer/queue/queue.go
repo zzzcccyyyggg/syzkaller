@@ -15,6 +15,7 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/stat"
@@ -279,6 +280,7 @@ func (r *Request) initChannel() {
 
 type Result struct {
 	Info     *flatrpc.ProgInfo
+	Ddrd     *ddrd.Report
 	Executor ExecutorID
 	Output   []byte
 	Status   Status
@@ -295,6 +297,9 @@ func (r *Result) clone() *Result {
 	if ret.Info != nil {
 		ret.Info = ret.Info.Clone()
 	}
+	if ret.Ddrd != nil {
+		ret.Ddrd = ret.Ddrd.Clone()
+	}
 	if ret.Output != nil {
 		ret.Output = append([]byte{}, ret.Output...)
 	}
@@ -307,6 +312,9 @@ func (r *Result) clone() *Result {
 			clone := *member
 			if member.Info != nil {
 				clone.Info = member.Info.Clone()
+			}
+			if member.Ddrd != nil {
+				clone.Ddrd = member.Ddrd.Clone()
 			}
 			if member.Output != nil {
 				clone.Output = append([]byte{}, member.Output...)
@@ -330,6 +338,7 @@ type BarrierMemberResult struct {
 	Prog      *prog.Prog
 	Executor  ExecutorID
 	Info      *flatrpc.ProgInfo
+	Ddrd      *ddrd.Report
 	Output    []byte
 	Status    Status
 	Err       error

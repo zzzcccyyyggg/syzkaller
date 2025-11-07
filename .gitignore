@@ -36,3 +36,5 @@ executor/syscalls.h
 /*.sh
 /flatc
 .cache/
+syzkaller-old/
+repro/

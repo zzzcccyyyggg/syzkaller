@@ -162,6 +162,9 @@ enum ExecFlag : uint64 (bit_flags) {
 	CollectComps,		// collect KCOV comparisons
 	Threaded,		// use multiple threads to mitigate blocked syscalls
 	Barrier,		// synchronize execution across selected procs
+	CollectDdrdUaf,		// collect DDRD UAF analysis data
+	CollectDdrdRace,		// collect DDRD race analysis data
+	CollectDdrdExtended,	// collect extended DDRD context data
 }
 
 struct ExecOptsRaw {
@@ -258,6 +261,45 @@ table ProgInfoRaw {
 	elapsed			:uint64;
 	// Number of programs executed in the same process before this one.
 	freshness		:uint64;
+	// Optional DDRD analysis information collected during execution.
+	ddrd		:DdrdRaw;
+}
+
+table DdrdRaw {
+	uaf_pairs		:[DdrdUafPairRaw];
+	extended_uaf		:[DdrdExtendedUafPairRaw];
+}
+
+table DdrdUafPairRaw {
+	free_access_name	:uint64;
+	use_access_name	:uint64;
+	free_call_stack	:uint64;
+	use_call_stack	:uint64;
+	signal		:uint64;
+	time_diff	:uint64;
+	free_sn		:int32;
+	use_sn		:int32;
+	lock_type	:uint32;
+	use_access_type	:uint32;
+}
+
+table DdrdSerializedAccessRaw {
+	var_name	:uint64;
+	call_stack_hash	:uint64;
+	access_time	:uint64;
+	sn		:uint32;
+	access_type	:uint32;
+}
+
+table DdrdExtendedUafPairRaw {
+	basic		:DdrdUafPairRaw;
+	use_thread_history_count	:uint32;
+	free_thread_history_count	:uint32;
+	use_target_time	:uint64;
+	free_target_time	:uint64;
+	path_distance_use	:float64;
+	path_distance_free	:float64;
+	access_history	:[DdrdSerializedAccessRaw];
 }
 
 // Result of executing a test program.

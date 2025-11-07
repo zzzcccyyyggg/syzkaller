@@ -14,9 +14,11 @@
 #include <stdlib.h>
 #include <string.h>
 #include <time.h>
+#include <vector>
 
 #include <atomic>
 #include <optional>
+#include <utility>
 
 #if !GOOS_windows
 #include <unistd.h>
@@ -25,6 +27,13 @@
 #include "defs.h"
 
 #include "pkg/flatrpc/flatrpc.h"
+
+#if GOOS_linux
+#include "ddrd/trace_manager.h"
+#include "ddrd/race_detector.h"
+#include <fcntl.h>
+#include <sys/ioctl.h>
+#endif
 
 #if defined(__GNUC__)
 #define SYSCALLAPI
@@ -276,6 +285,9 @@ static bool flag_delay_kcov_mmap;
 
 static bool flag_collect_cover;
 static bool flag_collect_signal;
+static bool flag_collect_ddrd_uaf;
+static bool flag_collect_ddrd_race;
+static bool flag_collect_ddrd_extended;
 static bool flag_dedup_cover;
 static bool flag_threaded;
 static bool flag_barrier;
@@ -299,6 +311,357 @@ static uint64 slowdown_scale;
 // Can be used to disginguish whether we're at the initialization stage
 // or we already execute programs.
 static bool in_execute_one = false;
+
+#if GOOS_linux
+static RaceDetector g_ddrd_detector;
+static bool g_ddrd_initialized;
+static bool g_ddrd_available;
+static bool g_ddrd_request_active;
+static bool g_ddrd_extended_requested;
+static bool g_ddrd_warned_unavailable;
+
+struct DdrdSerializedAccessEntry {
+	uint64_t var_name = 0;
+	uint64_t call_stack_hash = 0;
+	uint64_t access_time = 0;
+	uint32_t sn = 0;
+	uint32_t access_type = 0;
+};
+
+struct DdrdExtendedUafRecord {
+	size_t basic_index = 0;
+	uint32_t use_thread_history_count = 0;
+	uint32_t free_thread_history_count = 0;
+	uint64_t use_target_time = 0;
+	uint64_t free_target_time = 0;
+	double path_distance_use = 0.0;
+	double path_distance_free = 0.0;
+	std::vector<DdrdSerializedAccessEntry> history;
+};
+
+struct DdrdOutputState {
+	std::vector<may_uaf_pair_t> basic_pairs;
+	std::vector<DdrdExtendedUafRecord> extended_pairs;
+	bool has_results = false;
+};
+
+static DdrdOutputState g_ddrd_output;
+
+constexpr size_t kDdrdMaxUafPairs = 0x200;
+
+static inline void ddrd_clear_output()
+{
+	g_ddrd_output.basic_pairs.clear();
+	g_ddrd_output.extended_pairs.clear();
+	g_ddrd_output.has_results = false;
+}
+
+static inline bool ddrd_should_collect_for_executor()
+{
+	if (!flag_barrier || barrier_group_size <= 0)
+		return true;
+	return barrier_index == 0;
+}
+
+namespace {
+struct UkcController {
+	int fd = -1;
+	bool initialized = false;
+	bool log_mode = false;
+	bool warned_missing = false;
+} g_ukc;
+
+constexpr char kUkcDevicePath[] = "/dev/kccwf_ctl_dev";
+} // namespace
+
+#ifndef _IO
+#define _IO(type, nr) (((type) << 8) | (nr))
+#endif
+#ifndef _IOW
+#define _IOW(type, nr, size) (((type) << 8) | (nr) | (sizeof(size) << 16))
+#endif
+
+constexpr unsigned long kUkcTurnOff = _IO('c', 0);
+constexpr unsigned long kUkcStartMonitor = _IO('c', 1);
+constexpr unsigned long kUkcStartLog = _IO('c', 2);
+
+static void ukc_cleanup();
+
+static void ukc_try_init()
+{
+	if (g_ukc.initialized)
+		return;
+	g_ukc.initialized = true;
+	int fd = open(kUkcDevicePath, O_RDWR | O_CLOEXEC);
+	if (fd < 0) {
+		if (!g_ukc.warned_missing)
+			debug("ukc: controller init failed (errno=%d)\n", errno);
+		g_ukc.warned_missing = true;
+		return;
+	}
+	g_ukc.fd = fd;
+	if (ioctl(g_ukc.fd, kUkcTurnOff) == 0)
+		debug("ukc: controller ready\n");
+	else
+		debug("ukc: controller init but failed to reset mode (errno=%d)\n", errno);
+}
+
+static void ukc_enter_log_mode()
+{
+	ukc_try_init();
+	if (g_ukc.fd < 0)
+		return;
+	debug("log_mode %d\n", g_ukc.log_mode);
+	if (g_ukc.log_mode)
+		return;
+	if (ioctl(g_ukc.fd, kUkcStartLog) == 0) {
+		g_ukc.log_mode = true;
+		debug("ukc: switched to LOG mode\n");
+	} else {
+		debug("ukc: failed to switch to LOG mode (errno=%d)\n", errno);
+		g_ukc.log_mode = false;
+	}
+}
+
+static void ukc_enter_monitor_mode()
+{
+	if (g_ukc.fd < 0 || !g_ukc.log_mode)
+		return;
+	if (ioctl(g_ukc.fd, kUkcStartMonitor) == 0)
+		debug("ukc: switched to MONITOR mode\n");
+	else
+		debug("ukc: failed to switch to MONITOR mode (errno=%d)\n", errno);
+	g_ukc.log_mode = false;
+}
+
+static void ukc_cleanup()
+{
+	if (g_ukc.fd >= 0) {
+		if (g_ukc.log_mode)
+			ukc_enter_monitor_mode();
+		close(g_ukc.fd);
+		g_ukc.fd = -1;
+	}
+	g_ukc.log_mode = false;
+	g_ukc.initialized = false;
+}
+
+static inline bool ddrd_flags_requested()
+{
+	return request_type == rpc::RequestType::Program &&
+	       (flag_collect_ddrd_uaf || flag_collect_ddrd_extended);
+}
+
+static uint32_t ddrd_history_copy_count(const ThreadAccessHistory* history)
+{
+	if (!history)
+		return 0;
+	uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
+		       : (uint32_t)history->access_count;
+	if (available > MAX_ACCESS_HISTORY_RECORDS)
+		available = MAX_ACCESS_HISTORY_RECORDS;
+	return available;
+}
+
+static void ddrd_append_history(const ThreadAccessHistory* history, uint32_t limit,
+	       std::vector<DdrdSerializedAccessEntry>& out)
+{
+	if (!history || limit == 0)
+		return;
+	uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
+		       : (uint32_t)history->access_count;
+	uint32_t to_copy = std::min(limit, available);
+	out.reserve(out.size() + to_copy);
+	int start = history->buffer_full ? history->access_index : 0;
+	for (uint32_t i = 0; i < to_copy; i++) {
+		int idx = (start + i) % SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM;
+		const AccessRecord& rec = history->accesses[idx];
+		DdrdSerializedAccessEntry entry;
+		entry.var_name = rec.var_name;
+		entry.call_stack_hash = rec.call_stack_hash;
+		entry.access_time = rec.access_time;
+		entry.sn = rec.sn >= 0 ? (uint32_t)rec.sn : 0;
+		entry.access_type = (uint32_t)(uint8)(rec.access_type);
+		out.push_back(entry);
+	}
+}
+
+static void ddrd_prepare_for_request()
+{
+	ddrd_clear_output();
+	g_ddrd_request_active = false;
+	bool is_master = ddrd_should_collect_for_executor();
+	g_ddrd_extended_requested = flag_collect_ddrd_extended && is_master;
+	if (!ddrd_flags_requested())
+		return;
+	if (flag_barrier && !is_master) {
+		debug("ddrd: skip LOG mode for barrier member (group=%lld index=%d size=%d)\n",
+		      static_cast<long long>(barrier_group_id), barrier_index, barrier_group_size);
+		return;
+	}
+	if (flag_barrier && is_master) {
+		debug("ddrd: clearing trace buffer before barrier execution\n");
+		trace_manager_clear(nullptr);
+	}
+	ukc_enter_log_mode();
+	if (!g_ddrd_initialized) {
+		race_detector_init(&g_ddrd_detector);
+		g_ddrd_initialized = true;
+		g_ddrd_available = race_detector_is_available(&g_ddrd_detector);
+		if (!g_ddrd_available && !g_ddrd_warned_unavailable) {
+			debug("ddrd: race detector unavailable on this system\n");
+			g_ddrd_warned_unavailable = true;
+		}
+	}
+	if (!g_ddrd_available) {
+		ukc_enter_monitor_mode();
+		return;
+	}
+	g_ddrd_request_active = true;
+	if (g_ddrd_extended_requested)
+		race_detector_enable_history(&g_ddrd_detector);
+	else
+		race_detector_disable_history(&g_ddrd_detector);
+	race_detector_reset(&g_ddrd_detector);
+	debug("ddrd: prepare complete\n");
+}
+
+static void ddrd_collect_results()
+{
+	if (!g_ddrd_request_active)
+		return;
+	if (!g_ddrd_available) {
+		ukc_enter_monitor_mode();
+		g_ddrd_request_active = false;
+		return;
+	}
+	if (!ddrd_should_collect_for_executor()) {
+		debug("ddrd: skip collection for barrier member (group=%lld index=%d size=%d)\n",
+		      static_cast<long long>(barrier_group_id), barrier_index, barrier_group_size);
+		ddrd_clear_output();
+		g_ddrd_request_active = false;
+		return;
+	}
+	ukc_enter_monitor_mode();
+	debug("ddrd: collecting results\n");
+	std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
+	int count = race_detector_analyze_and_generate_uaf_infos(&g_ddrd_detector, pairs.data(),
+	(int)kDdrdMaxUafPairs);
+	if (count <= 0) {
+		ddrd_clear_output();
+		g_ddrd_request_active = false;
+		ukc_enter_monitor_mode();
+		return;
+	}
+
+	g_ddrd_output.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
+
+	if (g_ddrd_extended_requested) {
+		g_ddrd_output.extended_pairs.clear();
+		g_ddrd_output.extended_pairs.reserve(count);
+		for (int i = 0; i < count; i++) {
+			const may_uaf_pair_t& pair = g_ddrd_output.basic_pairs[i];
+			DdrdExtendedUafRecord ext{};
+			ext.basic_index = (size_t)i;
+			ThreadAccessHistory* use_hist = race_detector_find_thread_history(&g_ddrd_detector, pair.use_tid);
+			ThreadAccessHistory* free_hist = race_detector_find_thread_history(&g_ddrd_detector, pair.free_tid);
+			ext.use_thread_history_count = ddrd_history_copy_count(use_hist);
+			ext.free_thread_history_count = ddrd_history_copy_count(free_hist);
+			ext.use_target_time = pair.time_diff;
+			ext.free_target_time = 0;
+			ext.path_distance_use = use_hist && use_hist->access_count > 0
+			? (double)(use_hist->access_count - 1) : 0.0;
+			ext.path_distance_free = free_hist && free_hist->access_count > 0
+			? (double)(free_hist->access_count - 1) : 0.0;
+			ext.history.reserve(ext.use_thread_history_count + ext.free_thread_history_count);
+			ddrd_append_history(use_hist, ext.use_thread_history_count, ext.history);
+			ddrd_append_history(free_hist, ext.free_thread_history_count, ext.history);
+			g_ddrd_output.extended_pairs.push_back(std::move(ext));
+		}
+	} else {
+		g_ddrd_output.extended_pairs.clear();
+	}
+
+	g_ddrd_output.has_results = true;
+	g_ddrd_request_active = false;
+	ukc_enter_monitor_mode();
+}
+
+static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
+{
+	if (!g_ddrd_output.has_results)
+		return {};
+	std::vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> uaf_offsets;
+	uaf_offsets.reserve(g_ddrd_output.basic_pairs.size());
+	for (const auto& pair : g_ddrd_output.basic_pairs) {
+		rpc::DdrdUafPairRawBuilder builder(fbb);
+		builder.add_free_access_name(pair.free_access_name);
+		builder.add_use_access_name(pair.use_access_name);
+		builder.add_free_call_stack(pair.free_call_stack);
+		builder.add_use_call_stack(pair.use_call_stack);
+		builder.add_signal(pair.signal);
+		builder.add_time_diff(pair.time_diff);
+		builder.add_free_sn(pair.free_sn);
+		builder.add_use_sn(pair.use_sn);
+		builder.add_lock_type(pair.lock_type);
+		builder.add_use_access_type(pair.use_access_type);
+		uaf_offsets.push_back(builder.Finish());
+	}
+
+	std::vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> extended_offsets;
+	if (!g_ddrd_output.extended_pairs.empty()) {
+		extended_offsets.reserve(g_ddrd_output.extended_pairs.size());
+		for (const auto& ext : g_ddrd_output.extended_pairs) {
+			std::vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> history_offsets;
+			history_offsets.reserve(ext.history.size());
+			for (const auto& entry : ext.history) {
+				rpc::DdrdSerializedAccessRawBuilder hist_builder(fbb);
+				hist_builder.add_var_name(entry.var_name);
+				hist_builder.add_call_stack_hash(entry.call_stack_hash);
+				hist_builder.add_access_time(entry.access_time);
+				hist_builder.add_sn(entry.sn);
+				hist_builder.add_access_type(entry.access_type);
+				history_offsets.push_back(hist_builder.Finish());
+			}
+			auto history_vector = history_offsets.empty()
+				? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>>()
+				: fbb.CreateVector(history_offsets);
+			rpc::DdrdExtendedUafPairRawBuilder ext_builder(fbb);
+			if (ext.basic_index < uaf_offsets.size())
+				ext_builder.add_basic(uaf_offsets[ext.basic_index]);
+			ext_builder.add_use_thread_history_count(ext.use_thread_history_count);
+			ext_builder.add_free_thread_history_count(ext.free_thread_history_count);
+			ext_builder.add_use_target_time(ext.use_target_time);
+			ext_builder.add_free_target_time(ext.free_target_time);
+			ext_builder.add_path_distance_use(ext.path_distance_use);
+			ext_builder.add_path_distance_free(ext.path_distance_free);
+			ext_builder.add_access_history(history_vector);
+			extended_offsets.push_back(ext_builder.Finish());
+		}
+	}
+
+	auto uaf_vector = uaf_offsets.empty()
+		? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>>()
+		: fbb.CreateVector(uaf_offsets);
+	auto extended_vector = extended_offsets.empty()
+		? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>>()
+		: fbb.CreateVector(extended_offsets);
+
+	ddrd_clear_output();
+
+	return rpc::CreateDdrdRaw(fbb, uaf_vector, extended_vector);
+}
+#else
+static inline void ukc_enter_log_mode() {}
+static inline void ukc_enter_monitor_mode() {}
+static inline void ukc_cleanup() {}
+static inline void ddrd_prepare_for_request() {}
+static inline void ddrd_collect_results() {}
+static inline flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder&)
+{
+	return {};
+}
+#endif
 
 #define SYZ_EXECUTOR 1
 #include "common.h"
@@ -706,12 +1069,14 @@ int main(int argc, char** argv)
 	// before the sandbox process exits this will make ipc package kill the sandbox.
 	// As the result sandbox process will exit with exit status 9 instead of the executor
 	// exit status (notably kFailStatus). So we duplicate the exit status on the pipe.
+	ukc_cleanup();
 	reply_execute(status);
 	doexit(status);
 	// Unreachable.
 	return 1;
 #else
 	reply_execute(status);
+	ukc_cleanup();
 	return status;
 #endif
 }
@@ -874,6 +1239,9 @@ void parse_execute(const execute_req& req)
 	request_type = req.type;
 	flag_collect_signal = req.exec_flags & (uint64)rpc::ExecFlag::CollectSignal;
 	flag_collect_cover = req.exec_flags & (uint64)rpc::ExecFlag::CollectCover;
+	flag_collect_ddrd_uaf = req.exec_flags & (uint64)rpc::ExecFlag::CollectDdrdUaf;
+	flag_collect_ddrd_race = req.exec_flags & (uint64)rpc::ExecFlag::CollectDdrdRace;
+	flag_collect_ddrd_extended = req.exec_flags & (uint64)rpc::ExecFlag::CollectDdrdExtended;
 	flag_dedup_cover = req.exec_flags & (uint64)rpc::ExecFlag::DedupCover;
 	flag_comparisons = req.exec_flags & (uint64)rpc::ExecFlag::CollectComps;
 	flag_threaded = req.exec_flags & (uint64)rpc::ExecFlag::Threaded;
@@ -884,12 +1252,14 @@ void parse_execute(const execute_req& req)
 	barrier_index = req.barrier_index;
 	barrier_group_size = req.barrier_group_size;
 
-	debug("[%llums] exec opts: reqid=%llu type=%llu procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d "
+	debug("[%llums] exec opts: reqid=%llu type=%llu procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d ddrd_uaf=%d ddrd_race=%d ddrd_ext=%d"
 	      " sandbox=%d/%d/%d/%d timeouts=%llu/%llu/%llu kernel_64_bit=%d\n",
 	      current_time_ms() - start_time_ms, request_id, (uint64)request_type, procid, flag_threaded, flag_collect_cover,
-	      flag_comparisons, flag_dedup_cover, flag_collect_signal, flag_sandbox_none, flag_sandbox_setuid,
+	      flag_comparisons, flag_dedup_cover, flag_collect_signal, flag_collect_ddrd_uaf, flag_collect_ddrd_race,
+	      flag_collect_ddrd_extended, flag_sandbox_none, flag_sandbox_setuid,
 	      flag_sandbox_namespace, flag_sandbox_android, syscall_timeout_ms, program_timeout_ms, slowdown_scale,
 	      is_kernel_64_bit);
+	ddrd_prepare_for_request();
 	if (syscall_timeout_ms == 0 || program_timeout_ms <= syscall_timeout_ms || slowdown_scale == 0)
 		failmsg("bad timeouts", "syscall=%llu, program=%llu, scale=%llu",
 			syscall_timeout_ms, program_timeout_ms, slowdown_scale);
@@ -1166,6 +1536,7 @@ void execute_one()
 		}
 	}
 
+	ddrd_collect_results();
 #if SYZ_HAVE_CLOSE_FDS
 	close_fds();
 #endif
@@ -1490,7 +1861,8 @@ flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64
 		}
 		calls[call.index] = call.offset;
 	}
-	auto prog_info_off = rpc::CreateProgInfoRawDirect(fbb, &calls, &extra, 0, elapsed, freshness);
+	auto ddrd_off = ddrd_build_output(fbb);
+	auto prog_info_off = rpc::CreateProgInfoRawDirect(fbb, &calls, &extra, 0, elapsed, freshness, ddrd_off);
 	flatbuffers::Offset<flatbuffers::String> error_off = 0;
 	if (status == kFailStatus)
 		error_off = fbb.CreateString("process failed");

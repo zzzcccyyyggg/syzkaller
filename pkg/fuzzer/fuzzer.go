@@ -15,6 +15,7 @@ import (
 
 	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/csource"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/mgrconfig"
@@ -27,6 +28,7 @@ type Fuzzer struct {
 	Stats
 	Config *Config
 	Cover  *Cover
+	ddrd   *ddrd.Store
 
 	ctx          context.Context
 	mu           sync.Mutex
@@ -54,6 +56,7 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		Stats:  newStats(target),
 		Config: cfg,
 		Cover:  newCover(),
+		ddrd:   ddrd.NewStore(),
 
 		ctx:         ctx,
 		rnd:         rnd,
@@ -186,6 +189,11 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			fuzzer.handleCallInfo(req, info, call)
 		}
 		fuzzer.handleCallInfo(req, res.Info.Extra, -1)
+	}
+
+	if pairs := fuzzer.ddrd.Add(res.Ddrd); len(pairs) != 0 {
+		fuzzer.statDdrdPairs.Add(len(pairs))
+		fuzzer.Logf(2, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
 	}
 
 	// Corpus candidates may have flaky coverage, so we give them a second chance.

@@ -59,6 +59,7 @@ func (pi *ProgInfo) Clone() *ProgInfo {
 	for i, call := range pi.Calls {
 		ret.Calls[i] = call.clone()
 	}
+	ret.Ddrd = cloneDdrd(pi.Ddrd)
 	return &ret
 }
 
@@ -70,6 +71,54 @@ func (ci *CallInfo) clone() *CallInfo {
 	ret.Signal = slices.Clone(ret.Signal)
 	ret.Cover = slices.Clone(ret.Cover)
 	ret.Comps = slices.Clone(ret.Comps)
+	return &ret
+}
+
+func cloneDdrd(dd *DdrdRawT) *DdrdRawT {
+	if dd == nil {
+		return nil
+	}
+	ret := *dd
+	if len(dd.UafPairs) != 0 {
+		ret.UafPairs = make([]*DdrdUafPairRawT, len(dd.UafPairs))
+		for i, pair := range dd.UafPairs {
+			if pair == nil {
+				continue
+			}
+			clone := *pair
+			ret.UafPairs[i] = &clone
+		}
+	} else {
+		ret.UafPairs = nil
+	}
+	if len(dd.ExtendedUaf) != 0 {
+		ret.ExtendedUaf = make([]*DdrdExtendedUafPairRawT, len(dd.ExtendedUaf))
+		for i, ext := range dd.ExtendedUaf {
+			if ext == nil {
+				continue
+			}
+			clone := *ext
+			if ext.Basic != nil {
+				basic := *ext.Basic
+				clone.Basic = &basic
+			}
+			if len(ext.AccessHistory) != 0 {
+				clone.AccessHistory = make([]*DdrdSerializedAccessRawT, len(ext.AccessHistory))
+				for j, hist := range ext.AccessHistory {
+					if hist == nil {
+						continue
+					}
+					histClone := *hist
+					clone.AccessHistory[j] = &histClone
+				}
+			} else {
+				clone.AccessHistory = nil
+			}
+			ret.ExtendedUaf[i] = &clone
+		}
+	} else {
+		ret.ExtendedUaf = nil
+	}
 	return &ret
 }
 

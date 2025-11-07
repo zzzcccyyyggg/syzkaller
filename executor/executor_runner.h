@@ -579,7 +579,7 @@ private:
 				if (syzfail)
 					memcpy(syzfail, "NOTFAIL", strlen("NOTFAIL"));
 			}
-			// debug("proc slot %d (exec %d): got output: %s%s", slot_, id_, output, has_nl ? "" : "\n");
+			debug("proc slot %d (exec %d): %s", slot_, id_, output);
 			output_.resize(output_.size() - 1);
 			debug_output_pos_ = output_.size();
 		}

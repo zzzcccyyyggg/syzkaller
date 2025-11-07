@@ -87,6 +87,22 @@ struct ProgInfoRaw;
 struct ProgInfoRawBuilder;
 struct ProgInfoRawT;
 
+struct DdrdRaw;
+struct DdrdRawBuilder;
+struct DdrdRawT;
+
+struct DdrdUafPairRaw;
+struct DdrdUafPairRawBuilder;
+struct DdrdUafPairRawT;
+
+struct DdrdSerializedAccessRaw;
+struct DdrdSerializedAccessRawBuilder;
+struct DdrdSerializedAccessRawT;
+
+struct DdrdExtendedUafPairRaw;
+struct DdrdExtendedUafPairRawBuilder;
+struct DdrdExtendedUafPairRawT;
+
 struct ExecResultRaw;
 struct ExecResultRawBuilder;
 struct ExecResultRawT;
@@ -639,19 +655,25 @@ enum class ExecFlag : uint64_t {
   CollectComps = 8ULL,
   Threaded = 16ULL,
   Barrier = 32ULL,
+  CollectDdrdUaf = 64ULL,
+  CollectDdrdRace = 128ULL,
+  CollectDdrdExtended = 256ULL,
   NONE = 0,
-  ANY = 63ULL
+  ANY = 511ULL
 };
 FLATBUFFERS_DEFINE_BITMASK_OPERATORS(ExecFlag, uint64_t)
 
-inline const ExecFlag (&EnumValuesExecFlag())[6] {
+inline const ExecFlag (&EnumValuesExecFlag())[9] {
   static const ExecFlag values[] = {
     ExecFlag::CollectSignal,
     ExecFlag::CollectCover,
     ExecFlag::DedupCover,
     ExecFlag::CollectComps,
     ExecFlag::Threaded,
-    ExecFlag::Barrier
+    ExecFlag::Barrier,
+    ExecFlag::CollectDdrdUaf,
+    ExecFlag::CollectDdrdRace,
+    ExecFlag::CollectDdrdExtended
   };
   return values;
 }
@@ -664,6 +686,9 @@ inline const char *EnumNameExecFlag(ExecFlag e) {
     case ExecFlag::CollectComps: return "CollectComps";
     case ExecFlag::Threaded: return "Threaded";
     case ExecFlag::Barrier: return "Barrier";
+    case ExecFlag::CollectDdrdUaf: return "CollectDdrdUaf";
+    case ExecFlag::CollectDdrdRace: return "CollectDdrdRace";
+    case ExecFlag::CollectDdrdExtended: return "CollectDdrdExtended";
     default: return "";
   }
 }
@@ -2379,6 +2404,7 @@ struct ProgInfoRawT : public flatbuffers::NativeTable {
   std::unique_ptr<rpc::CallInfoRawT> extra{};
   uint64_t elapsed = 0;
   uint64_t freshness = 0;
+  std::unique_ptr<rpc::DdrdRawT> ddrd{};
   ProgInfoRawT() = default;
   ProgInfoRawT(const ProgInfoRawT &o);
   ProgInfoRawT(ProgInfoRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -2393,7 +2419,8 @@ struct ProgInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_EXTRA_RAW = 6,
     VT_EXTRA = 8,
     VT_ELAPSED = 10,
-    VT_FRESHNESS = 12
+    VT_FRESHNESS = 12,
+    VT_DDRD = 14
   };
   const flatbuffers::Vector<flatbuffers::Offset<rpc::CallInfoRaw>> *calls() const {
     return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<rpc::CallInfoRaw>> *>(VT_CALLS);
@@ -2410,6 +2437,9 @@ struct ProgInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint64_t freshness() const {
     return GetField<uint64_t>(VT_FRESHNESS, 0);
   }
+  const rpc::DdrdRaw *ddrd() const {
+    return GetPointer<const rpc::DdrdRaw *>(VT_DDRD);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_CALLS) &&
@@ -2422,6 +2452,8 @@ struct ProgInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            verifier.VerifyTable(extra()) &&
            VerifyField<uint64_t>(verifier, VT_ELAPSED, 8) &&
            VerifyField<uint64_t>(verifier, VT_FRESHNESS, 8) &&
+           VerifyOffset(verifier, VT_DDRD) &&
+           verifier.VerifyTable(ddrd()) &&
            verifier.EndTable();
   }
   ProgInfoRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2448,6 +2480,9 @@ struct ProgInfoRawBuilder {
   void add_freshness(uint64_t freshness) {
     fbb_.AddElement<uint64_t>(ProgInfoRaw::VT_FRESHNESS, freshness, 0);
   }
+  void add_ddrd(flatbuffers::Offset<rpc::DdrdRaw> ddrd) {
+    fbb_.AddOffset(ProgInfoRaw::VT_DDRD, ddrd);
+  }
   explicit ProgInfoRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2465,10 +2500,12 @@ inline flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRaw(
     flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::CallInfoRaw>>> extra_raw = 0,
     flatbuffers::Offset<rpc::CallInfoRaw> extra = 0,
     uint64_t elapsed = 0,
-    uint64_t freshness = 0) {
+    uint64_t freshness = 0,
+    flatbuffers::Offset<rpc::DdrdRaw> ddrd = 0) {
   ProgInfoRawBuilder builder_(_fbb);
   builder_.add_freshness(freshness);
   builder_.add_elapsed(elapsed);
+  builder_.add_ddrd(ddrd);
   builder_.add_extra(extra);
   builder_.add_extra_raw(extra_raw);
   builder_.add_calls(calls);
@@ -2481,7 +2518,8 @@ inline flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRawDirect(
     const std::vector<flatbuffers::Offset<rpc::CallInfoRaw>> *extra_raw = nullptr,
     flatbuffers::Offset<rpc::CallInfoRaw> extra = 0,
     uint64_t elapsed = 0,
-    uint64_t freshness = 0) {
+    uint64_t freshness = 0,
+    flatbuffers::Offset<rpc::DdrdRaw> ddrd = 0) {
   auto calls__ = calls ? _fbb.CreateVector<flatbuffers::Offset<rpc::CallInfoRaw>>(*calls) : 0;
   auto extra_raw__ = extra_raw ? _fbb.CreateVector<flatbuffers::Offset<rpc::CallInfoRaw>>(*extra_raw) : 0;
   return rpc::CreateProgInfoRaw(
@@ -2490,10 +2528,500 @@ inline flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRawDirect(
       extra_raw__,
       extra,
       elapsed,
-      freshness);
+      freshness,
+      ddrd);
 }
 
 flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRaw(flatbuffers::FlatBufferBuilder &_fbb, const ProgInfoRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DdrdRawT : public flatbuffers::NativeTable {
+  typedef DdrdRaw TableType;
+  std::vector<std::unique_ptr<rpc::DdrdUafPairRawT>> uaf_pairs{};
+  std::vector<std::unique_ptr<rpc::DdrdExtendedUafPairRawT>> extended_uaf{};
+  DdrdRawT() = default;
+  DdrdRawT(const DdrdRawT &o);
+  DdrdRawT(DdrdRawT&&) FLATBUFFERS_NOEXCEPT = default;
+  DdrdRawT &operator=(DdrdRawT o) FLATBUFFERS_NOEXCEPT;
+};
+
+struct DdrdRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef DdrdRawT NativeTableType;
+  typedef DdrdRawBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_UAF_PAIRS = 4,
+    VT_EXTENDED_UAF = 6
+  };
+  const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> *uaf_pairs() const {
+    return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> *>(VT_UAF_PAIRS);
+  }
+  const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> *extended_uaf() const {
+    return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> *>(VT_EXTENDED_UAF);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_UAF_PAIRS) &&
+           verifier.VerifyVector(uaf_pairs()) &&
+           verifier.VerifyVectorOfTables(uaf_pairs()) &&
+           VerifyOffset(verifier, VT_EXTENDED_UAF) &&
+           verifier.VerifyVector(extended_uaf()) &&
+           verifier.VerifyVectorOfTables(extended_uaf()) &&
+           verifier.EndTable();
+  }
+  DdrdRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DdrdRawT *_o, const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static flatbuffers::Offset<DdrdRaw> Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdRawT* _o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DdrdRawBuilder {
+  typedef DdrdRaw Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_uaf_pairs(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>> uaf_pairs) {
+    fbb_.AddOffset(DdrdRaw::VT_UAF_PAIRS, uaf_pairs);
+  }
+  void add_extended_uaf(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>> extended_uaf) {
+    fbb_.AddOffset(DdrdRaw::VT_EXTENDED_UAF, extended_uaf);
+  }
+  explicit DdrdRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<DdrdRaw> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<DdrdRaw>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<DdrdRaw> CreateDdrdRaw(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>> uaf_pairs = 0,
+    flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>> extended_uaf = 0) {
+  DdrdRawBuilder builder_(_fbb);
+  builder_.add_extended_uaf(extended_uaf);
+  builder_.add_uaf_pairs(uaf_pairs);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<DdrdRaw> CreateDdrdRawDirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    const std::vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> *uaf_pairs = nullptr,
+    const std::vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> *extended_uaf = nullptr) {
+  auto uaf_pairs__ = uaf_pairs ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>(*uaf_pairs) : 0;
+  auto extended_uaf__ = extended_uaf ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>(*extended_uaf) : 0;
+  return rpc::CreateDdrdRaw(
+      _fbb,
+      uaf_pairs__,
+      extended_uaf__);
+}
+
+flatbuffers::Offset<DdrdRaw> CreateDdrdRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DdrdUafPairRawT : public flatbuffers::NativeTable {
+  typedef DdrdUafPairRaw TableType;
+  uint64_t free_access_name = 0;
+  uint64_t use_access_name = 0;
+  uint64_t free_call_stack = 0;
+  uint64_t use_call_stack = 0;
+  uint64_t signal = 0;
+  uint64_t time_diff = 0;
+  int32_t free_sn = 0;
+  int32_t use_sn = 0;
+  uint32_t lock_type = 0;
+  uint32_t use_access_type = 0;
+};
+
+struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef DdrdUafPairRawT NativeTableType;
+  typedef DdrdUafPairRawBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_FREE_ACCESS_NAME = 4,
+    VT_USE_ACCESS_NAME = 6,
+    VT_FREE_CALL_STACK = 8,
+    VT_USE_CALL_STACK = 10,
+    VT_SIGNAL = 12,
+    VT_TIME_DIFF = 14,
+    VT_FREE_SN = 16,
+    VT_USE_SN = 18,
+    VT_LOCK_TYPE = 20,
+    VT_USE_ACCESS_TYPE = 22
+  };
+  uint64_t free_access_name() const {
+    return GetField<uint64_t>(VT_FREE_ACCESS_NAME, 0);
+  }
+  uint64_t use_access_name() const {
+    return GetField<uint64_t>(VT_USE_ACCESS_NAME, 0);
+  }
+  uint64_t free_call_stack() const {
+    return GetField<uint64_t>(VT_FREE_CALL_STACK, 0);
+  }
+  uint64_t use_call_stack() const {
+    return GetField<uint64_t>(VT_USE_CALL_STACK, 0);
+  }
+  uint64_t signal() const {
+    return GetField<uint64_t>(VT_SIGNAL, 0);
+  }
+  uint64_t time_diff() const {
+    return GetField<uint64_t>(VT_TIME_DIFF, 0);
+  }
+  int32_t free_sn() const {
+    return GetField<int32_t>(VT_FREE_SN, 0);
+  }
+  int32_t use_sn() const {
+    return GetField<int32_t>(VT_USE_SN, 0);
+  }
+  uint32_t lock_type() const {
+    return GetField<uint32_t>(VT_LOCK_TYPE, 0);
+  }
+  uint32_t use_access_type() const {
+    return GetField<uint32_t>(VT_USE_ACCESS_TYPE, 0);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_ACCESS_NAME, 8) &&
+           VerifyField<uint64_t>(verifier, VT_USE_ACCESS_NAME, 8) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_CALL_STACK, 8) &&
+           VerifyField<uint64_t>(verifier, VT_USE_CALL_STACK, 8) &&
+           VerifyField<uint64_t>(verifier, VT_SIGNAL, 8) &&
+           VerifyField<uint64_t>(verifier, VT_TIME_DIFF, 8) &&
+           VerifyField<int32_t>(verifier, VT_FREE_SN, 4) &&
+           VerifyField<int32_t>(verifier, VT_USE_SN, 4) &&
+           VerifyField<uint32_t>(verifier, VT_LOCK_TYPE, 4) &&
+           VerifyField<uint32_t>(verifier, VT_USE_ACCESS_TYPE, 4) &&
+           verifier.EndTable();
+  }
+  DdrdUafPairRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DdrdUafPairRawT *_o, const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static flatbuffers::Offset<DdrdUafPairRaw> Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdUafPairRawT* _o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DdrdUafPairRawBuilder {
+  typedef DdrdUafPairRaw Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_free_access_name(uint64_t free_access_name) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_FREE_ACCESS_NAME, free_access_name, 0);
+  }
+  void add_use_access_name(uint64_t use_access_name) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_USE_ACCESS_NAME, use_access_name, 0);
+  }
+  void add_free_call_stack(uint64_t free_call_stack) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_FREE_CALL_STACK, free_call_stack, 0);
+  }
+  void add_use_call_stack(uint64_t use_call_stack) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_USE_CALL_STACK, use_call_stack, 0);
+  }
+  void add_signal(uint64_t signal) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_SIGNAL, signal, 0);
+  }
+  void add_time_diff(uint64_t time_diff) {
+    fbb_.AddElement<uint64_t>(DdrdUafPairRaw::VT_TIME_DIFF, time_diff, 0);
+  }
+  void add_free_sn(int32_t free_sn) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_FREE_SN, free_sn, 0);
+  }
+  void add_use_sn(int32_t use_sn) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_USE_SN, use_sn, 0);
+  }
+  void add_lock_type(uint32_t lock_type) {
+    fbb_.AddElement<uint32_t>(DdrdUafPairRaw::VT_LOCK_TYPE, lock_type, 0);
+  }
+  void add_use_access_type(uint32_t use_access_type) {
+    fbb_.AddElement<uint32_t>(DdrdUafPairRaw::VT_USE_ACCESS_TYPE, use_access_type, 0);
+  }
+  explicit DdrdUafPairRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<DdrdUafPairRaw> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<DdrdUafPairRaw>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    uint64_t free_access_name = 0,
+    uint64_t use_access_name = 0,
+    uint64_t free_call_stack = 0,
+    uint64_t use_call_stack = 0,
+    uint64_t signal = 0,
+    uint64_t time_diff = 0,
+    int32_t free_sn = 0,
+    int32_t use_sn = 0,
+    uint32_t lock_type = 0,
+    uint32_t use_access_type = 0) {
+  DdrdUafPairRawBuilder builder_(_fbb);
+  builder_.add_time_diff(time_diff);
+  builder_.add_signal(signal);
+  builder_.add_use_call_stack(use_call_stack);
+  builder_.add_free_call_stack(free_call_stack);
+  builder_.add_use_access_name(use_access_name);
+  builder_.add_free_access_name(free_access_name);
+  builder_.add_use_access_type(use_access_type);
+  builder_.add_lock_type(lock_type);
+  builder_.add_use_sn(use_sn);
+  builder_.add_free_sn(free_sn);
+  return builder_.Finish();
+}
+
+flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdUafPairRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DdrdSerializedAccessRawT : public flatbuffers::NativeTable {
+  typedef DdrdSerializedAccessRaw TableType;
+  uint64_t var_name = 0;
+  uint64_t call_stack_hash = 0;
+  uint64_t access_time = 0;
+  uint32_t sn = 0;
+  uint32_t access_type = 0;
+};
+
+struct DdrdSerializedAccessRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef DdrdSerializedAccessRawT NativeTableType;
+  typedef DdrdSerializedAccessRawBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_VAR_NAME = 4,
+    VT_CALL_STACK_HASH = 6,
+    VT_ACCESS_TIME = 8,
+    VT_SN = 10,
+    VT_ACCESS_TYPE = 12
+  };
+  uint64_t var_name() const {
+    return GetField<uint64_t>(VT_VAR_NAME, 0);
+  }
+  uint64_t call_stack_hash() const {
+    return GetField<uint64_t>(VT_CALL_STACK_HASH, 0);
+  }
+  uint64_t access_time() const {
+    return GetField<uint64_t>(VT_ACCESS_TIME, 0);
+  }
+  uint32_t sn() const {
+    return GetField<uint32_t>(VT_SN, 0);
+  }
+  uint32_t access_type() const {
+    return GetField<uint32_t>(VT_ACCESS_TYPE, 0);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyField<uint64_t>(verifier, VT_VAR_NAME, 8) &&
+           VerifyField<uint64_t>(verifier, VT_CALL_STACK_HASH, 8) &&
+           VerifyField<uint64_t>(verifier, VT_ACCESS_TIME, 8) &&
+           VerifyField<uint32_t>(verifier, VT_SN, 4) &&
+           VerifyField<uint32_t>(verifier, VT_ACCESS_TYPE, 4) &&
+           verifier.EndTable();
+  }
+  DdrdSerializedAccessRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DdrdSerializedAccessRawT *_o, const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static flatbuffers::Offset<DdrdSerializedAccessRaw> Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdSerializedAccessRawT* _o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DdrdSerializedAccessRawBuilder {
+  typedef DdrdSerializedAccessRaw Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_var_name(uint64_t var_name) {
+    fbb_.AddElement<uint64_t>(DdrdSerializedAccessRaw::VT_VAR_NAME, var_name, 0);
+  }
+  void add_call_stack_hash(uint64_t call_stack_hash) {
+    fbb_.AddElement<uint64_t>(DdrdSerializedAccessRaw::VT_CALL_STACK_HASH, call_stack_hash, 0);
+  }
+  void add_access_time(uint64_t access_time) {
+    fbb_.AddElement<uint64_t>(DdrdSerializedAccessRaw::VT_ACCESS_TIME, access_time, 0);
+  }
+  void add_sn(uint32_t sn) {
+    fbb_.AddElement<uint32_t>(DdrdSerializedAccessRaw::VT_SN, sn, 0);
+  }
+  void add_access_type(uint32_t access_type) {
+    fbb_.AddElement<uint32_t>(DdrdSerializedAccessRaw::VT_ACCESS_TYPE, access_type, 0);
+  }
+  explicit DdrdSerializedAccessRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<DdrdSerializedAccessRaw> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<DdrdSerializedAccessRaw>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<DdrdSerializedAccessRaw> CreateDdrdSerializedAccessRaw(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    uint64_t var_name = 0,
+    uint64_t call_stack_hash = 0,
+    uint64_t access_time = 0,
+    uint32_t sn = 0,
+    uint32_t access_type = 0) {
+  DdrdSerializedAccessRawBuilder builder_(_fbb);
+  builder_.add_access_time(access_time);
+  builder_.add_call_stack_hash(call_stack_hash);
+  builder_.add_var_name(var_name);
+  builder_.add_access_type(access_type);
+  builder_.add_sn(sn);
+  return builder_.Finish();
+}
+
+flatbuffers::Offset<DdrdSerializedAccessRaw> CreateDdrdSerializedAccessRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdSerializedAccessRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+
+struct DdrdExtendedUafPairRawT : public flatbuffers::NativeTable {
+  typedef DdrdExtendedUafPairRaw TableType;
+  std::unique_ptr<rpc::DdrdUafPairRawT> basic{};
+  uint32_t use_thread_history_count = 0;
+  uint32_t free_thread_history_count = 0;
+  uint64_t use_target_time = 0;
+  uint64_t free_target_time = 0;
+  double path_distance_use = 0.0;
+  double path_distance_free = 0.0;
+  std::vector<std::unique_ptr<rpc::DdrdSerializedAccessRawT>> access_history{};
+  DdrdExtendedUafPairRawT() = default;
+  DdrdExtendedUafPairRawT(const DdrdExtendedUafPairRawT &o);
+  DdrdExtendedUafPairRawT(DdrdExtendedUafPairRawT&&) FLATBUFFERS_NOEXCEPT = default;
+  DdrdExtendedUafPairRawT &operator=(DdrdExtendedUafPairRawT o) FLATBUFFERS_NOEXCEPT;
+};
+
+struct DdrdExtendedUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
+  typedef DdrdExtendedUafPairRawT NativeTableType;
+  typedef DdrdExtendedUafPairRawBuilder Builder;
+  enum FlatBuffersVTableOffset FLATBUFFERS_VTABLE_UNDERLYING_TYPE {
+    VT_BASIC = 4,
+    VT_USE_THREAD_HISTORY_COUNT = 6,
+    VT_FREE_THREAD_HISTORY_COUNT = 8,
+    VT_USE_TARGET_TIME = 10,
+    VT_FREE_TARGET_TIME = 12,
+    VT_PATH_DISTANCE_USE = 14,
+    VT_PATH_DISTANCE_FREE = 16,
+    VT_ACCESS_HISTORY = 18
+  };
+  const rpc::DdrdUafPairRaw *basic() const {
+    return GetPointer<const rpc::DdrdUafPairRaw *>(VT_BASIC);
+  }
+  uint32_t use_thread_history_count() const {
+    return GetField<uint32_t>(VT_USE_THREAD_HISTORY_COUNT, 0);
+  }
+  uint32_t free_thread_history_count() const {
+    return GetField<uint32_t>(VT_FREE_THREAD_HISTORY_COUNT, 0);
+  }
+  uint64_t use_target_time() const {
+    return GetField<uint64_t>(VT_USE_TARGET_TIME, 0);
+  }
+  uint64_t free_target_time() const {
+    return GetField<uint64_t>(VT_FREE_TARGET_TIME, 0);
+  }
+  double path_distance_use() const {
+    return GetField<double>(VT_PATH_DISTANCE_USE, 0.0);
+  }
+  double path_distance_free() const {
+    return GetField<double>(VT_PATH_DISTANCE_FREE, 0.0);
+  }
+  const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> *access_history() const {
+    return GetPointer<const flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> *>(VT_ACCESS_HISTORY);
+  }
+  bool Verify(flatbuffers::Verifier &verifier) const {
+    return VerifyTableStart(verifier) &&
+           VerifyOffset(verifier, VT_BASIC) &&
+           verifier.VerifyTable(basic()) &&
+           VerifyField<uint32_t>(verifier, VT_USE_THREAD_HISTORY_COUNT, 4) &&
+           VerifyField<uint32_t>(verifier, VT_FREE_THREAD_HISTORY_COUNT, 4) &&
+           VerifyField<uint64_t>(verifier, VT_USE_TARGET_TIME, 8) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_TARGET_TIME, 8) &&
+           VerifyField<double>(verifier, VT_PATH_DISTANCE_USE, 8) &&
+           VerifyField<double>(verifier, VT_PATH_DISTANCE_FREE, 8) &&
+           VerifyOffset(verifier, VT_ACCESS_HISTORY) &&
+           verifier.VerifyVector(access_history()) &&
+           verifier.VerifyVectorOfTables(access_history()) &&
+           verifier.EndTable();
+  }
+  DdrdExtendedUafPairRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  void UnPackTo(DdrdExtendedUafPairRawT *_o, const flatbuffers::resolver_function_t *_resolver = nullptr) const;
+  static flatbuffers::Offset<DdrdExtendedUafPairRaw> Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdExtendedUafPairRawT* _o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
+};
+
+struct DdrdExtendedUafPairRawBuilder {
+  typedef DdrdExtendedUafPairRaw Table;
+  flatbuffers::FlatBufferBuilder &fbb_;
+  flatbuffers::uoffset_t start_;
+  void add_basic(flatbuffers::Offset<rpc::DdrdUafPairRaw> basic) {
+    fbb_.AddOffset(DdrdExtendedUafPairRaw::VT_BASIC, basic);
+  }
+  void add_use_thread_history_count(uint32_t use_thread_history_count) {
+    fbb_.AddElement<uint32_t>(DdrdExtendedUafPairRaw::VT_USE_THREAD_HISTORY_COUNT, use_thread_history_count, 0);
+  }
+  void add_free_thread_history_count(uint32_t free_thread_history_count) {
+    fbb_.AddElement<uint32_t>(DdrdExtendedUafPairRaw::VT_FREE_THREAD_HISTORY_COUNT, free_thread_history_count, 0);
+  }
+  void add_use_target_time(uint64_t use_target_time) {
+    fbb_.AddElement<uint64_t>(DdrdExtendedUafPairRaw::VT_USE_TARGET_TIME, use_target_time, 0);
+  }
+  void add_free_target_time(uint64_t free_target_time) {
+    fbb_.AddElement<uint64_t>(DdrdExtendedUafPairRaw::VT_FREE_TARGET_TIME, free_target_time, 0);
+  }
+  void add_path_distance_use(double path_distance_use) {
+    fbb_.AddElement<double>(DdrdExtendedUafPairRaw::VT_PATH_DISTANCE_USE, path_distance_use, 0.0);
+  }
+  void add_path_distance_free(double path_distance_free) {
+    fbb_.AddElement<double>(DdrdExtendedUafPairRaw::VT_PATH_DISTANCE_FREE, path_distance_free, 0.0);
+  }
+  void add_access_history(flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>> access_history) {
+    fbb_.AddOffset(DdrdExtendedUafPairRaw::VT_ACCESS_HISTORY, access_history);
+  }
+  explicit DdrdExtendedUafPairRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
+        : fbb_(_fbb) {
+    start_ = fbb_.StartTable();
+  }
+  flatbuffers::Offset<DdrdExtendedUafPairRaw> Finish() {
+    const auto end = fbb_.EndTable(start_);
+    auto o = flatbuffers::Offset<DdrdExtendedUafPairRaw>(end);
+    return o;
+  }
+};
+
+inline flatbuffers::Offset<DdrdExtendedUafPairRaw> CreateDdrdExtendedUafPairRaw(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<rpc::DdrdUafPairRaw> basic = 0,
+    uint32_t use_thread_history_count = 0,
+    uint32_t free_thread_history_count = 0,
+    uint64_t use_target_time = 0,
+    uint64_t free_target_time = 0,
+    double path_distance_use = 0.0,
+    double path_distance_free = 0.0,
+    flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>> access_history = 0) {
+  DdrdExtendedUafPairRawBuilder builder_(_fbb);
+  builder_.add_path_distance_free(path_distance_free);
+  builder_.add_path_distance_use(path_distance_use);
+  builder_.add_free_target_time(free_target_time);
+  builder_.add_use_target_time(use_target_time);
+  builder_.add_access_history(access_history);
+  builder_.add_free_thread_history_count(free_thread_history_count);
+  builder_.add_use_thread_history_count(use_thread_history_count);
+  builder_.add_basic(basic);
+  return builder_.Finish();
+}
+
+inline flatbuffers::Offset<DdrdExtendedUafPairRaw> CreateDdrdExtendedUafPairRawDirect(
+    flatbuffers::FlatBufferBuilder &_fbb,
+    flatbuffers::Offset<rpc::DdrdUafPairRaw> basic = 0,
+    uint32_t use_thread_history_count = 0,
+    uint32_t free_thread_history_count = 0,
+    uint64_t use_target_time = 0,
+    uint64_t free_target_time = 0,
+    double path_distance_use = 0.0,
+    double path_distance_free = 0.0,
+    const std::vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> *access_history = nullptr) {
+  auto access_history__ = access_history ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>(*access_history) : 0;
+  return rpc::CreateDdrdExtendedUafPairRaw(
+      _fbb,
+      basic,
+      use_thread_history_count,
+      free_thread_history_count,
+      use_target_time,
+      free_target_time,
+      path_distance_use,
+      path_distance_free,
+      access_history__);
+}
+
+flatbuffers::Offset<DdrdExtendedUafPairRaw> CreateDdrdExtendedUafPairRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdExtendedUafPairRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
 
 struct ExecResultRawT : public flatbuffers::NativeTable {
   typedef ExecResultRaw TableType;
@@ -2638,11 +3166,11 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(
     int32_t barrier_index = 0,
     int32_t barrier_group_size = 0) {
   ExecResultRawBuilder builder_(_fbb);
-  builder_.add_barrier_group_size(barrier_group_size);
-  builder_.add_barrier_index(barrier_index);
   builder_.add_barrier_group_id(barrier_group_id);
   builder_.add_barrier_procs(barrier_procs);
   builder_.add_id(id);
+  builder_.add_barrier_group_size(barrier_group_size);
+  builder_.add_barrier_index(barrier_index);
   builder_.add_info(info);
   builder_.add_error(error);
   builder_.add_output(output);
@@ -3643,7 +4171,8 @@ inline flatbuffers::Offset<CallInfoRaw> CreateCallInfoRaw(flatbuffers::FlatBuffe
 inline ProgInfoRawT::ProgInfoRawT(const ProgInfoRawT &o)
       : extra((o.extra) ? new rpc::CallInfoRawT(*o.extra) : nullptr),
         elapsed(o.elapsed),
-        freshness(o.freshness) {
+        freshness(o.freshness),
+        ddrd((o.ddrd) ? new rpc::DdrdRawT(*o.ddrd) : nullptr) {
   calls.reserve(o.calls.size());
   for (const auto &calls_ : o.calls) { calls.emplace_back((calls_) ? new rpc::CallInfoRawT(*calls_) : nullptr); }
   extra_raw.reserve(o.extra_raw.size());
@@ -3656,6 +4185,7 @@ inline ProgInfoRawT &ProgInfoRawT::operator=(ProgInfoRawT o) FLATBUFFERS_NOEXCEP
   std::swap(extra, o.extra);
   std::swap(elapsed, o.elapsed);
   std::swap(freshness, o.freshness);
+  std::swap(ddrd, o.ddrd);
   return *this;
 }
 
@@ -3673,6 +4203,7 @@ inline void ProgInfoRaw::UnPackTo(ProgInfoRawT *_o, const flatbuffers::resolver_
   { auto _e = extra(); if (_e) _o->extra = std::unique_ptr<rpc::CallInfoRawT>(_e->UnPack(_resolver)); }
   { auto _e = elapsed(); _o->elapsed = _e; }
   { auto _e = freshness(); _o->freshness = _e; }
+  { auto _e = ddrd(); if (_e) _o->ddrd = std::unique_ptr<rpc::DdrdRawT>(_e->UnPack(_resolver)); }
 }
 
 inline flatbuffers::Offset<ProgInfoRaw> ProgInfoRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ProgInfoRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -3688,13 +4219,219 @@ inline flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRaw(flatbuffers::FlatBuffe
   auto _extra = _o->extra ? CreateCallInfoRaw(_fbb, _o->extra.get(), _rehasher) : 0;
   auto _elapsed = _o->elapsed;
   auto _freshness = _o->freshness;
+  auto _ddrd = _o->ddrd ? CreateDdrdRaw(_fbb, _o->ddrd.get(), _rehasher) : 0;
   return rpc::CreateProgInfoRaw(
       _fbb,
       _calls,
       _extra_raw,
       _extra,
       _elapsed,
-      _freshness);
+      _freshness,
+      _ddrd);
+}
+
+inline DdrdRawT::DdrdRawT(const DdrdRawT &o) {
+  uaf_pairs.reserve(o.uaf_pairs.size());
+  for (const auto &uaf_pairs_ : o.uaf_pairs) { uaf_pairs.emplace_back((uaf_pairs_) ? new rpc::DdrdUafPairRawT(*uaf_pairs_) : nullptr); }
+  extended_uaf.reserve(o.extended_uaf.size());
+  for (const auto &extended_uaf_ : o.extended_uaf) { extended_uaf.emplace_back((extended_uaf_) ? new rpc::DdrdExtendedUafPairRawT(*extended_uaf_) : nullptr); }
+}
+
+inline DdrdRawT &DdrdRawT::operator=(DdrdRawT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(uaf_pairs, o.uaf_pairs);
+  std::swap(extended_uaf, o.extended_uaf);
+  return *this;
+}
+
+inline DdrdRawT *DdrdRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DdrdRawT>(new DdrdRawT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DdrdRaw::UnPackTo(DdrdRawT *_o, const flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = uaf_pairs(); if (_e) { _o->uaf_pairs.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->uaf_pairs[_i] = std::unique_ptr<rpc::DdrdUafPairRawT>(_e->Get(_i)->UnPack(_resolver)); } } }
+  { auto _e = extended_uaf(); if (_e) { _o->extended_uaf.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->extended_uaf[_i] = std::unique_ptr<rpc::DdrdExtendedUafPairRawT>(_e->Get(_i)->UnPack(_resolver)); } } }
+}
+
+inline flatbuffers::Offset<DdrdRaw> DdrdRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDdrdRaw(_fbb, _o, _rehasher);
+}
+
+inline flatbuffers::Offset<DdrdRaw> CreateDdrdRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdRawT *_o, const flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { flatbuffers::FlatBufferBuilder *__fbb; const DdrdRawT* __o; const flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _uaf_pairs = _o->uaf_pairs.size() ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> (_o->uaf_pairs.size(), [](size_t i, _VectorArgs *__va) { return CreateDdrdUafPairRaw(*__va->__fbb, __va->__o->uaf_pairs[i].get(), __va->__rehasher); }, &_va ) : 0;
+  auto _extended_uaf = _o->extended_uaf.size() ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> (_o->extended_uaf.size(), [](size_t i, _VectorArgs *__va) { return CreateDdrdExtendedUafPairRaw(*__va->__fbb, __va->__o->extended_uaf[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return rpc::CreateDdrdRaw(
+      _fbb,
+      _uaf_pairs,
+      _extended_uaf);
+}
+
+inline DdrdUafPairRawT *DdrdUafPairRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DdrdUafPairRawT>(new DdrdUafPairRawT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DdrdUafPairRaw::UnPackTo(DdrdUafPairRawT *_o, const flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = free_access_name(); _o->free_access_name = _e; }
+  { auto _e = use_access_name(); _o->use_access_name = _e; }
+  { auto _e = free_call_stack(); _o->free_call_stack = _e; }
+  { auto _e = use_call_stack(); _o->use_call_stack = _e; }
+  { auto _e = signal(); _o->signal = _e; }
+  { auto _e = time_diff(); _o->time_diff = _e; }
+  { auto _e = free_sn(); _o->free_sn = _e; }
+  { auto _e = use_sn(); _o->use_sn = _e; }
+  { auto _e = lock_type(); _o->lock_type = _e; }
+  { auto _e = use_access_type(); _o->use_access_type = _e; }
+}
+
+inline flatbuffers::Offset<DdrdUafPairRaw> DdrdUafPairRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdUafPairRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDdrdUafPairRaw(_fbb, _o, _rehasher);
+}
+
+inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdUafPairRawT *_o, const flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { flatbuffers::FlatBufferBuilder *__fbb; const DdrdUafPairRawT* __o; const flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _free_access_name = _o->free_access_name;
+  auto _use_access_name = _o->use_access_name;
+  auto _free_call_stack = _o->free_call_stack;
+  auto _use_call_stack = _o->use_call_stack;
+  auto _signal = _o->signal;
+  auto _time_diff = _o->time_diff;
+  auto _free_sn = _o->free_sn;
+  auto _use_sn = _o->use_sn;
+  auto _lock_type = _o->lock_type;
+  auto _use_access_type = _o->use_access_type;
+  return rpc::CreateDdrdUafPairRaw(
+      _fbb,
+      _free_access_name,
+      _use_access_name,
+      _free_call_stack,
+      _use_call_stack,
+      _signal,
+      _time_diff,
+      _free_sn,
+      _use_sn,
+      _lock_type,
+      _use_access_type);
+}
+
+inline DdrdSerializedAccessRawT *DdrdSerializedAccessRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DdrdSerializedAccessRawT>(new DdrdSerializedAccessRawT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DdrdSerializedAccessRaw::UnPackTo(DdrdSerializedAccessRawT *_o, const flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = var_name(); _o->var_name = _e; }
+  { auto _e = call_stack_hash(); _o->call_stack_hash = _e; }
+  { auto _e = access_time(); _o->access_time = _e; }
+  { auto _e = sn(); _o->sn = _e; }
+  { auto _e = access_type(); _o->access_type = _e; }
+}
+
+inline flatbuffers::Offset<DdrdSerializedAccessRaw> DdrdSerializedAccessRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdSerializedAccessRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDdrdSerializedAccessRaw(_fbb, _o, _rehasher);
+}
+
+inline flatbuffers::Offset<DdrdSerializedAccessRaw> CreateDdrdSerializedAccessRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdSerializedAccessRawT *_o, const flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { flatbuffers::FlatBufferBuilder *__fbb; const DdrdSerializedAccessRawT* __o; const flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _var_name = _o->var_name;
+  auto _call_stack_hash = _o->call_stack_hash;
+  auto _access_time = _o->access_time;
+  auto _sn = _o->sn;
+  auto _access_type = _o->access_type;
+  return rpc::CreateDdrdSerializedAccessRaw(
+      _fbb,
+      _var_name,
+      _call_stack_hash,
+      _access_time,
+      _sn,
+      _access_type);
+}
+
+inline DdrdExtendedUafPairRawT::DdrdExtendedUafPairRawT(const DdrdExtendedUafPairRawT &o)
+      : basic((o.basic) ? new rpc::DdrdUafPairRawT(*o.basic) : nullptr),
+        use_thread_history_count(o.use_thread_history_count),
+        free_thread_history_count(o.free_thread_history_count),
+        use_target_time(o.use_target_time),
+        free_target_time(o.free_target_time),
+        path_distance_use(o.path_distance_use),
+        path_distance_free(o.path_distance_free) {
+  access_history.reserve(o.access_history.size());
+  for (const auto &access_history_ : o.access_history) { access_history.emplace_back((access_history_) ? new rpc::DdrdSerializedAccessRawT(*access_history_) : nullptr); }
+}
+
+inline DdrdExtendedUafPairRawT &DdrdExtendedUafPairRawT::operator=(DdrdExtendedUafPairRawT o) FLATBUFFERS_NOEXCEPT {
+  std::swap(basic, o.basic);
+  std::swap(use_thread_history_count, o.use_thread_history_count);
+  std::swap(free_thread_history_count, o.free_thread_history_count);
+  std::swap(use_target_time, o.use_target_time);
+  std::swap(free_target_time, o.free_target_time);
+  std::swap(path_distance_use, o.path_distance_use);
+  std::swap(path_distance_free, o.path_distance_free);
+  std::swap(access_history, o.access_history);
+  return *this;
+}
+
+inline DdrdExtendedUafPairRawT *DdrdExtendedUafPairRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
+  auto _o = std::unique_ptr<DdrdExtendedUafPairRawT>(new DdrdExtendedUafPairRawT());
+  UnPackTo(_o.get(), _resolver);
+  return _o.release();
+}
+
+inline void DdrdExtendedUafPairRaw::UnPackTo(DdrdExtendedUafPairRawT *_o, const flatbuffers::resolver_function_t *_resolver) const {
+  (void)_o;
+  (void)_resolver;
+  { auto _e = basic(); if (_e) _o->basic = std::unique_ptr<rpc::DdrdUafPairRawT>(_e->UnPack(_resolver)); }
+  { auto _e = use_thread_history_count(); _o->use_thread_history_count = _e; }
+  { auto _e = free_thread_history_count(); _o->free_thread_history_count = _e; }
+  { auto _e = use_target_time(); _o->use_target_time = _e; }
+  { auto _e = free_target_time(); _o->free_target_time = _e; }
+  { auto _e = path_distance_use(); _o->path_distance_use = _e; }
+  { auto _e = path_distance_free(); _o->path_distance_free = _e; }
+  { auto _e = access_history(); if (_e) { _o->access_history.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->access_history[_i] = std::unique_ptr<rpc::DdrdSerializedAccessRawT>(_e->Get(_i)->UnPack(_resolver)); } } }
+}
+
+inline flatbuffers::Offset<DdrdExtendedUafPairRaw> DdrdExtendedUafPairRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdExtendedUafPairRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
+  return CreateDdrdExtendedUafPairRaw(_fbb, _o, _rehasher);
+}
+
+inline flatbuffers::Offset<DdrdExtendedUafPairRaw> CreateDdrdExtendedUafPairRaw(flatbuffers::FlatBufferBuilder &_fbb, const DdrdExtendedUafPairRawT *_o, const flatbuffers::rehasher_function_t *_rehasher) {
+  (void)_rehasher;
+  (void)_o;
+  struct _VectorArgs { flatbuffers::FlatBufferBuilder *__fbb; const DdrdExtendedUafPairRawT* __o; const flatbuffers::rehasher_function_t *__rehasher; } _va = { &_fbb, _o, _rehasher}; (void)_va;
+  auto _basic = _o->basic ? CreateDdrdUafPairRaw(_fbb, _o->basic.get(), _rehasher) : 0;
+  auto _use_thread_history_count = _o->use_thread_history_count;
+  auto _free_thread_history_count = _o->free_thread_history_count;
+  auto _use_target_time = _o->use_target_time;
+  auto _free_target_time = _o->free_target_time;
+  auto _path_distance_use = _o->path_distance_use;
+  auto _path_distance_free = _o->path_distance_free;
+  auto _access_history = _o->access_history.size() ? _fbb.CreateVector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> (_o->access_history.size(), [](size_t i, _VectorArgs *__va) { return CreateDdrdSerializedAccessRaw(*__va->__fbb, __va->__o->access_history[i].get(), __va->__rehasher); }, &_va ) : 0;
+  return rpc::CreateDdrdExtendedUafPairRaw(
+      _fbb,
+      _basic,
+      _use_thread_history_count,
+      _free_thread_history_count,
+      _use_target_time,
+      _free_target_time,
+      _path_distance_use,
+      _path_distance_free,
+      _access_history);
 }
 
 inline ExecResultRawT::ExecResultRawT(const ExecResultRawT &o)
@@ -3772,9 +4509,9 @@ inline flatbuffers::Offset<ExecResultRaw> CreateExecResultRaw(flatbuffers::FlatB
       _error,
       _info,
       _barrier_procs,
-    _barrier_group_id,
-    _barrier_index,
-    _barrier_group_size);
+      _barrier_group_id,
+      _barrier_index,
+      _barrier_group_size);
 }
 
 inline StateResultRawT *StateResultRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

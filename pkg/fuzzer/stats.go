@@ -35,6 +35,7 @@ type Stats struct {
 	statExecCollide         *stat.Val
 	statCoverOverflows      *stat.Val
 	statCompsOverflows      *stat.Val
+	statDdrdPairs           *stat.Val
 }
 
 type SyscallStats struct {
@@ -86,5 +87,7 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.NoGraph),
 		statCompsOverflows: stat.New("comps overflows", "Number of times the comparisons buffer overflowed",
 			stat.Rate{}, stat.NoGraph),
+		statDdrdPairs: stat.New("ddrd pairs", "Unique DDRD UAF pairs discovered",
+			stat.Graph("ddrd")),
 	}
 }

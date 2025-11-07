@@ -7,12 +7,14 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math/bits"
 	"os"
 	"slices"
 	"sync"
 	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/log"
@@ -370,6 +372,16 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	delete(runner.requests, msg.Id)
 	delete(runner.executing, msg.Id)
 	runner.prepareProgramResult(ctx, msg)
+	analysis := ddrd.FromProgInfo(msg.Info)
+	var barrierID int64
+	if ctx.barrier != nil {
+		barrierID = ctx.barrier.id
+	}
+	if analysis != nil {
+		log.Logf(0, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
+	} else if runner.debug {
+		log.Logf(1, "ddrd: no report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID)
+	}
 	status := queue.Success
 	var resErr error
 	if msg.Error != "" {
@@ -390,6 +402,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 			},
 			Status:              status,
 			Info:                msg.Info,
+			Ddrd:                analysis,
 			Output:              slices.Clone(msg.Output),
 			Err:                 resErr,
 			BarrierParticipants: msg.BarrierProcs,
@@ -414,6 +427,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		Prog:      ctx.program,
 		Executor:  queue.ExecutorID{VM: runner.id, Proc: int(msg.Proc)},
 		Info:      msg.Info,
+		Ddrd:      analysis,
 		Output:    slices.Clone(msg.Output),
 		Status:    status,
 		Err:       resErr,
@@ -470,8 +484,37 @@ func (runner *Runner) dispatchSingle(ctx *requestContext) error {
 func (runner *Runner) sendBarrierRequest(req *queue.Request) error {
 	participants := req.BarrierProcList
 	if len(participants) == 0 {
-		req.SetBarrier(0)
-		return runner.sendRequest(req)
+		if req.BarrierParticipants != 0 {
+			req.SetBarrier(req.BarrierParticipants)
+			participants = req.BarrierProcList
+		}
+		if len(participants) == 0 {
+			req.SetBarrier(0)
+			return runner.sendRequest(req)
+		}
+	}
+	if runner.procs > 0 {
+		mask := uint64(0)
+		dropped := false
+		for _, proc := range participants {
+			if proc < 0 || proc >= runner.procs {
+				if runner.debug {
+					log.Logf(1, "barrier request proc %d exceeds available procs=%d, dropping", proc, runner.procs)
+				}
+				dropped = true
+				continue
+			}
+			mask |= 1 << proc
+		}
+		if dropped {
+			if bits.OnesCount64(mask) < 2 {
+				log.Logf(0, "barrier request downgraded: insufficient valid participants (mask=0x%x available=%d)", req.BarrierParticipants, runner.procs)
+				req.SetBarrier(0)
+				return runner.sendRequest(req)
+			}
+			req.SetBarrier(mask)
+			participants = req.BarrierProcList
+		}
 	}
 	runner.nextBarrierGroupID++
 	groupID := runner.nextBarrierGroupID
@@ -554,6 +597,9 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		allSignal[i] = int32(call)
 	}
 	opts := req.ExecOpts
+	if ctx.barrier != nil {
+		opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+	}
 	if runner.debug {
 		opts.EnvFlags |= flatrpc.ExecEnvDebug
 	}
@@ -655,6 +701,9 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 	delete(runner.barrierGroups, group.id)
 	members := make([]*queue.BarrierMemberResult, len(group.results))
 	copy(members, group.results)
+	if totalUAF, totalExtended := summarizeDdrdResults(members); totalUAF != 0 || totalExtended != 0 {
+		log.Logf(0, "ddrd: barrier group %d aggregated results uaf=%d extended=%d", group.id, totalUAF, totalExtended)
+	}
 	status, resErr := summarizeBarrierStatus(members)
 	log.Logf(0, "barrier group %d finished: status=%s members=%d err=%v", group.id, status.String(), len(members), resErr)
 	var primary *queue.BarrierMemberResult
@@ -687,9 +736,23 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 	if primary != nil {
 		result.Executor = primary.Executor
 		result.Info = primary.Info
+		result.Ddrd = primary.Ddrd
 		result.Output = slices.Clone(primary.Output)
 	}
 	group.req.Done(result)
+}
+
+func summarizeDdrdResults(members []*queue.BarrierMemberResult) (int, int) {
+	totalUAF := 0
+	totalExtended := 0
+	for _, member := range members {
+		if member == nil || member.Ddrd == nil {
+			continue
+		}
+		totalUAF += len(member.Ddrd.UAFPairs)
+		totalExtended += len(member.Ddrd.Extended)
+	}
+	return totalUAF, totalExtended
 }
 
 func summarizeBarrierStatus(members []*queue.BarrierMemberResult) (queue.Status, error) {
