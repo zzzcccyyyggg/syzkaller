@@ -31,6 +31,7 @@ type Stats struct {
 	statExecSmash           *stat.Val
 	statExecFaultInject     *stat.Val
 	statExecHint            *stat.Val
+	statExecUAF             *stat.Val
 	statExecSeed            *stat.Val
 	statExecCollide         *stat.Val
 	statCoverOverflows      *stat.Val
@@ -78,6 +79,8 @@ func newStats(target *prog.Target) Stats {
 		statExecFaultInject: stat.New("exec inject", "Executions of fault injection",
 			stat.Rate{}, stat.StackedGraph("exec")),
 		statExecHint: stat.New("exec hints", "Executions of programs generated using hints",
+			stat.Rate{}, stat.StackedGraph("exec")),
+		statExecUAF: stat.New("exec uaf", "Executions of UAF seeds",
 			stat.Rate{}, stat.StackedGraph("exec")),
 		statExecSeed: stat.New("exec seeds", "Executions of programs for hints extraction",
 			stat.Rate{}, stat.StackedGraph("exec")),

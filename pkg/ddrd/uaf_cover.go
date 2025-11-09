@@ -4,8 +4,6 @@
 package ddrd
 
 import (
-	"crypto/sha256"
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -28,40 +26,7 @@ func (uaf *MayUAFPair) UAFPairID() uint64 {
 	if uaf.Signal != 0 {
 		return uaf.Signal
 	}
-	// Fallback: generate hash from available fields
-	h := sha256.New()
-	buf := make([]byte, 8)
-
-	// Include access name identifiers
-	binary.LittleEndian.PutUint64(buf, uaf.FreeAccessName)
-	h.Write(buf)
-	binary.LittleEndian.PutUint64(buf, uaf.UseAccessName)
-	h.Write(buf)
-
-	// Include access types and lock type
-	binary.LittleEndian.PutUint32(buf[:4], uaf.UseAccessType)
-	h.Write(buf[:4])
-	binary.LittleEndian.PutUint32(buf[:4], uaf.LockType)
-	h.Write(buf[:4])
-
-	// Include callstack hashes
-	binary.LittleEndian.PutUint64(buf, uaf.FreeCallStack)
-	h.Write(buf)
-	binary.LittleEndian.PutUint64(buf, uaf.UseCallStack)
-	h.Write(buf)
-
-	// Include time difference
-	binary.LittleEndian.PutUint64(buf, uaf.TimeDiff)
-	h.Write(buf)
-
-	// Include sequence numbers
-	binary.LittleEndian.PutUint32(buf[:4], uint32(uaf.FreeSN))
-	h.Write(buf[:4])
-	binary.LittleEndian.PutUint32(buf[:4], uint32(uaf.UseSN))
-	h.Write(buf[:4])
-
-	hash := h.Sum(nil)
-	return binary.LittleEndian.Uint64(hash[:8])
+	return 0
 }
 
 // String returns a human-readable representation of the UAF pair

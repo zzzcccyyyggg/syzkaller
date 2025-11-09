@@ -11,6 +11,7 @@ import (
 	"runtime"
 	"sort"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/syzkaller/pkg/corpus"
@@ -18,6 +19,7 @@ import (
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/pkg/stat"
@@ -29,6 +31,7 @@ type Fuzzer struct {
 	Config *Config
 	Cover  *Cover
 	ddrd   *ddrd.Store
+	uaf    *uafMode
 
 	ctx          context.Context
 	mu           sync.Mutex
@@ -41,6 +44,11 @@ type Fuzzer struct {
 	ctProgs      int
 	ctMu         sync.Mutex // TODO: use RWLock.
 	ctRegenerate chan struct{}
+
+	coverageFlagOnce   sync.Once
+	coverageInfoOnce   sync.Once
+	coverageNoDiffOnce sync.Once
+	coverageEmptyOnce  atomic.Bool
 
 	execQueues
 }
@@ -67,6 +75,7 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		// regenerating the table, we don't want to repeat it right away.
 		ctRegenerate: make(chan struct{}),
 	}
+	f.uaf = newUAFMode(f)
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
 	go f.choiceTableUpdater()
@@ -88,6 +97,7 @@ type execQueues struct {
 	candidateQueue       *queue.PlainQueue
 	triageQueue          *queue.DynamicOrderer
 	smashQueue           *queue.PlainQueue
+	uafQueue             *queue.PlainQueue
 	source               queue.Source
 }
 
@@ -106,14 +116,22 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		// mutating various corpus programs.
 		skipQueue = 2
 	}
-	// Sources are listed in the order, in which they will be polled.
-	ret.source = queue.Order(
+	sources := []queue.Source{
 		ret.triageCandidateQueue,
 		ret.candidateQueue,
 		ret.triageQueue,
+	}
+	if fuzzer.uaf != nil {
+		ret.uafQueue = queue.Plain()
+		fuzzer.uaf.setQueue(ret.uafQueue)
+		sources = append(sources, ret.uafQueue)
+	}
+	sources = append(sources,
 		queue.Alternate(ret.smashQueue, skipQueue),
 		queue.Callback(fuzzer.genFuzz),
 	)
+	// Sources are listed in the order, in which they will be polled.
+	ret.source = queue.Order(sources...)
 	return ret
 }
 
@@ -160,6 +178,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 		fuzzer.triageProgCall(req.Prog, res.Info.Extra, -1, &triage)
 
 		if len(triage) != 0 {
+
 			queue, stat := fuzzer.triageQueue, fuzzer.statJobsTriage
 			if flags&progCandidate > 0 {
 				queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
@@ -193,9 +212,17 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 
 	if pairs := fuzzer.ddrd.Add(res.Ddrd); len(pairs) != 0 {
 		fuzzer.statDdrdPairs.Add(len(pairs))
-		fuzzer.Logf(2, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
+		fuzzer.Logf(0, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
+		if fuzzer.uaf != nil {
+			fuzzer.uaf.handleNewPairs(req, res, pairs)
+		}
 	}
 
+	if fuzzer.uaf != nil {
+		fuzzer.uaf.recordExecution(req, res)
+		// fuzzer.uaf.handleCoverage(req, res, triage)
+	}
+	fuzzer.Logf(2, "[test]: Corpus candidates may have flaky coverage, so we give them a second chance")
 	// Corpus candidates may have flaky coverage, so we give them a second chance.
 	maxCandidateAttempts := 3
 	if req.Risky() {
@@ -231,6 +258,7 @@ type Config struct {
 	NewInputFilter func(call string) bool
 	PatchTest      bool
 	ModeKFuzzTest  bool
+	ModeUAF        bool
 	BarrierMode    bool
 	BarrierMask    uint64
 }
@@ -262,6 +290,7 @@ func (fuzzer *Fuzzer) handleCallInfo(req *queue.Request, info *flatrpc.CallInfo,
 	if info == nil || info.Flags&flatrpc.CallFlagCoverageOverflow == 0 {
 		return
 	}
+	log.Logf(0, "flatrpc.CallFlagCoverageOverflow detected in call %d in %s", call, req.Prog)
 	syscallIdx := len(fuzzer.Syscalls) - 1
 	if call != -1 {
 		syscallIdx = req.Prog.Calls[call].Meta.ID
@@ -306,9 +335,11 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		req = genProgRequest(fuzzer, rnd)
 	}
 	if fuzzer.Config.Collide && rnd.Intn(3) == 0 {
+		base := req
 		req = &queue.Request{
-			Prog: randomCollide(req.Prog, rnd),
-			Stat: fuzzer.statExecCollide,
+			Prog:     randomCollide(base.Prog, rnd),
+			ExecOpts: base.ExecOpts,
+			Stat:     fuzzer.statExecCollide,
 		}
 	}
 	fuzzer.applyBarrier(req)
@@ -332,6 +363,7 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 	}
 	req.SetBarrier(mask)
 	programs := fuzzer.buildBarrierPrograms(req, mask)
+	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)
@@ -485,6 +517,20 @@ func (fuzzer *Fuzzer) ChoiceTable() *prog.ChoiceTable {
 		}
 	}
 	return fuzzer.ct
+}
+
+func (fuzzer *Fuzzer) PendingUAFCorpusEntries() []*UAFCorpusEntry {
+	if fuzzer.uaf == nil {
+		return nil
+	}
+	return fuzzer.uaf.pendingEntries()
+}
+
+func (fuzzer *Fuzzer) EnqueueUAFCorpus(entries []*UAFCorpusEntry) int {
+	if fuzzer.uaf == nil {
+		return 0
+	}
+	return fuzzer.uaf.restore(entries)
 }
 
 func (fuzzer *Fuzzer) RunningJobs() []*JobInfo {

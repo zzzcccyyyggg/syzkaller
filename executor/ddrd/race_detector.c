@@ -287,7 +287,7 @@ void race_detector_disable_history(RaceDetector* detector)
     if (!detector)
         return;
     detector->context.enable_history = false;
-    debug("Thread access history tracking disabled\n");
+    // debug("Thread access history tracking disabled\n");
 }
 
 bool race_detector_is_history_enabled(RaceDetector* detector)
@@ -316,7 +316,7 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector, may_uaf
     if (!uaf_pairs)
         return 0;
     int uaf_pair_count = access_context_analyze_uaf_pairs(&detector->context, uaf_pairs, DDRD_MAX_UAF_PAIRS);
-
+    debug("Successfully parsed %d uaf pairs\n",uaf_pair_count);
     int basic_count = 0;
     for (basic_count = 0; basic_count < uaf_pair_count && basic_count < max_uaf_pairs; basic_count++) {
         UAFPair* uaf_pair = &uaf_pairs[basic_count];

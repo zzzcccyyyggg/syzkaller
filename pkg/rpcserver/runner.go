@@ -52,6 +52,8 @@ type Runner struct {
 	barrierGroups      map[int64]*barrierGroup
 	nextBarrierGroupID int64
 
+	coverageFlagOnce sync.Once
+
 	// The mutex protects all the fields below.
 	mu          sync.Mutex
 	conn        *flatrpc.Conn
@@ -448,7 +450,7 @@ func (runner *Runner) sendRequest(req *queue.Request) error {
 		panic(err)
 	}
 	if req.Barrier {
-		log.Logf(0, "Sending barrier request")
+		// log.Logf(0, "Sending barrier request")
 		return runner.sendBarrierRequest(req)
 	}
 	ctx := &requestContext{
@@ -705,7 +707,7 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 		log.Logf(0, "ddrd: barrier group %d aggregated results uaf=%d extended=%d", group.id, totalUAF, totalExtended)
 	}
 	status, resErr := summarizeBarrierStatus(members)
-	log.Logf(0, "barrier group %d finished: status=%s members=%d err=%v", group.id, status.String(), len(members), resErr)
+	// log.Logf(0, "barrier group %d finished: status=%s members=%d err=%v", group.id, status.String(), len(members), resErr)
 	var primary *queue.BarrierMemberResult
 	if len(members) != 0 {
 		primary = members[0]

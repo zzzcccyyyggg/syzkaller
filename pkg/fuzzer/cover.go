@@ -49,3 +49,9 @@ func (cover *Cover) GrabSignalDelta() signal.Signal {
 	cover.newSignal = nil
 	return plus
 }
+
+func (cover *Cover) MaxSignalSize() int {
+	cover.mu.RLock()
+	defer cover.mu.RUnlock()
+	return len(cover.maxSignal)
+}

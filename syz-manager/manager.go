@@ -111,6 +111,8 @@ type Manager struct {
 
 	reproLoop *manager.ReproLoop
 
+	uafStore *manager.UAFCorpusStore
+
 	Stats
 }
 
@@ -290,6 +292,18 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		crashes:            make(chan *manager.Crash, 10),
 		saturatedCalls:     make(map[string]bool),
 		reportGenerator:    manager.ReportGeneratorCache(cfg),
+	}
+	if cfg.Experimental.UAFMode {
+		store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
+		if err != nil {
+			log.Fatalf("failed to initialize uaf corpus store: %v", err)
+		}
+		mgr.uafStore = store
+		defer func() {
+			if err := store.Close(); err != nil {
+				log.Errorf("uaf corpus store close failed: %v", err)
+			}
+		}()
 	}
 	if *flagDebug {
 		mgr.cfg.Procs = 2
@@ -1187,9 +1201,11 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				return !mgr.saturatedCalls[call]
 			},
 			ModeKFuzzTest: mgr.cfg.Experimental.EnableKFuzzTest,
+			ModeUAF:       mgr.cfg.Experimental.UAFMode,
 			BarrierMode:   mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:   mgr.cfg.BarrierMask,
 		}, rnd, mgr.target)
+		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
@@ -1315,6 +1331,18 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 			}
 		}
 
+		if mgr.cfg.Experimental.UAFMode && mgr.uafStore != nil {
+			entries := fuzzer.PendingUAFCorpusEntries()
+			if len(entries) != 0 {
+				added, err := mgr.uafStore.Add(entries)
+				if err != nil {
+					log.Errorf("uaf corpus store add failed: %v", err)
+				} else if added != 0 {
+					log.Logf(1, "uaf corpus: stored %d new entries (total=%d)", added, mgr.uafStore.Count())
+				}
+			}
+		}
+
 		// Update the state machine.
 		if fuzzer.CandidateTriageFinished() {
 			if mgr.mode == ModeCorpusTriage {
@@ -1338,6 +1366,24 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 			}
 			mgr.mu.Unlock()
 		}
+	}
+}
+
+func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzer *fuzzer.Fuzzer) {
+	if !mgr.cfg.Experimental.UAFMode || mgr.uafStore == nil || fuzzer == nil {
+		return
+	}
+	entries, err := mgr.uafStore.Entries()
+	if err != nil {
+		log.Errorf("uaf corpus load failed: %v", err)
+		return
+	}
+	if len(entries) == 0 {
+		return
+	}
+	queued := fuzzer.EnqueueUAFCorpus(entries)
+	if queued != 0 {
+		log.Logf(1, "uaf corpus: queued %d persisted entries", queued)
 	}
 }
 

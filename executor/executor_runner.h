@@ -18,7 +18,8 @@
 #include <string>
 #include <utility>
 #include <vector>
-
+#include "ukc.h"
+#include "ddrd/trace_manager.h"
 inline std::ostream& operator<<(std::ostream& ss, const rpc::ExecRequestRawT& req)
 {
 	return ss << "id=" << req.id
@@ -976,6 +977,10 @@ private:
 				        (long long)group_id, i, selected[i]->Id());
 			group.members[i].reset();
 		}
+		ukc_enter_log_mode();
+		debug("ddrd: clearing trace buffer before barrier execution\n");
+		trace_manager_clear(nullptr);
+
 		return true;
 	}
 

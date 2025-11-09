@@ -225,7 +225,6 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {
 	job.info.Logf("deflake started")
-
 	avoid := []queue.ExecutorID{job.executor}
 	needRuns := deflakeNeedCorpusRuns
 	if job.fuzzer.Config.Snapshot {
@@ -252,9 +251,12 @@ func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result
 			Avoid:           avoid,
 			Stat:            job.fuzzer.statExecTriage,
 		}, progInTriage)
+		// log.Logf(0, "deflake stopped after %d runs", run)
 		if result.Stop() {
+			// log.Logf(0, "deflake stopped after %d runs", run)
 			return true
 		}
+		// log.Logf(0, "deflake stopped after %d runs2", run)
 		avoid = append(avoid, result.Executor)
 		if result.Info == nil {
 			continue // the program has failed

@@ -251,6 +251,9 @@ func (cfg *Config) completeServices() error {
 }
 
 func (cfg *Config) initBarrierMask() error {
+	if cfg.Experimental.UAFMode && !cfg.Experimental.BarrierMode {
+		return fmt.Errorf("experimental.uaf_mode requires barrier_mode to be enabled")
+	}
 	if !cfg.Experimental.BarrierMode {
 		cfg.BarrierMask = 0
 		return nil

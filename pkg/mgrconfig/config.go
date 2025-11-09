@@ -263,6 +263,9 @@ type Experimental struct {
 	// barrier_procs must specify at least two executor proc indices.
 	BarrierMode  bool  `json:"barrier_mode"`
 	BarrierProcs []int `json:"barrier_procs,omitempty"`
+
+	// Enable the UAF-focused fuzzing mode that prioritizes DDRD results.
+	UAFMode bool `json:"uaf_mode"`
 }
 
 type FocusArea struct {

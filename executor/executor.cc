@@ -29,6 +29,7 @@
 #include "pkg/flatrpc/flatrpc.h"
 
 #if GOOS_linux
+#include "ukc.h"
 #include "ddrd/trace_manager.h"
 #include "ddrd/race_detector.h"
 #include <fcntl.h>
@@ -363,89 +364,6 @@ static inline bool ddrd_should_collect_for_executor()
 	return barrier_index == 0;
 }
 
-namespace {
-struct UkcController {
-	int fd = -1;
-	bool initialized = false;
-	bool log_mode = false;
-	bool warned_missing = false;
-} g_ukc;
-
-constexpr char kUkcDevicePath[] = "/dev/kccwf_ctl_dev";
-} // namespace
-
-#ifndef _IO
-#define _IO(type, nr) (((type) << 8) | (nr))
-#endif
-#ifndef _IOW
-#define _IOW(type, nr, size) (((type) << 8) | (nr) | (sizeof(size) << 16))
-#endif
-
-constexpr unsigned long kUkcTurnOff = _IO('c', 0);
-constexpr unsigned long kUkcStartMonitor = _IO('c', 1);
-constexpr unsigned long kUkcStartLog = _IO('c', 2);
-
-static void ukc_cleanup();
-
-static void ukc_try_init()
-{
-	if (g_ukc.initialized)
-		return;
-	g_ukc.initialized = true;
-	int fd = open(kUkcDevicePath, O_RDWR | O_CLOEXEC);
-	if (fd < 0) {
-		if (!g_ukc.warned_missing)
-			debug("ukc: controller init failed (errno=%d)\n", errno);
-		g_ukc.warned_missing = true;
-		return;
-	}
-	g_ukc.fd = fd;
-	if (ioctl(g_ukc.fd, kUkcTurnOff) == 0)
-		debug("ukc: controller ready\n");
-	else
-		debug("ukc: controller init but failed to reset mode (errno=%d)\n", errno);
-}
-
-static void ukc_enter_log_mode()
-{
-	ukc_try_init();
-	if (g_ukc.fd < 0)
-		return;
-	debug("log_mode %d\n", g_ukc.log_mode);
-	if (g_ukc.log_mode)
-		return;
-	if (ioctl(g_ukc.fd, kUkcStartLog) == 0) {
-		g_ukc.log_mode = true;
-		debug("ukc: switched to LOG mode\n");
-	} else {
-		debug("ukc: failed to switch to LOG mode (errno=%d)\n", errno);
-		g_ukc.log_mode = false;
-	}
-}
-
-static void ukc_enter_monitor_mode()
-{
-	if (g_ukc.fd < 0 || !g_ukc.log_mode)
-		return;
-	if (ioctl(g_ukc.fd, kUkcStartMonitor) == 0)
-		debug("ukc: switched to MONITOR mode\n");
-	else
-		debug("ukc: failed to switch to MONITOR mode (errno=%d)\n", errno);
-	g_ukc.log_mode = false;
-}
-
-static void ukc_cleanup()
-{
-	if (g_ukc.fd >= 0) {
-		if (g_ukc.log_mode)
-			ukc_enter_monitor_mode();
-		close(g_ukc.fd);
-		g_ukc.fd = -1;
-	}
-	g_ukc.log_mode = false;
-	g_ukc.initialized = false;
-}
-
 static inline bool ddrd_flags_requested()
 {
 	return request_type == rpc::RequestType::Program &&
@@ -494,16 +412,11 @@ static void ddrd_prepare_for_request()
 	g_ddrd_extended_requested = flag_collect_ddrd_extended && is_master;
 	if (!ddrd_flags_requested())
 		return;
-	if (flag_barrier && !is_master) {
+	if (flag_barrier) {
 		debug("ddrd: skip LOG mode for barrier member (group=%lld index=%d size=%d)\n",
 		      static_cast<long long>(barrier_group_id), barrier_index, barrier_group_size);
 		return;
 	}
-	if (flag_barrier && is_master) {
-		debug("ddrd: clearing trace buffer before barrier execution\n");
-		trace_manager_clear(nullptr);
-	}
-	ukc_enter_log_mode();
 	if (!g_ddrd_initialized) {
 		race_detector_init(&g_ddrd_detector);
 		g_ddrd_initialized = true;
@@ -523,7 +436,7 @@ static void ddrd_prepare_for_request()
 	else
 		race_detector_disable_history(&g_ddrd_detector);
 	race_detector_reset(&g_ddrd_detector);
-	debug("ddrd: prepare complete\n");
+	// debug("ddrd: prepare complete\n");
 }
 
 static void ddrd_collect_results()
@@ -555,6 +468,22 @@ static void ddrd_collect_results()
 	}
 
 	g_ddrd_output.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
+	debug("ddrd: detected %d UAF pair(s)\n", count);
+	for (int i = 0; i < count; i++) {
+		const may_uaf_pair_t& pair = g_ddrd_output.basic_pairs[i];
+		debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
+		      i,
+		      static_cast<unsigned long long>(pair.free_access_name),
+		      static_cast<unsigned long long>(pair.use_access_name),
+		      pair.free_tid,
+		      pair.use_tid,
+		      pair.free_sn,
+		      pair.use_sn,
+		      static_cast<unsigned long long>(pair.signal),
+		      static_cast<unsigned long long>(pair.time_diff),
+		      pair.lock_type,
+		      pair.use_access_type);
+	}
 
 	if (g_ddrd_extended_requested) {
 		g_ddrd_output.extended_pairs.clear();
@@ -652,9 +581,6 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 	return rpc::CreateDdrdRaw(fbb, uaf_vector, extended_vector);
 }
 #else
-static inline void ukc_enter_log_mode() {}
-static inline void ukc_enter_monitor_mode() {}
-static inline void ukc_cleanup() {}
 static inline void ddrd_prepare_for_request() {}
 static inline void ddrd_collect_results() {}
 static inline flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder&)
@@ -1069,7 +995,6 @@ int main(int argc, char** argv)
 	// before the sandbox process exits this will make ipc package kill the sandbox.
 	// As the result sandbox process will exit with exit status 9 instead of the executor
 	// exit status (notably kFailStatus). So we duplicate the exit status on the pipe.
-	ukc_cleanup();
 	reply_execute(status);
 	doexit(status);
 	// Unreachable.
