@@ -117,7 +117,7 @@ func (p *Pool[T]) runInstance(ctx context.Context, inst *poolInstance[T]) {
 	p.waitUnpaused()
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
-	log.Logf(2, "pool: booting instance %d", inst.idx)
+	log.Logf(0, "pool: booting instance %d", inst.idx)
 
 	inst.reset(cancel)
 

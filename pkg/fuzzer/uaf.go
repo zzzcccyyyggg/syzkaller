@@ -15,7 +15,6 @@ import (
 	"github.com/google/syzkaller/pkg/flatrpc"
 	queue "github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/hash"
-	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/prog"
@@ -131,7 +130,7 @@ func (uc *uafCorpus) recordCoverage(info *flatrpc.ProgInfo) {
 	}
 	raw := collectAllCoverage(info)
 	if len(raw) == 0 {
-		log.Logf(0, "uaf: recording coverage of size %d from execution", len(raw))
+		// log.Logf(0, "uaf: recording coverage of size %d from execution", len(raw))
 		return
 	}
 	uc.mu.Lock()
@@ -257,7 +256,7 @@ func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) {
 	if u.corpus != nil {
 		u.corpus.recordCoverage(res.Info)
 	}
-	u.updateMainCorpusCoverage(req, res.Info)
+	// u.updateMainCorpusCoverage(req, res.Info)
 }
 
 func (u *uafMode) updateMainCorpusCoverage(req *queue.Request, info *flatrpc.ProgInfo) {

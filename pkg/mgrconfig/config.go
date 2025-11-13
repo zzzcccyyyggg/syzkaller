@@ -137,6 +137,10 @@ type Config struct {
 	// on this value.
 	SandboxArg int64 `json:"sandbox_arg"`
 
+	// VM running time timeout in seconds (default: 3600, i.e. 1 hour).
+	// After this time the VM is restarted to avoid accumulated state.
+	VMRunningTime int `json:"vm_running_time,omitempty"`
+
 	// Enables snapshotting mode. In this mode VM is snapshotted and restarted from the snapshot
 	// before executing each test program. This provides better reproducibility and avoids global
 	// accumulated state. Currently only qemu VMs and Linux support this mode.

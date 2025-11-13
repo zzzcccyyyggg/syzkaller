@@ -78,6 +78,19 @@ type barrierGroup struct {
 	completed    int
 }
 
+func requestTypeName(t flatrpc.RequestType) string {
+	switch t {
+	case flatrpc.RequestTypeProgram:
+		return "program"
+	case flatrpc.RequestTypeBinary:
+		return "binary"
+	case flatrpc.RequestTypeGlob:
+		return "glob"
+	default:
+		return fmt.Sprintf("unknown(%d)", t)
+	}
+}
+
 var errRequestSerialization = errors.New("request serialization failed")
 
 type serializationError struct {
@@ -180,6 +193,7 @@ func (runner *Runner) Handshake(conn *flatrpc.Conn, cfg *handshakeConfig) (hands
 }
 
 func (runner *Runner) ConnectionLoop() error {
+	// log.Logf(0, "runner %d: ConnectionLoop started", runner.id)
 	if runner.updInfo != nil {
 		runner.updInfo(func(info *dispatcher.Info) {
 			info.Status = "executing"
@@ -219,9 +233,12 @@ func (runner *Runner) ConnectionLoop() error {
 		for len(runner.requests)-len(runner.executing) < 2*runner.procs {
 			req := runner.source.Next(runner.id)
 			if req == nil {
+				// log.Logf(0, "runner %d: no more requests, sleeping", runner.id)
 				break
 			}
+			// log.Logf(0, "runner %d fetched request type=%s barrier=%t", runner.id, requestTypeName(req.Type), req.Barrier)
 			if err := runner.sendRequest(req); err != nil {
+				// log.Logf(0, "runner %d: failed to send request: %v", runner.id, err)
 				return err
 			}
 		}
@@ -235,6 +252,7 @@ func (runner *Runner) ConnectionLoop() error {
 		}
 		raw, err := wrappedRecv[*flatrpc.ExecutorMessageRaw](runner)
 		if err != nil {
+			log.Logf(0, "runner %d: failed to receive message: %v", runner.id, err)
 			return err
 		}
 		if raw.Msg == nil || raw.Msg.Value == nil {
@@ -242,8 +260,10 @@ func (runner *Runner) ConnectionLoop() error {
 		}
 		switch msg := raw.Msg.Value.(type) {
 		case *flatrpc.ExecutingMessage:
+			// log.Logf(0, "runner %d: handling ExecutingMessage for req %d", runner.id, msg.Id)
 			err = runner.handleExecutingMessage(msg)
 		case *flatrpc.ExecResult:
+			// log.Logf(0, "runner %d: handling ExecResult for req %d", runner.id, msg.Id)
 			err = runner.handleExecResult(msg)
 		case *flatrpc.StateResult:
 			buf := new(bytes.Buffer)

@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"runtime"
 	"strings"
+	"time"
 
 	"github.com/google/syzkaller/pkg/config"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -302,6 +303,9 @@ func (cfg *Config) initTimeouts() {
 	}
 	// Note: we could also consider heavy debug tools (KASAN/KMSAN/KCSAN/KMEMLEAK) if necessary.
 	cfg.Timeouts = cfg.SysTarget.Timeouts(slowdown)
+	if cfg.VMRunningTime > 0 {
+		cfg.Timeouts.VMRunningTime = time.Duration(cfg.VMRunningTime) * time.Second
+	}
 }
 
 func checkNonEmpty(fields ...string) error {

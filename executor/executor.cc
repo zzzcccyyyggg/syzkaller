@@ -413,8 +413,6 @@ static void ddrd_prepare_for_request()
 	if (!ddrd_flags_requested())
 		return;
 	if (flag_barrier) {
-		debug("ddrd: skip LOG mode for barrier member (group=%lld index=%d size=%d)\n",
-		      static_cast<long long>(barrier_group_id), barrier_index, barrier_group_size);
 		return;
 	}
 	if (!g_ddrd_initialized) {
@@ -1894,8 +1892,9 @@ void execute_call(thread_t* th)
 	for (int i = 0; i < th->call_props.rerun; i++)
 		NONFAILING(execute_syscall(call, th->args));
 
-	debug("#%d [%llums] <- %s=0x%llx",
-	      th->id, current_time_ms() - start_time_ms, call->name, (uint64)th->res);
+	debug("#%d [%llums] <- %s=0x%llx (tid=%ld)",
+      th->id, current_time_ms() - start_time_ms,
+      call->name, (uint64)th->res, syscall(SYS_gettid));
 	if (th->res == (intptr_t)-1)
 		debug(" errno=%d", th->reserrno);
 	if (flag_coverage)

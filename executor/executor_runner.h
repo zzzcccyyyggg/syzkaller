@@ -163,7 +163,10 @@ public:
 	{
 		return state_ == State::Idle && !msg_;
 	}
-
+ 	bool IsAvailable() const 
+	{ 
+		return state_ == State::Idle || state_ == State::Started; 
+	}
 	int ExecId() const
 	{
 		return id_;
@@ -171,7 +174,7 @@ public:
 
 	bool CanRun(const rpc::ExecRequestRawT& msg) const
 	{
-		if (!IsIdle())
+		if (!IsAvailable())
 			return false;
 		if (msg.avoid & (1ull << slot_))
 			return false;
@@ -426,13 +429,6 @@ private:
 
 		debug("proc slot %d (exec %d): start executing request %llu\n",
 		      slot_, id_, static_cast<uint64>(msg_->id));
-		if (msg_->barrier_group_size > 0) {
-			debug("proc slot %d (exec %d): barrier start group=%lld index=%lld size=%lld participants=0x%llx\n",
-			      slot_, id_, static_cast<long long>(msg_->barrier_group_id),
-			      static_cast<long long>(msg_->barrier_index),
-			      static_cast<long long>(msg_->barrier_group_size),
-			      static_cast<unsigned long long>(msg_->barrier_participants));
-		}
 
 		rpc::ExecutingMessageRawT exec;
 		exec.id = msg_->id;
@@ -633,6 +629,7 @@ private:
 	std::deque<rpc::ExecRequestRawT> requests_;
 	std::unordered_map<int64_t, BarrierGroupState> barrier_groups_;
 	std::deque<int64_t> pending_barriers_;
+	bool barrier_mode_enabled_ = false;
 	std::vector<std::string> leak_frames_;
 	int restarting_ = 0;
 	bool corpus_triaged_ = false;
@@ -681,10 +678,11 @@ private:
 			else
 				failmsg("unknown host message type", "type=%d", static_cast<int>(raw.msg.type));
 		}
-
-		DispatchBarrierGroups();
-		uint64 reserved_mask = PendingBarrierMask();
-
+		uint64 reserved_mask = 0;
+		if (barrier_mode_enabled_) {
+			DispatchBarrierGroups();
+			reserved_mask = PendingBarrierMask();
+		}
 		for (auto& proc : procs_) {
 			proc->Ready(select, now, requests_.empty());
 			if (!requests_.empty()) {
@@ -855,6 +853,7 @@ private:
 
 	void HandleBarrierRequest(rpc::ExecRequestRawT& msg)
 	{
+		barrier_mode_enabled_ = true;
 		int64_t group_id = msg.barrier_group_id;
 		auto& group = barrier_groups_[group_id];
 		if (group.members.empty()) {
@@ -875,13 +874,13 @@ private:
 			group.members.resize(idx + 1);
 		if (group.members[idx].has_value())
 			failmsg("duplicate barrier member", "group=%lld index=%zu", (long long)group_id, idx);
-		debug("runner: barrier member queued group=%lld index=%lld total=%zu mask=0x%llx\n",
-		      static_cast<long long>(group_id), static_cast<long long>(msg.barrier_index),
-		      group.members.size(), static_cast<unsigned long long>(group.participants_mask));
+		// debug("runner: barrier member queued group=%lld index=%lld total=%zu mask=0x%llx\n",
+		//       static_cast<long long>(group_id), static_cast<long long>(msg.barrier_index),
+		//       group.members.size(), static_cast<unsigned long long>(group.participants_mask));
 		group.members[idx].emplace(std::move(msg));
 		group.ready++;
-		debug("runner: barrier group=%lld progress=%zu/%zu\n", static_cast<long long>(group_id),
-		      group.ready, group.members.size());
+		// debug("runner: barrier group=%lld progress=%zu/%zu\n", static_cast<long long>(group_id),
+		//       group.ready, group.members.size());
 		if (!group.queued && group.ready == group.members.size()) {
 			pending_barriers_.push_back(group_id);
 			group.queued = true;
@@ -898,6 +897,7 @@ private:
 				pending_barriers_.pop_front();
 				continue;
 			}
+			// debug("runner: TryDispatchBarrier barrier group=%lld\n", static_cast<long long>(pending_barriers_.front()));
 			if (!TryDispatchBarrier(pending_barriers_.front(), it->second))
 				break;
 			barrier_groups_.erase(it);
@@ -922,10 +922,16 @@ private:
 	{
 		if (group.ready != group.members.size() || group.members.empty())
 			return false;
+		// debug("TryDispatchBarrier start\n");
 		std::vector<Proc*> selected(group.members.size(), nullptr);
 		if (!group.proc_slots.empty()) {
-			if (group.proc_slots.size() != group.members.size())
-				return false;
+			if (group.proc_slots.size() != group.members.size()){
+				// debug("barrier %lld mismatch: slots=%zu members=%zu mask=0x%llx\n",
+              	// (long long)group_id, group.proc_slots.size(), group.members.size(),
+              	// (unsigned long long)group.participants_mask);
+			  	return false;
+			}
+
 			for (size_t i = 0; i < group.members.size(); i++) {
 				if (!group.members[i].has_value())
 					return false;
@@ -935,24 +941,24 @@ private:
 				selected[i] = proc;
 			}
 		} else {
-			std::vector<Proc*> idle;
+			std::vector<Proc*> avail;
 			for (auto& proc : procs_) {
-				if (proc->IsIdle())
-					idle.push_back(proc.get());
+				if (proc->IsAvailable())
+					avail.push_back(proc.get());
 			}
-			if (idle.size() < group.members.size())
+			if (avail.size() < group.members.size())
 				return false;
-			std::vector<bool> used(idle.size(), false);
+			std::vector<bool> used(avail.size(), false);
 			for (size_t i = 0; i < group.members.size(); i++) {
 				if (!group.members[i].has_value())
 					return false;
 				bool assigned = false;
-				for (size_t j = 0; j < idle.size(); j++) {
+				for (size_t j = 0; j < avail.size(); j++) {
 					if (used[j])
 						continue;
-					if (!idle[j]->CanRun(*group.members[i]))
+					if (!avail[j]->CanRun(*group.members[i]))
 						continue;
-					selected[i] = idle[j];
+					selected[i] = avail[j];
 					used[j] = true;
 					assigned = true;
 					break;
@@ -961,24 +967,24 @@ private:
 					return false;
 			}
 		}
-		debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",
-		      static_cast<long long>(group_id), group.members.size(),
-		      static_cast<unsigned long long>(group.participants_mask));
+		// debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",
+		//       static_cast<long long>(group_id), group.members.size(),
+		//       static_cast<unsigned long long>(group.participants_mask));
 		for (size_t i = 0; i < selected.size(); i++) {
 			if (!selected[i])
 				return false;
-			auto& member = *group.members[i];
-			debug("runner: barrier group=%lld member=%zu -> proc=%d index=%lld size=%lld\n",
-			      static_cast<long long>(group_id), i, selected[i]->Id(),
-			      static_cast<long long>(member.barrier_index),
-			      static_cast<long long>(member.barrier_group_size));
+			// auto& member = *group.members[i];
+			// debug("runner: barrier group=%lld member=%zu -> proc=%d index=%lld size=%lld\n",
+			//       static_cast<long long>(group_id), i, selected[i]->Id(),
+			//       static_cast<long long>(member.barrier_index),
+			//       static_cast<long long>(member.barrier_group_size));
 			if (!selected[i]->Execute(*group.members[i]))
 				failmsg("failed to dispatch barrier member", "group=%lld index=%zu proc=%d",
 				        (long long)group_id, i, selected[i]->Id());
 			group.members[i].reset();
 		}
 		ukc_enter_log_mode();
-		debug("ddrd: clearing trace buffer before barrier execution\n");
+		// debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
 
 		return true;

@@ -306,7 +306,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		}()
 	}
 	if *flagDebug {
-		mgr.cfg.Procs = 2
+		mgr.cfg.Procs = mgr.cfg.Procs
 	}
 	mgr.http = &manager.HTTPServer{
 		// Note that if cfg.HTTP == "", we don't start the server.

@@ -416,9 +416,9 @@ func (mon *monitor) monitorExecution() []*report.Report {
 		case <-ticker.C:
 			// Detect both "no output whatsoever" and "kernel episodically prints
 			// something to console, but fuzzer is not actually executing programs".
-			if time.Since(mon.lastExecuteTime) > mon.inst.pool.timeouts.NoOutput {
-				return mon.extractErrors(noOutputCrash)
-			}
+			// if time.Since(mon.lastExecuteTime) > mon.inst.pool.timeouts.NoOutput {
+			// 	return mon.extractErrors(noOutputCrash)
+			// }
 		case <-Shutdown:
 			return nil
 		}

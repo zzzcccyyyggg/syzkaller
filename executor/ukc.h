@@ -55,11 +55,9 @@ static inline void ukc_enter_log_mode()
 		ukc_print("ukc: controller init failed (errno=%d)\n", errno);
 		return;
 	}
-	if (ioctl(fd, kUkcStartLog) == 0) {
-		ukc_print("ukc: switched to LOG mode\n");
-	} else {
+	if (ioctl(fd, kUkcStartLog) != 0) 
 		ukc_print("ukc: failed to switch to LOG mode (errno=%d)\n", errno);
-	}
+	
 	close(fd);
 }
 
@@ -70,9 +68,7 @@ static inline void ukc_enter_monitor_mode()
 		ukc_print("ukc: controller init failed (errno=%d)\n", errno);
 		return;
 	}
-	if (ioctl(fd, kUkcStartMonitor) == 0)
-		ukc_print("ukc: switched to MONITOR mode\n");
-	else
+	if (ioctl(fd, kUkcStartMonitor) != 0)
 		ukc_print("ukc: failed to switch to MONITOR mode (errno=%d)\n", errno);
 	close(fd);
 }

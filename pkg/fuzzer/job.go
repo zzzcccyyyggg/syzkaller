@@ -50,7 +50,7 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 		Stat:     fuzzer.statExecGenerate,
 	}
-	fuzzer.applyBarrier(req)
+	// fuzzer.applyBarrier(req)
 	return req
 }
 
@@ -71,7 +71,7 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 		Stat:     fuzzer.statExecFuzz,
 	}
-	fuzzer.applyBarrier(req)
+	// fuzzer.applyBarrier(req)
 	return req
 }
 
@@ -137,7 +137,7 @@ const (
 func (job *triageJob) execute(req *queue.Request, flags ProgFlags) *queue.Result {
 	defer job.info.Execs.Add(1)
 	req.Important = true // All triage executions are important.
-	job.fuzzer.applyBarrier(req)
+	// job.fuzzer.applyBarrier(req)
 	return job.fuzzer.executeWithFlags(job.queue, req, flags)
 }
 
@@ -468,7 +468,7 @@ func (job *smashJob) run(fuzzer *Fuzzer) {
 			ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 			Stat:     fuzzer.statExecSmash,
 		}
-		fuzzer.applyBarrier(req)
+		// fuzzer.applyBarrier(req)
 		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
@@ -519,7 +519,7 @@ func (job *faultInjectionJob) run(fuzzer *Fuzzer) {
 			Prog: newProg,
 			Stat: fuzzer.statExecFaultInject,
 		}
-		fuzzer.applyBarrier(req)
+		// fuzzer.applyBarrier(req)
 		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
@@ -552,7 +552,7 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
 			ExecOpts: setFlags(flatrpc.ExecFlagCollectComps),
 			Stat:     fuzzer.statExecSeed,
 		}
-		fuzzer.applyBarrier(req)
+		// fuzzer.applyBarrier(req)
 		result := fuzzer.execute(job.exec, req)
 		if result.Stop() {
 			return
@@ -587,7 +587,7 @@ func (job *hintsJob) run(fuzzer *Fuzzer) {
 				ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
 				Stat:     fuzzer.statExecHint,
 			}
-			fuzzer.applyBarrier(req)
+			// fuzzer.applyBarrier(req)
 			result := fuzzer.execute(job.exec, req)
 			return !result.Stop()
 		})

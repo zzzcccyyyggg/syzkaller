@@ -119,17 +119,23 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	sources := []queue.Source{
 		ret.triageCandidateQueue,
 		ret.candidateQueue,
-		ret.triageQueue,
 	}
 	if fuzzer.uaf != nil {
 		ret.uafQueue = queue.Plain()
 		fuzzer.uaf.setQueue(ret.uafQueue)
 		sources = append(sources, ret.uafQueue)
+		sources = append(sources,
+			queue.Callback(fuzzer.genFuzz),
+		)
+
+	} else {
+		sources = append(sources, ret.triageQueue)
+		sources = append(sources,
+			queue.Alternate(ret.smashQueue, skipQueue),
+			queue.Callback(fuzzer.genFuzz),
+		)
 	}
-	sources = append(sources,
-		queue.Alternate(ret.smashQueue, skipQueue),
-		queue.Callback(fuzzer.genFuzz),
-	)
+
 	// Sources are listed in the order, in which they will be polled.
 	ret.source = queue.Order(sources...)
 	return ret
@@ -164,6 +170,22 @@ func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags
 }
 
 func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool {
+	if fuzzer.uaf != nil && flags == ProgBarrier {
+		if pairs := fuzzer.ddrd.Add(res.Ddrd); len(pairs) != 0 {
+			fuzzer.statDdrdPairs.Add(len(pairs))
+			fuzzer.Logf(0, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
+			if fuzzer.uaf != nil {
+				fuzzer.uaf.handleNewPairs(req, res, pairs)
+			}
+		}
+		// fuzzer.Logf(0, "ddrd: total UAF pairs=%d", fuzzer.ddrd.Count())
+		if fuzzer.uaf != nil {
+			fuzzer.uaf.recordExecution(req, res)
+			// fuzzer.uaf.handleCoverage(req, res, triage)
+		}
+		return true
+	}
+
 	// If we are already triaging this exact prog, this is flaky coverage.
 	// Hanged programs are harmful as they consume executor procs.
 	dontTriage := flags&progInTriage > 0 || res.Status == queue.Hanged
@@ -208,19 +230,6 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			fuzzer.handleCallInfo(req, info, call)
 		}
 		fuzzer.handleCallInfo(req, res.Info.Extra, -1)
-	}
-
-	if pairs := fuzzer.ddrd.Add(res.Ddrd); len(pairs) != 0 {
-		fuzzer.statDdrdPairs.Add(len(pairs))
-		fuzzer.Logf(0, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
-		if fuzzer.uaf != nil {
-			fuzzer.uaf.handleNewPairs(req, res, pairs)
-		}
-	}
-
-	if fuzzer.uaf != nil {
-		fuzzer.uaf.recordExecution(req, res)
-		// fuzzer.uaf.handleCoverage(req, res, triage)
 	}
 	fuzzer.Logf(2, "[test]: Corpus candidates may have flaky coverage, so we give them a second chance")
 	// Corpus candidates may have flaky coverage, so we give them a second chance.
@@ -290,7 +299,7 @@ func (fuzzer *Fuzzer) handleCallInfo(req *queue.Request, info *flatrpc.CallInfo,
 	if info == nil || info.Flags&flatrpc.CallFlagCoverageOverflow == 0 {
 		return
 	}
-	log.Logf(0, "flatrpc.CallFlagCoverageOverflow detected in call %d in %s", call, req.Prog)
+	log.Logf(2, "flatrpc.CallFlagCoverageOverflow detected in call %d in %s", call, req.Prog)
 	syscallIdx := len(fuzzer.Syscalls) - 1
 	if call != -1 {
 		syscallIdx = req.Prog.Calls[call].Meta.ID
@@ -319,6 +328,7 @@ func signalPrio(p *prog.Prog, info *flatrpc.CallInfo, call int) (prio uint8) {
 }
 
 func (fuzzer *Fuzzer) genFuzz() *queue.Request {
+
 	// Either generate a new input or mutate an existing one.
 	mutateRate := 0.95
 	if !fuzzer.Config.Coverage {
@@ -334,6 +344,16 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	if req == nil {
 		req = genProgRequest(fuzzer, rnd)
 	}
+	if fuzzer.uaf != nil {
+		fuzzer.applyBarrier(req)
+		flags := ProgFlags(0)
+		if req.Barrier {
+			flags |= ProgBarrier
+		}
+		fuzzer.prepare(req, flags, 0)
+		return req
+	}
+
 	if fuzzer.Config.Collide && rnd.Intn(3) == 0 {
 		base := req
 		req = &queue.Request{
@@ -342,8 +362,8 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 			Stat:     fuzzer.statExecCollide,
 		}
 	}
-	fuzzer.applyBarrier(req)
-	fuzzer.prepare(req, 0, 0)
+	log.Logf(2, "[test]: genFuzz")
+
 	return req
 }
 
@@ -364,6 +384,7 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 	req.SetBarrier(mask)
 	programs := fuzzer.buildBarrierPrograms(req, mask)
 	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)
@@ -448,6 +469,7 @@ const (
 
 	progCandidate
 	progInTriage
+	ProgBarrier
 )
 
 type Candidate struct {
@@ -464,7 +486,7 @@ func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
 			Stat:      fuzzer.statExecCandidate,
 			Important: true,
 		}
-		fuzzer.applyBarrier(req)
+		// fuzzer.applyBarrier(req)
 		fuzzer.enqueue(fuzzer.candidateQueue, req, candidate.Flags|progCandidate, 0)
 	}
 }

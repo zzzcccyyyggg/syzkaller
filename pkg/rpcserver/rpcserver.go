@@ -300,7 +300,7 @@ func (serv *server) handleConn(ctx context.Context, conn *flatrpc.Conn) error {
 	}
 
 	// From now on, assume that the client is well-behaving.
-	log.Logf(1, "runner %v connected", id)
+	log.Logf(0, "runner %v connected", id)
 
 	if serv.cfg.VMLess {
 		// There is no VM loop, so mimic what it would do.

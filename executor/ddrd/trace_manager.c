@@ -120,14 +120,14 @@ void trace_manager_clear(TraceManager* tm)
     ssize_t before_bytes = trace_manager_trace_size_bytes();
     if (before_bytes >= 0)
         debug("trace_manager_clear: size before=%zd bytes\n", before_bytes);
-    if (!trace_manager_disable())
+    if (trace_manager_disable())
         debug("trace_manager_clear: failed to disable tracing\n");
     int fd = open("/sys/kernel/debug/tracing/trace", O_WRONLY | O_TRUNC);
     if (fd < 0)
         debug("trace_manager_clear: failed to open trace file: %s\n", strerror(errno));
     else
         close(fd);
-    if (!trace_manager_enable())
+    if (trace_manager_enable())
         debug("trace_manager_clear: failed to re-enable tracing\n");
     if (tm)
         trace_manager_reset(tm);
