@@ -30,7 +30,6 @@
 
 #if GOOS_linux
 #include "ukc.h"
-#include "ddrd/trace_manager.h"
 #include "ddrd/race_detector.h"
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -314,13 +313,9 @@ static uint64 slowdown_scale;
 static bool in_execute_one = false;
 
 #if GOOS_linux
-static RaceDetector g_ddrd_detector;
-static bool g_ddrd_initialized;
-static bool g_ddrd_available;
-static bool g_ddrd_request_active;
-static bool g_ddrd_extended_requested;
-static bool g_ddrd_warned_unavailable;
-
+// DDRD structures - defined here for executor, shared with runner via executor_runner.h
+#ifndef SYZ_EXECUTOR_DDRD_TYPES_DEFINED
+#define SYZ_EXECUTOR_DDRD_TYPES_DEFINED
 struct DdrdSerializedAccessEntry {
 	uint64_t var_name = 0;
 	uint64_t call_stack_hash = 0;
@@ -345,182 +340,28 @@ struct DdrdOutputState {
 	std::vector<DdrdExtendedUafRecord> extended_pairs;
 	bool has_results = false;
 };
+#endif // SYZ_EXECUTOR_DDRD_TYPES_DEFINED
 
-static DdrdOutputState g_ddrd_output;
+static const DdrdOutputState* g_ddrd_runner_output = nullptr;
 
-constexpr size_t kDdrdMaxUafPairs = 0x200;
-
-static inline void ddrd_clear_output()
+static inline void ddrd_set_runner_output(const DdrdOutputState* output)
 {
-	g_ddrd_output.basic_pairs.clear();
-	g_ddrd_output.extended_pairs.clear();
-	g_ddrd_output.has_results = false;
+	g_ddrd_runner_output = output;
 }
 
-static inline bool ddrd_should_collect_for_executor()
+static inline void ddrd_clear_runner_output()
 {
-	if (!flag_barrier || barrier_group_size <= 0)
-		return true;
-	return barrier_index == 0;
-}
-
-static inline bool ddrd_flags_requested()
-{
-	return request_type == rpc::RequestType::Program &&
-	       (flag_collect_ddrd_uaf || flag_collect_ddrd_extended);
-}
-
-static uint32_t ddrd_history_copy_count(const ThreadAccessHistory* history)
-{
-	if (!history)
-		return 0;
-	uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
-		       : (uint32_t)history->access_count;
-	if (available > MAX_ACCESS_HISTORY_RECORDS)
-		available = MAX_ACCESS_HISTORY_RECORDS;
-	return available;
-}
-
-static void ddrd_append_history(const ThreadAccessHistory* history, uint32_t limit,
-	       std::vector<DdrdSerializedAccessEntry>& out)
-{
-	if (!history || limit == 0)
-		return;
-	uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
-		       : (uint32_t)history->access_count;
-	uint32_t to_copy = std::min(limit, available);
-	out.reserve(out.size() + to_copy);
-	int start = history->buffer_full ? history->access_index : 0;
-	for (uint32_t i = 0; i < to_copy; i++) {
-		int idx = (start + i) % SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM;
-		const AccessRecord& rec = history->accesses[idx];
-		DdrdSerializedAccessEntry entry;
-		entry.var_name = rec.var_name;
-		entry.call_stack_hash = rec.call_stack_hash;
-		entry.access_time = rec.access_time;
-		entry.sn = rec.sn >= 0 ? (uint32_t)rec.sn : 0;
-		entry.access_type = (uint32_t)(uint8)(rec.access_type);
-		out.push_back(entry);
-	}
-}
-
-static void ddrd_prepare_for_request()
-{
-	ddrd_clear_output();
-	g_ddrd_request_active = false;
-	bool is_master = ddrd_should_collect_for_executor();
-	g_ddrd_extended_requested = flag_collect_ddrd_extended && is_master;
-	if (!ddrd_flags_requested())
-		return;
-	if (flag_barrier) {
-		return;
-	}
-	if (!g_ddrd_initialized) {
-		race_detector_init(&g_ddrd_detector);
-		g_ddrd_initialized = true;
-		g_ddrd_available = race_detector_is_available(&g_ddrd_detector);
-		if (!g_ddrd_available && !g_ddrd_warned_unavailable) {
-			debug("ddrd: race detector unavailable on this system\n");
-			g_ddrd_warned_unavailable = true;
-		}
-	}
-	if (!g_ddrd_available) {
-		ukc_enter_monitor_mode();
-		return;
-	}
-	g_ddrd_request_active = true;
-	if (g_ddrd_extended_requested)
-		race_detector_enable_history(&g_ddrd_detector);
-	else
-		race_detector_disable_history(&g_ddrd_detector);
-	race_detector_reset(&g_ddrd_detector);
-	// debug("ddrd: prepare complete\n");
-}
-
-static void ddrd_collect_results()
-{
-	if (!g_ddrd_request_active)
-		return;
-	if (!g_ddrd_available) {
-		ukc_enter_monitor_mode();
-		g_ddrd_request_active = false;
-		return;
-	}
-	if (!ddrd_should_collect_for_executor()) {
-		debug("ddrd: skip collection for barrier member (group=%lld index=%d size=%d)\n",
-		      static_cast<long long>(barrier_group_id), barrier_index, barrier_group_size);
-		ddrd_clear_output();
-		g_ddrd_request_active = false;
-		return;
-	}
-	ukc_enter_monitor_mode();
-	debug("ddrd: collecting results\n");
-	std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
-	int count = race_detector_analyze_and_generate_uaf_infos(&g_ddrd_detector, pairs.data(),
-	(int)kDdrdMaxUafPairs);
-	if (count <= 0) {
-		ddrd_clear_output();
-		g_ddrd_request_active = false;
-		ukc_enter_monitor_mode();
-		return;
-	}
-
-	g_ddrd_output.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
-	debug("ddrd: detected %d UAF pair(s)\n", count);
-	for (int i = 0; i < count; i++) {
-		const may_uaf_pair_t& pair = g_ddrd_output.basic_pairs[i];
-		debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
-		      i,
-		      static_cast<unsigned long long>(pair.free_access_name),
-		      static_cast<unsigned long long>(pair.use_access_name),
-		      pair.free_tid,
-		      pair.use_tid,
-		      pair.free_sn,
-		      pair.use_sn,
-		      static_cast<unsigned long long>(pair.signal),
-		      static_cast<unsigned long long>(pair.time_diff),
-		      pair.lock_type,
-		      pair.use_access_type);
-	}
-
-	if (g_ddrd_extended_requested) {
-		g_ddrd_output.extended_pairs.clear();
-		g_ddrd_output.extended_pairs.reserve(count);
-		for (int i = 0; i < count; i++) {
-			const may_uaf_pair_t& pair = g_ddrd_output.basic_pairs[i];
-			DdrdExtendedUafRecord ext{};
-			ext.basic_index = (size_t)i;
-			ThreadAccessHistory* use_hist = race_detector_find_thread_history(&g_ddrd_detector, pair.use_tid);
-			ThreadAccessHistory* free_hist = race_detector_find_thread_history(&g_ddrd_detector, pair.free_tid);
-			ext.use_thread_history_count = ddrd_history_copy_count(use_hist);
-			ext.free_thread_history_count = ddrd_history_copy_count(free_hist);
-			ext.use_target_time = pair.time_diff;
-			ext.free_target_time = 0;
-			ext.path_distance_use = use_hist && use_hist->access_count > 0
-			? (double)(use_hist->access_count - 1) : 0.0;
-			ext.path_distance_free = free_hist && free_hist->access_count > 0
-			? (double)(free_hist->access_count - 1) : 0.0;
-			ext.history.reserve(ext.use_thread_history_count + ext.free_thread_history_count);
-			ddrd_append_history(use_hist, ext.use_thread_history_count, ext.history);
-			ddrd_append_history(free_hist, ext.free_thread_history_count, ext.history);
-			g_ddrd_output.extended_pairs.push_back(std::move(ext));
-		}
-	} else {
-		g_ddrd_output.extended_pairs.clear();
-	}
-
-	g_ddrd_output.has_results = true;
-	g_ddrd_request_active = false;
-	ukc_enter_monitor_mode();
+	g_ddrd_runner_output = nullptr;
 }
 
 static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 {
-	if (!g_ddrd_output.has_results)
+	const DdrdOutputState* output_to_use = g_ddrd_runner_output;
+	if (!output_to_use || !output_to_use->has_results)
 		return {};
 	std::vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>> uaf_offsets;
-	uaf_offsets.reserve(g_ddrd_output.basic_pairs.size());
-	for (const auto& pair : g_ddrd_output.basic_pairs) {
+	uaf_offsets.reserve(output_to_use->basic_pairs.size());
+	for (const auto& pair : output_to_use->basic_pairs) {
 		rpc::DdrdUafPairRawBuilder builder(fbb);
 		builder.add_free_access_name(pair.free_access_name);
 		builder.add_use_access_name(pair.use_access_name);
@@ -536,9 +377,9 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 	}
 
 	std::vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>> extended_offsets;
-	if (!g_ddrd_output.extended_pairs.empty()) {
-		extended_offsets.reserve(g_ddrd_output.extended_pairs.size());
-		for (const auto& ext : g_ddrd_output.extended_pairs) {
+	if (!output_to_use->extended_pairs.empty()) {
+		extended_offsets.reserve(output_to_use->extended_pairs.size());
+		for (const auto& ext : output_to_use->extended_pairs) {
 			std::vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>> history_offsets;
 			history_offsets.reserve(ext.history.size());
 			for (const auto& entry : ext.history) {
@@ -574,13 +415,14 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 		? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>>()
 		: fbb.CreateVector(extended_offsets);
 
-	ddrd_clear_output();
+	g_ddrd_runner_output = nullptr;
 
 	return rpc::CreateDdrdRaw(fbb, uaf_vector, extended_vector);
 }
 #else
-static inline void ddrd_prepare_for_request() {}
-static inline void ddrd_collect_results() {}
+struct DdrdOutputState;
+static inline void ddrd_set_runner_output(const DdrdOutputState*) {}
+static inline void ddrd_clear_runner_output() {}
 static inline flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder&)
 {
 	return {};
@@ -1182,7 +1024,6 @@ void parse_execute(const execute_req& req)
 	      flag_collect_ddrd_extended, flag_sandbox_none, flag_sandbox_setuid,
 	      flag_sandbox_namespace, flag_sandbox_android, syscall_timeout_ms, program_timeout_ms, slowdown_scale,
 	      is_kernel_64_bit);
-	ddrd_prepare_for_request();
 	if (syscall_timeout_ms == 0 || program_timeout_ms <= syscall_timeout_ms || slowdown_scale == 0)
 		failmsg("bad timeouts", "syscall=%llu, program=%llu, scale=%llu",
 			syscall_timeout_ms, program_timeout_ms, slowdown_scale);
@@ -1258,6 +1099,20 @@ void execute_one()
 	// Output buffer may be pkey-protected in snapshot mode, so don't write the output size
 	// (it's fixed and known anyway).
 	output_builder.emplace(output_data, output_size, !flag_snapshot);
+	if (flag_debug) {
+		uint32 precompleted = output_data->completed.load(std::memory_order_relaxed);
+		if (precompleted != 0) {
+			debug("execute_one start: req=%llu proc=%llu precompleted=%u barrier=%lld/%d/%d flag_barrier=%d\n",
+			      (unsigned long long)request_id,
+			      (unsigned long long)procid,
+			      precompleted,
+			      (long long)barrier_group_id,
+			      barrier_index,
+			      barrier_group_size,
+			      flag_barrier ? 1 : 0);
+			output_data->Reset();
+		}
+	}
 	uint64 start = current_time_ms();
 	uint8* input_pos = input_data;
 
@@ -1459,7 +1314,6 @@ void execute_one()
 		}
 	}
 
-	ddrd_collect_results();
 #if SYZ_HAVE_CLOSE_FDS
 	close_fds();
 #endif
@@ -1718,8 +1572,26 @@ void write_output(int index, cover_t* cov, rpc::CallFlag flags, uint32 error, bo
 		builder.add_comps(comps_off);
 	auto off = builder.Finish();
 	uint32 slot = output_data->completed.load(std::memory_order_relaxed);
-	if (slot >= kMaxCalls)
+	if (slot >= kMaxCalls) {
+		uint32 num_calls = output_data->num_calls.load(std::memory_order_relaxed);
+		uint32 consumed = output_data->consumed.load(std::memory_order_relaxed);
+		if (flag_debug) {
+			debug("write_output overflow: req=%llu proc=%llu slot=%u index=%d completed=%u num_calls=%u consumed=%u barrier=%lld/%d/%d flag_barrier=%d time_ms=%llu\n",
+			      (unsigned long long)request_id,
+			      (unsigned long long)procid,
+			      slot,
+			      index,
+			      slot,
+			      num_calls,
+			      consumed,
+			      (long long)barrier_group_id,
+			      barrier_index,
+			      barrier_group_size,
+			      flag_barrier ? 1 : 0,
+			      (unsigned long long)(current_time_ms() - start_time_ms));
+		}
 		failmsg("too many calls in output", "slot=%d", slot);
+	}
 	auto& call = output_data->calls[slot];
 	call.index = index;
 	call.offset = off;

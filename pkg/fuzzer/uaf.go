@@ -161,19 +161,29 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	now := time.Now()
 	barrier := buildBarrierSnapshot(req, res)
 	groupTemplate := snapshotProgramGroup(req)
+	// groupID := int64(0)
+	// if res != nil {
+	// 	groupID = res.BarrierGroupID
+	// }
+	// start := time.Now()
+	// u.fuzzer.Logf(0, "uaf: handleNewPairs begin barrier_id=%d pairs=%d", groupID, len(pairs))
 
 	u.mu.Lock()
+	// u.fuzzer.Logf(0, "uaf: handleNewPairs locked barrier_id=%d pairs=%d existing=%d", groupID, len(pairs), len(u.entries))
 	var seeds []*barrierSeed
 	for _, pair := range pairs {
 		if pair == nil {
+			// u.fuzzer.Logf(1, "uaf: handleNewPairs skip nil pair barrier_id=%d", groupID)
 			continue
 		}
 		id := pair.UAFPairID()
 		if id == 0 {
+			// u.fuzzer.Logf(1, "uaf: handleNewPairs skip zero id barrier_id=%d", groupID)
 			continue
 		}
 		key := uafSeedKey(id)
 		if _, exists := u.entries[key]; exists {
+			// u.fuzzer.Logf(0, "uaf: handleNewPairs duplicate pair barrier_id=%d id=%016x", groupID, id)
 			continue
 		}
 		entry := newUAFCorpusEntry(req.Prog, pair, barrier, now)
@@ -196,13 +206,18 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 		u.entries[key] = seed
 		u.corpus.addSeed(key, entry)
 		seeds = append(seeds, seed)
-		u.fuzzer.Logf(0, "uaf: queued uaf pair seed %s (total=%d)", key, u.count())
+		total := len(u.entries)
+		u.fuzzer.Logf(0, "uaf: queued uaf pair seed %s (total=%d)", key, total)
 	}
 	u.mu.Unlock()
+	// u.fuzzer.Logf(0, "uaf: handleNewPairs unlocked barrier_id=%d new_seeds=%d", groupID, len(seeds))
 
 	for _, seed := range seeds {
+		// u.fuzzer.Logf(0, "uaf: handleNewPairs enqueue start barrier_id=%d", groupID)
 		u.enqueueSeed(seed)
+		// u.fuzzer.Logf(0, "uaf: handleNewPairs enqueue done barrier_id=%d", groupID)
 	}
+	// u.fuzzer.Logf(0, "uaf: handleNewPairs done barrier_id=%d duration=%s", groupID, time.Since(start))
 }
 
 func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage map[int]*triageCall) {

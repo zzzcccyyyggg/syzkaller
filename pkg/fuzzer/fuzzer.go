@@ -171,18 +171,31 @@ func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags
 
 func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool {
 	if fuzzer.uaf != nil && flags == ProgBarrier {
-		if pairs := fuzzer.ddrd.Add(res.Ddrd); len(pairs) != 0 {
+		// groupID := int64(0)
+		// participantMask := uint64(0)
+		// if res != nil {
+		// 	groupID = res.BarrierGroupID
+		// 	participantMask = res.BarrierParticipants
+		// }
+		// start := time.Now()
+		// fuzzer.Logf(0, "uaf: processResult start barrier_id=%d mask=%#x", groupID, participantMask)
+		// pairsStart := time.Now()
+		pairs := fuzzer.ddrd.Add(res.Ddrd)
+		// fuzzer.Logf(0, "uaf: ddrd.Add done barrier_id=%d pairs=%d duration=%s", groupID, len(pairs), time.Since(pairsStart))
+		if len(pairs) != 0 {
 			fuzzer.statDdrdPairs.Add(len(pairs))
-			fuzzer.Logf(0, "ddrd: discovered %d new UAF pairs (total=%d)", len(pairs), fuzzer.ddrd.Count())
-			if fuzzer.uaf != nil {
-				fuzzer.uaf.handleNewPairs(req, res, pairs)
-			}
+			// total := fuzzer.ddrd.Count()
+			// handleStart := time.Now()
+			// fuzzer.Logf(0, "uaf: handleNewPairs start barrier_id=%d seeds=%d total_pairs=%d", groupID, len(pairs), total)
+			fuzzer.uaf.handleNewPairs(req, res, pairs)
+			// fuzzer.Logf(0, "uaf: handleNewPairs done barrier_id=%d duration=%s", groupID, time.Since(handleStart))
+			// } else if req != nil {
+			// 	fuzzer.Logf(0, "uaf: handleNewPairs skipped barrier_id=%d no-new-pairs mask=%#x", groupID, req.BarrierParticipants)
 		}
-		// fuzzer.Logf(0, "ddrd: total UAF pairs=%d", fuzzer.ddrd.Count())
-		if fuzzer.uaf != nil {
-			fuzzer.uaf.recordExecution(req, res)
-			// fuzzer.uaf.handleCoverage(req, res, triage)
-		}
+		// recordStart := time.Now()
+		fuzzer.uaf.recordExecution(req, res)
+		// fuzzer.Logf(0, "uaf: recordExecution done barrier_id=%d duration=%s", groupID, time.Since(recordStart))
+		// fuzzer.Logf(0, "uaf: processResult done barrier_id=%d total_duration=%s", groupID, time.Since(start))
 		return true
 	}
 

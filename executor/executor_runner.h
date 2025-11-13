@@ -10,6 +10,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <deque>
+#include <functional>
 #include <iomanip>
 #include <memory>
 #include <optional>
@@ -107,14 +108,39 @@ private:
 };
 
 // Proc represents one subprocess that runs tests (re-execed syz-executor with 'exec' argument).
+// Forward declaration
+class Runner;
+
+// Barrier completion notifications were previously passed via a single global
+// struct. We now stage full results per-group/member, so this legacy helper
+// is removed.
+
+// Forward declarations needed before Proc uses staged result types.
+// Full definition placed here so Proc methods can access fields.
+struct StagedBarrierResult {
+	class Proc* proc = nullptr; // forward reference to Proc
+	uint32 status = 0;
+	bool hanged = false;
+	uint64 elapsed = 0;
+	uint32 num_calls = 0;
+	uint64 freshness = 0;
+	uint64 req_id = 0;
+	uint64 barrier_participants = 0;
+	int64_t group_id = 0;
+	int32_t index = 0;
+	int32_t group_size = 0;
+	std::vector<uint8_t> process_output; // captured process stdout/stderr if requested
+};
+
 // The object is persistent and re-starts subprocess when it crashes.
 class Proc
 {
 public:
-	Proc(Connection& conn, const char* bin, ProcIDPool& proc_id_pool, int slot, int total_slots, int& restarting, const bool& corpus_triaged,
+	Proc(Connection& conn, const char* bin, Runner* runner, ProcIDPool& proc_id_pool, int slot, int total_slots, int& restarting, const bool& corpus_triaged,
 	     int max_signal_fd, int cover_filter_fd, ProcOpts opts)
 	    : conn_(conn),
 	      bin_(bin),
+	      runner_(runner),
 	      proc_id_pool_(proc_id_pool),
 	      slot_(slot),
 	      slots_mask_(total_slots >= 64 ? ~0ULL : ((1ull << total_slots) - 1)),
@@ -135,6 +161,11 @@ public:
 	{
 		if (state_ != State::Started && state_ != State::Idle)
 			return false;
+		if (has_pending_result_) {
+			debug("proc slot %d (exec %d): cannot execute request %llu, pending barrier result not flushed\n",
+			      slot_, id_, static_cast<uint64>(msg.id));
+			return false;
+		}
 		if (((~msg.avoid) & slots_mask_) == 0)
 			msg.avoid = 0;
 		if (msg.avoid & (1ull << slot_))
@@ -163,6 +194,7 @@ public:
 	{
 		return state_ == State::Idle && !msg_;
 	}
+	void SetStageBarrierCallback(std::function<void(const StagedBarrierResult&)> cb) { stage_barrier_cb_ = std::move(cb); }
  	bool IsAvailable() const 
 	{ 
 		return state_ == State::Idle || state_ == State::Started; 
@@ -175,6 +207,9 @@ public:
 	bool CanRun(const rpc::ExecRequestRawT& msg) const
 	{
 		if (!IsAvailable())
+			return false;
+		// Do not schedule new work onto a proc with a staged (unsent) barrier result.
+		if (has_pending_result_)
 			return false;
 		if (msg.avoid & (1ull << slot_))
 			return false;
@@ -243,6 +278,7 @@ private:
 
 	Connection& conn_;
 	const char* const bin_;
+	Runner* runner_ = nullptr; // back-pointer used for staging barrier results
 	ProcIDPool& proc_id_pool_;
 	const int slot_;
 	const uint64 slots_mask_;
@@ -271,6 +307,8 @@ private:
 	uint64 exec_start_ = 0;
 	uint64 wait_start_ = 0;
 	uint64 wait_end_ = 0;
+	bool has_pending_result_ = false; // barrier result staged, waiting for flush
+	std::function<void(const StagedBarrierResult&)> stage_barrier_cb_; // late-bound callback set by Runner
 
 	friend std::ostream& operator<<(std::ostream& ss, const Proc& proc)
 	{
@@ -390,6 +428,11 @@ private:
 		resp_pipe_ = resp_pipe[0];
 		stdout_pipe_ = stdout_pipe[0];
 
+		has_pending_result_ = false;
+		resp_mem_->Reset();
+		output_.clear();
+		debug_output_pos_ = 0;
+
 		if (msg_)
 			Handshake();
 	}
@@ -498,24 +541,75 @@ private:
 		uint32 num_calls = 0;
 		if (msg_->type == rpc::RequestType::Program)
 			num_calls = read_input(&prog_data);
+
+		bool is_barrier = msg_->barrier_group_size > 0;
+		if (is_barrier) {
+			// Stage result instead of sending now.
+			StagedBarrierResult staged;
+			staged.proc = this;
+			staged.status = status;
+			staged.hanged = hanged;
+			staged.elapsed = elapsed;
+			staged.num_calls = num_calls;
+			staged.req_id = msg_->id;
+			staged.freshness = freshness_++;
+			staged.barrier_participants = msg_->barrier_participants;
+			staged.group_id = msg_->barrier_group_id;
+			staged.index = msg_->barrier_index;
+			staged.group_size = msg_->barrier_group_size;
+			if (output)
+				staged.process_output = *output; // copy
+			else
+				staged.process_output.clear();
+			// Register into active barrier execution via Runner helper.
+			if (stage_barrier_cb_)
+				stage_barrier_cb_(staged);
+			has_pending_result_ = true;
+			// Do NOT reset resp_mem_ or clear output_ yet; we need them for serialization.
+			msg_.reset(); // release request (we stored needed fields)
+			ChangeState(State::Idle); // mark idle but unavailable via has_pending_result_
+			return; // defer send
+		}
+
+		// Non-barrier: build and send immediately
 		auto data = finish_output(resp_mem_, id_, msg_->id, num_calls, elapsed, freshness_++, status, hanged, output,
 				 msg_->barrier_participants, msg_->barrier_group_id, msg_->barrier_index, msg_->barrier_group_size);
-		if (msg_->barrier_group_size > 0) {
-			debug("proc slot %d (exec %d): barrier finish group=%lld index=%lld size=%lld status=%u hanged=%d\n",
-			      slot_, id_, static_cast<long long>(msg_->barrier_group_id),
-			      static_cast<long long>(msg_->barrier_index),
-			      static_cast<long long>(msg_->barrier_group_size), status, hanged);
-		}
 		conn_.Send(data.data(), data.size());
-
 		resp_mem_->Reset();
 		msg_.reset();
 		output_.clear();
 		debug_output_pos_ = 0;
 		ChangeState(State::Idle);
-#if !SYZ_EXECUTOR_USES_FORK_SERVER
+	#if !SYZ_EXECUTOR_USES_FORK_SERVER
 		if (process_)
 			Restart();
+	#endif
+	}
+
+	public: // reopen public section for flush helper
+	// Flush a previously staged barrier result (public for Runner).
+	void FlushPendingResult(const StagedBarrierResult& staged, const DdrdOutputState* ddrd_output_injection)
+	{
+		if (!has_pending_result_)
+			return;
+#if GOOS_linux
+		if (ddrd_output_injection)
+			ddrd_set_runner_output(ddrd_output_injection);
+		else
+			ddrd_clear_runner_output();
+#endif
+		// Reconstruct output vector pointer (may be empty)
+		const std::vector<uint8_t>* out_ptr = staged.process_output.empty() ? nullptr : &staged.process_output;
+		auto data = finish_output(resp_mem_, id_, staged.req_id, staged.num_calls, staged.elapsed, staged.freshness,
+				staged.status, staged.hanged, out_ptr, staged.barrier_participants,
+				staged.group_id, staged.index, staged.group_size);
+		conn_.Send(data.data(), data.size());
+		resp_mem_->Reset();
+		output_.clear();
+		debug_output_pos_ = 0;
+		has_pending_result_ = false;
+#if GOOS_linux
+		ddrd_clear_runner_output(); // ensure cleared for next non-barrier request
 #endif
 	}
 
@@ -592,9 +686,258 @@ private:
 
 // Runner manages a set of test subprocesses (Proc's), receives new test requests from the manager,
 // and dispatches them to subprocesses.
+
+#if GOOS_linux
+// DDRD types - shared with executor.cc
+#ifndef SYZ_EXECUTOR_DDRD_TYPES_DEFINED
+#define SYZ_EXECUTOR_DDRD_TYPES_DEFINED
+struct DdrdSerializedAccessEntry {
+	uint64_t var_name = 0;
+	uint64_t call_stack_hash = 0;
+	uint64_t access_time = 0;
+	uint32_t sn = 0;
+	uint32_t access_type = 0;
+};
+
+struct DdrdExtendedUafRecord {
+	size_t basic_index = 0;
+	uint32_t use_thread_history_count = 0;
+	uint32_t free_thread_history_count = 0;
+	uint64_t use_target_time = 0;
+	uint64_t free_target_time = 0;
+	double path_distance_use = 0.0;
+	double path_distance_free = 0.0;
+	std::vector<DdrdSerializedAccessEntry> history;
+};
+
+struct DdrdOutputState {
+	std::vector<may_uaf_pair_t> basic_pairs;
+	std::vector<DdrdExtendedUafRecord> extended_pairs;
+	bool has_results = false;
+};
+#endif // SYZ_EXECUTOR_DDRD_TYPES_DEFINED
+
+// DDRD controller that manages race detection state for runner
+class RunnerDdrdController {
+public:
+	RunnerDdrdController()
+	    : initialized_(false), available_(false), warned_unavailable_(false),
+	      extended_requested_(false), active_for_group_(false)
+	{
+	}
+
+	~RunnerDdrdController()
+	{
+		if (initialized_)
+			race_detector_cleanup(&detector_);
+		ukc_enter_monitor_mode();
+	}
+
+	// Prepare DDRD for a barrier group execution
+	void PrepareForGroup(bool collect_uaf, bool collect_extended)
+	{
+		ClearOutput();
+		active_for_group_ = false;
+		extended_requested_ = collect_extended;
+
+		if (!collect_uaf && !collect_extended)
+			return;
+
+		// Lazy init
+		if (!initialized_) {
+			race_detector_init(&detector_);
+			initialized_ = true;
+			available_ = race_detector_is_available(&detector_);
+			if (!available_ && !warned_unavailable_) {
+				debug("ddrd: race detector unavailable on this system\n");
+				warned_unavailable_ = true;
+			}
+		}
+
+		if (!available_) {
+			ukc_enter_monitor_mode();
+			return;
+		}
+
+		active_for_group_ = true;
+
+		// Switch to LOG mode
+		ukc_enter_log_mode();
+		debug("ddrd: clearing trace buffer before barrier execution\n");
+		trace_manager_clear(nullptr);
+
+		// Reset detector state
+		if (extended_requested_)
+			race_detector_enable_history(&detector_);
+		else
+			race_detector_disable_history(&detector_);
+		race_detector_reset(&detector_);
+	}
+
+	// Collect results after all barrier members complete
+	void CollectResults()
+	{
+		if (!active_for_group_)
+			return;
+
+		if (!available_) {
+			ukc_enter_monitor_mode();
+			active_for_group_ = false;
+			return;
+		}
+
+		// Switch back to MONITOR mode
+		ukc_enter_monitor_mode();
+		debug("ddrd: collecting results\n");
+
+		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
+		int count = race_detector_analyze_and_generate_uaf_infos(&detector_, pairs.data(),
+		                                                          (int)kDdrdMaxUafPairs);
+		if (count <= 0) {
+			ClearOutput();
+			active_for_group_ = false;
+			return;
+		}
+
+		output_.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
+		debug("ddrd: detected %d UAF pair(s)\n", count);
+
+		for (int i = 0; i < count; i++) {
+			const may_uaf_pair_t& pair = output_.basic_pairs[i];
+			debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
+			      i,
+			      static_cast<unsigned long long>(pair.free_access_name),
+			      static_cast<unsigned long long>(pair.use_access_name),
+			      pair.free_tid,
+			      pair.use_tid,
+			      pair.free_sn,
+			      pair.use_sn,
+			      static_cast<unsigned long long>(pair.signal),
+			      static_cast<unsigned long long>(pair.time_diff),
+			      pair.lock_type,
+			      pair.use_access_type);
+		}
+
+		// Collect extended info if requested
+		if (extended_requested_) {
+			output_.extended_pairs.clear();
+			output_.extended_pairs.reserve(count);
+			for (int i = 0; i < count; i++) {
+				const may_uaf_pair_t& pair = output_.basic_pairs[i];
+				DdrdExtendedUafRecord ext{};
+				ext.basic_index = (size_t)i;
+				ThreadAccessHistory* use_hist = race_detector_find_thread_history(&detector_, pair.use_tid);
+				ThreadAccessHistory* free_hist = race_detector_find_thread_history(&detector_, pair.free_tid);
+				ext.use_thread_history_count = HistoryCopyCount(use_hist);
+				ext.free_thread_history_count = HistoryCopyCount(free_hist);
+				ext.use_target_time = pair.time_diff;
+				ext.free_target_time = 0;
+				ext.path_distance_use = use_hist && use_hist->access_count > 0
+				    ? (double)(use_hist->access_count - 1) : 0.0;
+				ext.path_distance_free = free_hist && free_hist->access_count > 0
+				    ? (double)(free_hist->access_count - 1) : 0.0;
+				ext.history.reserve(ext.use_thread_history_count + ext.free_thread_history_count);
+				AppendHistory(use_hist, ext.use_thread_history_count, ext.history);
+				AppendHistory(free_hist, ext.free_thread_history_count, ext.history);
+				output_.extended_pairs.push_back(std::move(ext));
+			}
+		} else {
+			output_.extended_pairs.clear();
+		}
+
+		output_.has_results = true;
+		active_for_group_ = false;
+	}
+
+	// Get DDRD output to inject into master's ExecResult
+	const DdrdOutputState& GetOutput() const { return output_; }
+
+	bool HasResults() const { return output_.has_results; }
+
+	void ResetAfterGroup()
+	{
+		ClearOutput();
+		active_for_group_ = false;
+		ukc_enter_monitor_mode();
+	}
+
+private:
+	static constexpr size_t kDdrdMaxUafPairs = 0x200;
+
+	void ClearOutput()
+	{
+		output_.basic_pairs.clear();
+		output_.extended_pairs.clear();
+		output_.has_results = false;
+	}
+
+	static uint32_t HistoryCopyCount(const ThreadAccessHistory* history)
+	{
+		if (!history)
+			return 0;
+		uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
+		                                          : (uint32_t)history->access_count;
+		if (available > MAX_ACCESS_HISTORY_RECORDS)
+			available = MAX_ACCESS_HISTORY_RECORDS;
+		return available;
+	}
+
+	static void AppendHistory(const ThreadAccessHistory* history, uint32_t limit,
+	                          std::vector<DdrdSerializedAccessEntry>& out)
+	{
+		if (!history || limit == 0)
+			return;
+		uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
+		                                          : (uint32_t)history->access_count;
+		uint32_t to_copy = std::min(limit, available);
+		out.reserve(out.size() + to_copy);
+		int start = history->buffer_full ? history->access_index : 0;
+		for (uint32_t i = 0; i < to_copy; i++) {
+			int idx = (start + i) % SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM;
+			const AccessRecord& rec = history->accesses[idx];
+			DdrdSerializedAccessEntry entry;
+			entry.var_name = rec.var_name;
+			entry.call_stack_hash = rec.call_stack_hash;
+			entry.access_time = rec.access_time;
+			entry.sn = rec.sn >= 0 ? (uint32_t)rec.sn : 0;
+			entry.access_type = (uint32_t)(uint8)(rec.access_type);
+			out.push_back(entry);
+		}
+	}
+
+	RaceDetector detector_;
+	bool initialized_;
+	bool available_;
+	bool warned_unavailable_;
+	bool extended_requested_;
+	bool active_for_group_;
+	DdrdOutputState output_;
+};
+#endif // GOOS_linux
+
 class Runner
 {
 public:
+	friend class Proc; // allow Proc to access Runner internals for barrier staging
+	// Helper invoked by Proc to stage a completed barrier member.
+	void StageBarrierResult(const StagedBarrierResult& staged)
+	{
+		auto it = active_barriers_.find(staged.group_id);
+		if (it == active_barriers_.end()) {
+			debug("runner: missing active barrier group=%lld for staging (proc slot=%d)\n",
+			      (long long)staged.group_id, staged.proc ? staged.proc->Id() : -1);
+			return;
+		}
+		ActiveBarrierExecution& active = it->second;
+		if (active.pending_results.empty())
+			active.pending_results.resize(active.group_size);
+		if (staged.index >= 0 && staged.index < active.group_size) {
+			active.pending_results[staged.index] = staged;
+			active.completed++; // increment completion count here
+			debug("runner: staged barrier member group=%lld index=%d (%d/%d)\n",
+			      (long long)active.group_id, staged.index, active.completed, active.group_size);
+		}
+	}
 	Runner(Connection& conn, int vm_index, const char* bin)
 	    : conn_(conn),
 	      vm_index_(vm_index)
@@ -603,21 +946,38 @@ public:
 		proc_id_pool_.emplace(num_procs);
 		int max_signal_fd = max_signal_ ? max_signal_->FD() : -1;
 		int cover_filter_fd = cover_filter_ ? cover_filter_->FD() : -1;
-		for (int i = 0; i < num_procs; i++)
-			procs_.emplace_back(new Proc(conn, bin, *proc_id_pool_, i, num_procs, restarting_, corpus_triaged_,
-					     max_signal_fd, cover_filter_fd, proc_opts_));
+		for (int i = 0; i < num_procs; i++) {
+			procs_.emplace_back(new Proc(conn, bin, this, *proc_id_pool_, i, num_procs, restarting_, corpus_triaged_,
+				     max_signal_fd, cover_filter_fd, proc_opts_));
+		}
+		// Install staging callback for each proc now that Runner methods defined.
+		for (auto& p : procs_) {
+			p->SetStageBarrierCallback([this](const StagedBarrierResult& r){ StageBarrierResult(r); });
+		}
 
 		for (;;)
 			Loop();
 	}
 
 private:
+// Full definition now that Proc is defined.
+
 	struct BarrierGroupState {
 		uint64 participants_mask = 0;
 		std::vector<int> proc_slots;
 		std::vector<std::optional<rpc::ExecRequestRawT>> members;
 		size_t ready = 0;
 		bool queued = false;
+		bool ddrd_active = false;
+		// Legacy placeholder; staging now lives in ActiveBarrierExecution.
+	};
+
+	struct ActiveBarrierExecution {
+		int64_t group_id = 0;
+		int32_t group_size = 0;
+		int32_t completed = 0; // number of members that have executed (staged)
+		bool ddrd_active = false;
+		std::vector<StagedBarrierResult> pending_results; // index -> staged result
 	};
 
 	Connection& conn_;
@@ -630,10 +990,14 @@ private:
 	std::unordered_map<int64_t, BarrierGroupState> barrier_groups_;
 	std::deque<int64_t> pending_barriers_;
 	bool barrier_mode_enabled_ = false;
+	std::unordered_map<int64_t, ActiveBarrierExecution> active_barriers_;
 	std::vector<std::string> leak_frames_;
 	int restarting_ = 0;
 	bool corpus_triaged_ = false;
 	ProcOpts proc_opts_{};
+#if GOOS_linux
+	RunnerDdrdController ddrd_controller_;
+#endif
 
 	friend std::ostream& operator<<(std::ostream& ss, const Runner& runner)
 	{
@@ -681,6 +1045,7 @@ private:
 		uint64 reserved_mask = 0;
 		if (barrier_mode_enabled_) {
 			DispatchBarrierGroups();
+			CheckBarrierCompletions();
 			reserved_mask = PendingBarrierMask();
 		}
 		for (auto& proc : procs_) {
@@ -889,6 +1254,63 @@ private:
 		}
 	}
 
+	void CheckBarrierCompletions()
+	{
+		// Iterate over active barriers and flush any fully staged groups.
+		std::vector<int64_t> done_groups;
+		for (auto& [group_id, active] : active_barriers_) {
+			if (active.completed < active.group_size)
+				continue; // not all members finished yet
+			bool all_staged = true;
+			if (active.pending_results.size() != (size_t)active.group_size)
+				all_staged = false;
+			else {
+				for (int i = 0; i < active.group_size; i++) {
+					if (!active.pending_results[i].proc) {
+						all_staged = false;
+						break;
+					}
+				}
+			}
+			if (!all_staged)
+				continue;
+			debug("runner: barrier group=%lld all %d members staged; flushing\n",
+			      (long long)group_id, active.group_size);
+#if GOOS_linux
+			const DdrdOutputState* injected = nullptr;
+			if (active.ddrd_active) {
+				ddrd_controller_.CollectResults();
+				if (ddrd_controller_.HasResults()) {
+					debug("runner: DDRD collected for group=%lld (UAF pairs=%zu)\n",
+					      (long long)group_id, ddrd_controller_.GetOutput().basic_pairs.size());
+					injected = &ddrd_controller_.GetOutput();
+				}
+			}
+#endif
+			// Flush each staged member; inject DDRD only into master (index 0).
+			for (int i = 0; i < active.group_size; i++) {
+				StagedBarrierResult& staged = active.pending_results[i];
+				if (!staged.proc)
+					continue;
+#if GOOS_linux
+				const DdrdOutputState* use_injection = (i == 0) ? injected : nullptr;
+#else
+				const void* use_injection = nullptr;
+#endif
+				staged.proc->FlushPendingResult(staged, use_injection);
+			}
+#if GOOS_linux
+			if (active.ddrd_active)
+				ddrd_controller_.ResetAfterGroup();
+#endif
+			done_groups.push_back(group_id);
+		}
+		for (auto gid : done_groups) {
+			active_barriers_.erase(gid);
+			debug("runner: barrier group=%lld cleanup complete\n", (long long)gid);
+		}
+	}
+
 	void DispatchBarrierGroups()
 	{
 		while (!pending_barriers_.empty()) {
@@ -967,9 +1389,40 @@ private:
 					return false;
 			}
 		}
+
+#if GOOS_linux
+		// Check if any member requests DDRD and prepare
+		bool collect_uaf = false;
+		bool collect_extended = false;
+		for (const auto& member : group.members) {
+			if (member.has_value() && member->exec_opts) {
+				auto flags = member->exec_opts->exec_flags();
+				if (IsSet(flags, rpc::ExecFlag::CollectDdrdUaf))
+					collect_uaf = true;
+				if (IsSet(flags, rpc::ExecFlag::CollectDdrdExtended))
+					collect_extended = true;
+			}
+		}
+		if (collect_uaf || collect_extended) {
+			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended);
+			group.ddrd_active = true;
+		} else {
+			group.ddrd_active = false;
+		}
+#endif
+
 		// debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",
 		//       static_cast<long long>(group_id), group.members.size(),
 		//       static_cast<unsigned long long>(group.participants_mask));
+
+		// Record active barrier execution before dispatching
+		ActiveBarrierExecution active;
+		active.group_id = group_id;
+		active.group_size = static_cast<int32_t>(selected.size());
+		active.completed = 0;
+		active.ddrd_active = group.ddrd_active;
+		active_barriers_[group_id] = active;
+
 		for (size_t i = 0; i < selected.size(); i++) {
 			if (!selected[i])
 				return false;
@@ -983,9 +1436,6 @@ private:
 				        (long long)group_id, i, selected[i]->Id());
 			group.members[i].reset();
 		}
-		ukc_enter_log_mode();
-		// debug("ddrd: clearing trace buffer before barrier execution\n");
-		trace_manager_clear(nullptr);
 
 		return true;
 	}

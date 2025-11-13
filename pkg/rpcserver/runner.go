@@ -78,19 +78,6 @@ type barrierGroup struct {
 	completed    int
 }
 
-func requestTypeName(t flatrpc.RequestType) string {
-	switch t {
-	case flatrpc.RequestTypeProgram:
-		return "program"
-	case flatrpc.RequestTypeBinary:
-		return "binary"
-	case flatrpc.RequestTypeGlob:
-		return "glob"
-	default:
-		return fmt.Sprintf("unknown(%d)", t)
-	}
-}
-
 var errRequestSerialization = errors.New("request serialization failed")
 
 type serializationError struct {
@@ -399,6 +386,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	if ctx.barrier != nil {
 		barrierID = ctx.barrier.id
 	}
+	// log.Logf(0, "runner %d: result processing start req=%d proc=%d barrier=%t barrier_id=%d", runner.id, msg.Id, msg.Proc, isBarrier, barrierID)
 	if analysis != nil {
 		log.Logf(0, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
 	} else if runner.debug {
@@ -431,12 +419,14 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 			BarrierGroupID:      msg.BarrierGroupId,
 			BarrierGroupSize:    int(msg.BarrierGroupSize),
 		})
+		// log.Logf(0, "runner %d: result processing done req=%d proc=%d barrier=%t barrier_id=%d duration=%s", runner.id, msg.Id, msg.Proc, isBarrier, barrierID, time.Since(start))
 		return nil
 	}
 	groupID := msg.BarrierGroupId
 	if groupID == 0 {
 		groupID = ctx.barrier.id
 	}
+	barrierID = groupID
 	groupSize := int(msg.BarrierGroupSize)
 	if groupSize == 0 {
 		groupSize = len(ctx.barrier.participants)
@@ -462,6 +452,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	if ctx.barrier.completed == len(ctx.barrier.contexts) {
 		runner.finishBarrierGroup(ctx.barrier)
 	}
+	// log.Logf(0, "runner %d: result processing done req=%d proc=%d barrier=%t barrier_id=%d duration=%s", runner.id, msg.Id, msg.Proc, isBarrier, barrierID, time.Since(start))
 	return nil
 }
 
@@ -720,6 +711,7 @@ func (runner *Runner) prepareProgramResult(ctx *requestContext, msg *flatrpc.Exe
 }
 
 func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
+	// log.Logf(0, "runner %d: finishBarrierGroup start id=%d members=%d", runner.id, group.id, len(group.results))
 	delete(runner.barrierGroups, group.id)
 	members := make([]*queue.BarrierMemberResult, len(group.results))
 	copy(members, group.results)
@@ -761,7 +753,10 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 		result.Ddrd = primary.Ddrd
 		result.Output = slices.Clone(primary.Output)
 	}
+	// log.Logf(0, "runner %d: finishBarrierGroup dispatching result id=%d", runner.id, group.id)
 	group.req.Done(result)
+	// log.Logf(0, "runner %d: finishBarrierGroup result dispatched id=%d", runner.id, group.id)
+	// log.Logf(0, "runner %d: finishBarrierGroup done id=%d duration=%s", runner.id, group.id, time.Since(start))
 }
 
 func summarizeDdrdResults(members []*queue.BarrierMemberResult) (int, int) {

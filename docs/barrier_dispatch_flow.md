@@ -78,3 +78,53 @@ When `TryDispatchBarrier()` returns `true`, every member of the barrier group wa
 5. **Completion handling** — After the program finishes, `Proc::HandleCompletion()` packages the results (including barrier metadata) and sends them to the manager. If a member crashed or hung, the usual restart/error paths trigger; the other members are unaffected except for whatever effect the barrier syscall itself imposes inside the executor runtime.
 
 The key point is that once a barrier group is dispatched, each member travels through the standard executor pipeline. The barrier-specific fields survive end-to-end (request → executor → response) so that both the executor runtime and the manager can correlate the runs and enforce synchronous behaviour.
+
+## 8. DDRD Integration with Barrier Execution
+
+When DDRD (race/UAF detection) is enabled for a barrier group, the runner coordinates collection to ensure all members execute under a single unified LOG phase:
+
+1. **Pre-Dispatch DDRD Setup** — Before calling `Proc::Execute()` on any member, `TryDispatchBarrier()`:
+   - Checks if any member requests `CollectDdrdUaf` or `CollectDdrdExtended` flags.
+   - If DDRD is needed, calls `RunnerDdrdController::PrepareForGroup()`:
+     * Lazy-initializes the `RaceDetector` if not already done.
+     * Opens `/dev/kccwf_ctl_dev` and switches to LOG mode via `ukc_enter_log_mode()`.
+     * Clears the ftrace buffer with `trace_manager_clear()`.
+     * Enables or disables history collection based on the extended flag.
+     * Resets detector state to prepare for the new barrier group.
+   - Marks `BarrierGroupState::ddrd_active = true` and records the execution in `active_barriers_`.
+
+2. **Executor-Side Early Exit** — During barrier member execution:
+   - Each executor process calls `ddrd_prepare_for_request()` as usual.
+   - For barrier requests (`flag_barrier == true`), this function **returns early** without initializing any DDRD state, since all management happens at the runner level.
+   - The executor proceeds with normal program execution; trace data is collected by the kernel module in LOG mode.
+
+3. **Post-Completion Collection** — After all barrier members finish:
+   - `Runner::CheckBarrierCompletions()` (called from the main loop) detects group completion.
+   - If `ddrd_active` is true, calls `RunnerDdrdController::CollectResults()`:
+     * Switches UKC device back to MONITOR mode.
+     * Analyzes trace data via `race_detector_analyze_and_generate_uaf_infos()`.
+     * Materializes extended thread histories if requested.
+     * Stores results in the controller's internal `DdrdOutputState`.
+
+4. **Result Injection** — For each completed barrier member:
+   - **Master member** (barrier_index == 0):
+     * Runner sets `g_ddrd_runner_output` to point to the controller's output.
+     * `Proc::HandleCompletion()` calls `finish_output()`, which reads the runner-injected DDRD data via `ddrd_build_output()`.
+     * Sends `ExecResult` containing full DDRD payload (UAF pairs + optional extended history) to the manager.
+   - **Other members**:
+     * Runner clears `g_ddrd_runner_output` to nullptr.
+     * `finish_output()` returns empty DDRD payload.
+     * Sends `ExecResult` without DDRD data.
+
+5. **Cleanup** — After all results are sent:
+   - Calls `RunnerDdrdController::ResetAfterGroup()`:
+     * Clears internal output state.
+     * Ensures UKC device is in MONITOR mode.
+     * Prepares for the next barrier group.
+   - Removes the active barrier record from `active_barriers_`.
+
+This design ensures:
+- All barrier members execute under a single LOG phase managed by the runner.
+- DDRD analysis happens once per group, not per member.
+- Only the master member's response includes DDRD results, avoiding data duplication.
+- Executor-side DDRD code remains unchanged for non-barrier requests.
