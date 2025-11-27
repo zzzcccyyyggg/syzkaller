@@ -37,7 +37,7 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 	<tbody>
 	{{range $c := $.Crashes}}
 	<tr>
-		<td class="title"><a href="/crash?id={{$c.ID}}">{{$c.Title}}</a></td>
+		<td class="title"><a href="/crash?id={{$c.ID}}">{{$c.DisplayTitle}}</a></td>
 		<td class="rank {{if not $c.Active}}inactive{{end}}">
 			{{if $c.RankTooltip}}
 				<b>{{$c.Rank}}</b>

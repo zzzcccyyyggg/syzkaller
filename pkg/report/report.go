@@ -47,6 +47,8 @@ type Report struct {
 	AltTitles []string
 	// Bug type (e.g. hang, memory leak, etc).
 	Type crash.Type
+	// CustomDataRace contains structured data extracted from custom DATARACE logs.
+	CustomDataRace *CustomDataRaceInfo
 	// The indicative function name.
 	Frame string
 	// Report contains whole oops text.
@@ -81,6 +83,21 @@ type Report struct {
 type ExecutorInfo struct {
 	ProcID int // ID of the syz-executor proc mentioned in the crash report.
 	ExecID int // The program the syz-executor was executing.
+}
+
+// CustomDataRaceInfo stores metadata extracted from custom DATARACE reports.
+type CustomDataRaceInfo struct {
+	Entries    []*CustomDataRaceEntry
+	Watchpoint string
+}
+
+// CustomDataRaceEntry represents a single memory access logged by the custom DATARACE instrumentation.
+type CustomDataRaceEntry struct {
+	VarName   string
+	BlockLine string
+	IsWrite   string
+	Primary   bool
+	Stack     []string
 }
 
 func (rep *Report) String() string {
@@ -216,6 +233,10 @@ func (reporter *Reporter) ParseFrom(output []byte, minReportPos int) *Report {
 	// This generally should not happen.
 	// But openbsd does some hacks with /r/n which may lead to off-by-one EndPos.
 	rep.EndPos = max(rep.EndPos, rep.SkipPos)
+	rep.CustomDataRace = ParseCustomDataRace(rep.Report)
+	if newTitle := CustomDataRaceBugTitle(rep.CustomDataRace); newTitle != "" {
+		rep.Title = newTitle
+	}
 	return rep
 }
 

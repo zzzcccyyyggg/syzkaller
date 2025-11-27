@@ -64,7 +64,7 @@ func (ctx *gvisor) shortenReport(report []byte) []byte {
 	if end == -1 {
 		return report
 	}
-	if bytes.Contains(report, []byte("WARNING: DATA RACE")) {
+	if bytes.Contains(report, []byte("WARNING: ")) {
 		// For data races extract both stacks.
 		end2 := bytes.Index(report[pos+end+2:], []byte{'\n', '\n'})
 		if end2 != -1 {

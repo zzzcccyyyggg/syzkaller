@@ -415,6 +415,66 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
     return basic_count;
 }
 
+// 为了减少改动 先将uaf模型暂用到race上
+int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
+   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs)
+{
+    if (!detector || !race_detector_is_available(detector) ||
+        !uaf_buffer || max_uaf_pairs <= 0) {
+        debug("Invalid parameters for combined race analysis\n");
+        return 0;
+    }
+
+    // 1. 先从 trace 里解析出 AccessRecord，填充 detector->context
+    int parsed_count = race_detector_parse_trace_buffer(detector,
+        DDRD_MAX_RECORDS, DDRD_MAX_RECORDS / 16);
+    if (parsed_count <= 0) {
+        debug("Failed to parse trace buffer for combined race analysis\n");
+        return 0;
+    }
+
+    debug("Successfully parsed %d access records for combined race analysis\n",
+        parsed_count);
+
+    // 2. 调用底层的 data race 分析逻辑，拿到 RacePair 列表
+    int max_internal_pairs = DDRD_MAX_RECORDS;
+    RacePair* race_pairs = (RacePair*)malloc(sizeof(RacePair) * max_internal_pairs);
+    if (!race_pairs)
+        return 0;
+
+    int race_pair_count = access_context_analyze_race_pairs(
+        &detector->context, race_pairs, max_internal_pairs);
+
+    debug("Successfully parsed %d race pairs\n", race_pair_count);
+
+    // 3. 把 RacePair 压缩/映射为对外的 may_race_pair_t
+    int basic_count = 0;
+    for (basic_count = 0;
+         basic_count < race_pair_count && basic_count < max_uaf_pairs;
+         basic_count++) {
+        RacePair* race_pair = &race_pairs[basic_count];
+        uaf_buffer[basic_count].use_access_name  = race_pair->first.var_name;
+        uaf_buffer[basic_count].free_access_name  = race_pair->second.var_name;
+        uaf_buffer[basic_count].use_access_name   = race_pair->first.call_stack_hash;
+        uaf_buffer[basic_count].free_access_name   = race_pair->second.call_stack_hash;
+        uaf_buffer[basic_count].use_sn           = race_pair->first.sn;
+        uaf_buffer[basic_count].free_sn          = race_pair->second.sn;
+        uaf_buffer[basic_count].lock_type     = race_pair->lock_status;
+        uaf_buffer[basic_count].use_access_type  = race_pair->first.access_type;
+        uaf_buffer[basic_count].time_diff     = race_pair->access_time_diff;
+        uaf_buffer[basic_count].signal = hash_uaf_signal(
+            (char*)&race_pair->first.var_name,
+            (char*)&race_pair->first.call_stack_hash,
+            (char*)&race_pair->second.var_name,
+            (char*)&race_pair->second.call_stack_hash);
+    }
+
+    free(race_pairs);
+
+    return basic_count;
+}
+
+
 int race_detector_generate_extended_race_info(RaceDetector* detector, may_race_pair_t* race_pairs, int race_count,
     extended_race_pair_t* extended_pairs)
 {

@@ -429,14 +429,14 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		if _, exists := u.entries[key]; exists {
 			continue
 		}
-		u.fuzzer.Logf(0, "uaf: restoring pair id=%016x free_access=0x%016x use_access=0x%016x free_sn=%d use_sn=%d lock_type=%d access_type=%d",
-			id,
-			entry.PairBasicInfo.FreeAccessName,
-			entry.PairBasicInfo.UseAccessName,
-			entry.PairBasicInfo.FreeSN,
-			entry.PairBasicInfo.UseSN,
-			entry.PairBasicInfo.LockType,
-			entry.PairBasicInfo.UseAccessType)
+		// u.fuzzer.Logf(0, "uaf: restoring pair id=%016x free_access=0x%016x use_access=0x%016x free_sn=%d use_sn=%d lock_type=%d access_type=%d",
+		// 	id,
+		// 	entry.PairBasicInfo.FreeAccessName,
+		// 	entry.PairBasicInfo.UseAccessName,
+		// 	entry.PairBasicInfo.FreeSN,
+		// 	entry.PairBasicInfo.UseSN,
+		// 	entry.PairBasicInfo.LockType,
+		// 	entry.PairBasicInfo.UseAccessType)
 		clone := entry.clone()
 		seed := &barrierSeed{
 			kind:       clone.Kind,

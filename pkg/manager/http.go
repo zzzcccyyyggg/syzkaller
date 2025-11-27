@@ -351,10 +351,15 @@ func makeUICrashType(info *BugInfo, startTime time.Time, repros map[string]bool)
 		crashes = append(crashes, UICrash{
 			CrashInfo: *crash,
 			Active:    crash.Time.After(startTime),
+			DataRace:  crash.DataRace,
 		})
 	}
 	triaged := reproStatus(info.HasRepro, info.HasCRepro, repros[info.Title],
 		info.ReproAttempts >= MaxReproAttempts)
+	displayTitle := info.DisplayTitle
+	if displayTitle == "" {
+		displayTitle = info.Title
+	}
 	return UICrashType{
 		BugInfo:     *info,
 		RankTooltip: higherRankTooltip(info.Title, info.TailTitles),
@@ -398,8 +403,12 @@ func (serv *HTTPServer) httpCrash(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, "failed to read crash info", http.StatusInternalServerError)
 		return
 	}
+	title := info.DisplayTitle
+	if title == "" {
+		title = info.Title
+	}
 	data := UICrashPage{
-		UIPageHeader: serv.pageHeader(r, info.Title),
+		UIPageHeader: serv.pageHeader(r, title),
 		UICrashType:  makeUICrashType(info, serv.StartTime, nil),
 	}
 	executeTemplate(w, crashTemplate, data)
@@ -1055,7 +1064,8 @@ type UICrashType struct {
 
 type UICrash struct {
 	CrashInfo
-	Active bool
+	Active   bool
+	DataRace *report.CustomDataRaceInfo
 }
 
 type UIDiffBug struct {

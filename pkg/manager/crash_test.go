@@ -113,3 +113,31 @@ func TestCrashRepro(t *testing.T) {
 	assert.Equal(t, []byte("c prog text"), report.CProg)
 	assert.Equal(t, []byte("Some report"), report.Report)
 }
+
+func TestBugInfoDisplayTitleForDataRace(t *testing.T) {
+	crashStore := &CrashStore{
+		BaseDir:      t.TempDir(),
+		MaxCrashLogs: 3,
+	}
+	const (
+		title      = "DATARACE 1 vs 2"
+		reportBody = `============ DATARACE ============
+VarName 1, BlockLineNumber 100, IrLineNumber 10, is write 1
+Function: primary_fn
+============OTHER_INFO============
+VarName 2, BlockLineNumber 200, IrLineNumber 20, watchpoint index 7
+Function: secondary_fn
+=================END`
+	)
+	_, err := crashStore.SaveCrash(&Crash{Report: &report.Report{
+		Title:  title,
+		Output: []byte("log"),
+		Report: []byte(reportBody),
+	}})
+	assert.NoError(t, err)
+
+	info, err := crashStore.BugInfo(crashHash(title), false)
+	assert.NoError(t, err)
+	assert.Equal(t, title, info.Title)
+	assert.Equal(t, "DATARACE 1 vs 2", info.DisplayTitle)
+}

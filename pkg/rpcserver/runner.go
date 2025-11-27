@@ -419,7 +419,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	// log.Logf(0, "runner %d: result processing start req=%d proc=%d barrier=%t barrier_id=%d", runner.id, msg.Id, msg.Proc, isBarrier, barrierID)
 	if analysis != nil {
-		log.Logf(0, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
+		// log.Logf(0, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
 	} else if runner.debug {
 		log.Logf(1, "ddrd: no report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID)
 	}

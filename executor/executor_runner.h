@@ -7,6 +7,8 @@
 #include <sys/resource.h>
 #include <unistd.h>
 
+#include "ddrd/trace_manager.h"
+#include "ukc.h"
 #include <algorithm>
 #include <cstdint>
 #include <deque>
@@ -14,13 +16,11 @@
 #include <iomanip>
 #include <memory>
 #include <optional>
-#include <unordered_map>
 #include <sstream>
 #include <string>
+#include <unordered_map>
 #include <utility>
 #include <vector>
-#include "ukc.h"
-#include "ddrd/trace_manager.h"
 
 #include "barrier_limits.h"
 inline std::ostream& operator<<(std::ostream& ss, const rpc::ExecRequestRawT& req)
@@ -201,8 +201,14 @@ public:
 	{
 		return state_ == State::Idle && !msg_;
 	}
-	void SetStageBarrierCallback(std::function<void(const StagedBarrierResult&)> cb) { stage_barrier_cb_ = std::move(cb); }
-	void SetBarrierHandshakeCallback(std::function<void(Proc*, int64_t, int)> cb) { barrier_handshake_cb_ = std::move(cb); }
+	void SetStageBarrierCallback(std::function<void(const StagedBarrierResult&)> cb)
+	{
+		stage_barrier_cb_ = std::move(cb);
+	}
+	void SetBarrierHandshakeCallback(std::function<void(Proc*, int64_t, int)> cb)
+	{
+		barrier_handshake_cb_ = std::move(cb);
+	}
 	void BeginBarrierExecution()
 	{
 		if (!waiting_barrier_release_ || state_ != State::Idle || !msg_)
@@ -210,9 +216,9 @@ public:
 		waiting_barrier_release_ = false;
 		Execute();
 	}
- 	bool IsAvailable() const 
-	{ 
-		return state_ == State::Idle || state_ == State::Started; 
+	bool IsAvailable() const
+	{
+		return state_ == State::Idle || state_ == State::Started;
 	}
 	int ExecId() const
 	{
@@ -459,7 +465,7 @@ private:
 		if (state_ != State::Started || !msg_)
 			fail("wrong handshake state");
 		debug("proc slot %d (exec %d): handshaking to execute request %llu\n",
-			  slot_, id_, static_cast<uint64>(msg_->id));
+		      slot_, id_, static_cast<uint64>(msg_->id));
 		ChangeState(State::Handshaking);
 		exec_start_ = current_time_ms();
 		req_type_ = msg_->type;
@@ -603,20 +609,20 @@ private:
 
 		// Non-barrier: build and send immediately
 		auto data = finish_output(resp_mem_, id_, msg_->id, num_calls, elapsed, freshness_++, status, hanged, output,
-				 msg_->barrier_participants, msg_->barrier_group_id, msg_->barrier_index, msg_->barrier_group_size);
+					  msg_->barrier_participants, msg_->barrier_group_id, msg_->barrier_index, msg_->barrier_group_size);
 		conn_.Send(data.data(), data.size());
 		resp_mem_->Reset();
 		msg_.reset();
 		output_.clear();
 		debug_output_pos_ = 0;
 		ChangeState(State::Idle);
-	#if !SYZ_EXECUTOR_USES_FORK_SERVER
+#if !SYZ_EXECUTOR_USES_FORK_SERVER
 		if (process_)
 			Restart();
-	#endif
+#endif
 	}
 
-	public: // reopen public section for flush helper
+public: // reopen public section for flush helper
 	// Flush a previously staged barrier result (public for Runner).
 	void FlushPendingResult(const StagedBarrierResult& staged, const DdrdOutputState* ddrd_output_injection)
 	{
@@ -631,8 +637,8 @@ private:
 		// Reconstruct output vector pointer (may be empty)
 		const std::vector<uint8_t>* out_ptr = staged.process_output.empty() ? nullptr : &staged.process_output;
 		auto data = finish_output(resp_mem_, id_, staged.req_id, staged.num_calls, staged.elapsed, staged.freshness,
-				staged.status, staged.hanged, out_ptr, staged.barrier_participants,
-				staged.group_id, staged.index, staged.group_size);
+					  staged.status, staged.hanged, out_ptr, staged.barrier_participants,
+					  staged.group_id, staged.index, staged.group_size);
 		conn_.Send(data.data(), data.size());
 		resp_mem_->Reset();
 		output_.clear();
@@ -753,11 +759,15 @@ struct DdrdOutputState {
 #endif // SYZ_EXECUTOR_DDRD_TYPES_DEFINED
 
 // DDRD controller that manages race detection state for runner
-class RunnerDdrdController {
+class RunnerDdrdController
+{
 public:
 	RunnerDdrdController()
-	    : initialized_(false), available_(false), warned_unavailable_(false),
-	      extended_requested_(false), active_for_group_(false)
+	    : initialized_(false),
+	      available_(false),
+	      warned_unavailable_(false),
+	      extended_requested_(false),
+	      active_for_group_(false)
 	{
 	}
 
@@ -829,6 +839,7 @@ public:
 		// Switch to LOG mode
 		if (collect_uaf || collect_extended)
 			ukc_enter_log_mode();
+			// ukc_enter_monitor_mode();
 		debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
 
@@ -857,8 +868,11 @@ public:
 		debug("ddrd: collecting results\n");
 
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
-		int count = race_detector_analyze_and_generate_uaf_infos(&detector_, pairs.data(),
-		                                                          (int)kDdrdMaxUafPairs);
+		// int count = race_detector_analyze_and_generate_uaf_infos(&detector_, pairs.data(),
+		//                                                           (int)kDdrdMaxUafPairs);
+		// 为避免更改过多 race 也先使用uaf pair的模型
+		int count = race_detector_analyze_and_generate_race_infos(&detector_, pairs.data(),
+									 (int)kDdrdMaxUafPairs);
 		if (count <= 0) {
 			ClearOutput();
 			active_for_group_ = false;
@@ -901,9 +915,11 @@ public:
 				ext.use_target_time = pair.time_diff;
 				ext.free_target_time = 0;
 				ext.path_distance_use = use_hist && use_hist->access_count > 0
-				    ? (double)(use_hist->access_count - 1) : 0.0;
+							    ? (double)(use_hist->access_count - 1)
+							    : 0.0;
 				ext.path_distance_free = free_hist && free_hist->access_count > 0
-				    ? (double)(free_hist->access_count - 1) : 0.0;
+							     ? (double)(free_hist->access_count - 1)
+							     : 0.0;
 				ext.history.reserve(ext.use_thread_history_count + ext.free_thread_history_count);
 				AppendHistory(use_hist, ext.use_thread_history_count, ext.history);
 				AppendHistory(free_hist, ext.free_thread_history_count, ext.history);
@@ -918,9 +934,15 @@ public:
 	}
 
 	// Get DDRD output to inject into master's ExecResult
-	const DdrdOutputState& GetOutput() const { return output_; }
+	const DdrdOutputState& GetOutput() const
+	{
+		return output_;
+	}
 
-	bool HasResults() const { return output_.has_results; }
+	bool HasResults() const
+	{
+		return output_.has_results;
+	}
 
 	void ResetAfterGroup()
 	{
@@ -944,19 +966,19 @@ private:
 		if (!history)
 			return 0;
 		uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
-		                                          : (uint32_t)history->access_count;
+							  : (uint32_t)history->access_count;
 		if (available > MAX_ACCESS_HISTORY_RECORDS)
 			available = MAX_ACCESS_HISTORY_RECORDS;
 		return available;
 	}
 
 	static void AppendHistory(const ThreadAccessHistory* history, uint32_t limit,
-	                          std::vector<DdrdSerializedAccessEntry>& out)
+				  std::vector<DdrdSerializedAccessEntry>& out)
 	{
 		if (!history || limit == 0)
 			return;
 		uint32_t available = history->buffer_full ? (uint32_t)SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM
-		                                          : (uint32_t)history->access_count;
+							  : (uint32_t)history->access_count;
 		uint32_t to_copy = std::min(limit, available);
 		out.reserve(out.size() + to_copy);
 		int start = history->buffer_full ? history->access_index : 0;
@@ -1047,12 +1069,12 @@ public:
 		int cover_filter_fd = cover_filter_ ? cover_filter_->FD() : -1;
 		for (int i = 0; i < num_procs; i++) {
 			procs_.emplace_back(new Proc(conn, bin, this, *proc_id_pool_, i, num_procs, restarting_, corpus_triaged_,
-				     max_signal_fd, cover_filter_fd, proc_opts_));
+						     max_signal_fd, cover_filter_fd, proc_opts_));
 		}
 		// Install staging callback for each proc now that Runner methods defined.
 		for (auto& p : procs_) {
-			p->SetStageBarrierCallback([this](const StagedBarrierResult& r){ StageBarrierResult(r); });
-			p->SetBarrierHandshakeCallback([this](Proc* proc, int64_t group_id, int index){ BarrierMemberReady(proc, group_id, index); });
+			p->SetStageBarrierCallback([this](const StagedBarrierResult& r) { StageBarrierResult(r); });
+			p->SetBarrierHandshakeCallback([this](Proc* proc, int64_t group_id, int index) { BarrierMemberReady(proc, group_id, index); });
 		}
 
 		for (;;)
@@ -1060,7 +1082,7 @@ public:
 	}
 
 private:
-// Full definition now that Proc is defined.
+	// Full definition now that Proc is defined.
 
 	struct BarrierGroupState {
 		uint64 participants_mask = 0;
@@ -1451,11 +1473,11 @@ private:
 		// debug("TryDispatchBarrier start\n");
 		std::vector<Proc*> selected(group.members.size(), nullptr);
 		if (!group.proc_slots.empty()) {
-			if (group.proc_slots.size() != group.members.size()){
+			if (group.proc_slots.size() != group.members.size()) {
 				// debug("barrier %lld mismatch: slots=%zu members=%zu mask=0x%llx\n",
-              	// (long long)group_id, group.proc_slots.size(), group.members.size(),
-              	// (unsigned long long)group.participants_mask);
-			  	return false;
+				// (long long)group_id, group.proc_slots.size(), group.members.size(),
+				// (unsigned long long)group.participants_mask);
+				return false;
 			}
 
 			for (size_t i = 0; i < group.members.size(); i++) {
@@ -1545,7 +1567,7 @@ private:
 			//       static_cast<long long>(member.barrier_group_size));
 			if (!selected[i]->Execute(*group.members[i]))
 				failmsg("failed to dispatch barrier member", "group=%lld index=%zu proc=%d",
-				        (long long)group_id, i, selected[i]->Id());
+					(long long)group_id, i, selected[i]->Id());
 			group.members[i].reset();
 		}
 

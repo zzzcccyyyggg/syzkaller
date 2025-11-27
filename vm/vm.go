@@ -264,6 +264,9 @@ type RunOptions struct {
 	earlyFinishCb   func()
 	injectExecuting <-chan bool
 	tickerPeriod    time.Duration
+	// dataRaceSignatures keeps track of already-known data race reports that
+	// should not cause VM restarts.
+	dataRaceSignatures map[string]struct{}
 }
 
 func WithExitCondition(exitCondition ExitCondition) func(*RunOptions) {
@@ -290,6 +293,22 @@ func WithEarlyFinishCb(cb func()) func(*RunOptions) {
 	}
 }
 
+// WithDuplicateDataRaceFilter configures the monitor to ignore crashes that
+// match the provided signatures. Pass a nil or empty map to keep the default
+// behavior (i.e. no skipping).
+func WithDuplicateDataRaceFilter(signatures map[string]struct{}) func(*RunOptions) {
+	return func(opts *RunOptions) {
+		if len(signatures) == 0 {
+			return
+		}
+		copy := make(map[string]struct{}, len(signatures))
+		for key := range signatures {
+			copy[key] = struct{}{}
+		}
+		opts.dataRaceSignatures = copy
+	}
+}
+
 // Run runs cmd inside of the VM (think of ssh cmd) and monitors command execution
 // and the kernel console output. It detects kernel oopses in output, lost connections, hangs, etc.
 // Returns command+kernel output and a non-symbolized crash report (nil if no error happens).
@@ -309,12 +328,18 @@ func (inst *Instance) Run(ctx context.Context, reporter *report.Reporter, comman
 		return nil, nil, err
 	}
 	mon := &monitor{
-		RunOptions:      runOptions,
-		inst:            inst,
-		outc:            outc,
-		errc:            errc,
-		reporter:        reporter,
-		lastExecuteTime: time.Now(),
+		RunOptions:         runOptions,
+		inst:               inst,
+		outc:               outc,
+		errc:               errc,
+		reporter:           reporter,
+		lastExecuteTime:    time.Now(),
+		dataRaceSignatures: runOptions.dataRaceSignatures,
+	}
+	if len(mon.dataRaceSignatures) > 0 {
+		log.Logf(0, "VM %v: data race filter armed with %d signatures", inst.Index(), len(mon.dataRaceSignatures))
+	} else {
+		log.Logf(1, "VM %v: data race filter not armed", inst.Index())
 	}
 	reps := mon.monitorExecution()
 	return mon.output, reps, nil
@@ -355,10 +380,11 @@ func NewDispatcher(pool *Pool, def dispatcher.Runner[*Instance]) *Dispatcher {
 
 type monitor struct {
 	*RunOptions
-	inst     *Instance
-	outc     <-chan []byte
-	errc     <-chan error
-	reporter *report.Reporter
+	inst               *Instance
+	outc               <-chan []byte
+	errc               <-chan error
+	reporter           *report.Reporter
+	dataRaceSignatures map[string]struct{}
 	// output is at most mon.beforeContext + len(report) + afterContext bytes.
 	output []byte
 	// curPos in the output to scan for the matches.
@@ -432,6 +458,9 @@ func (mon *monitor) appendOutput(out []byte) ([]*report.Report, bool) {
 		mon.lastExecuteTime = time.Now()
 	}
 	if mon.reporter.ContainsCrash(mon.output[mon.curPos:]) {
+		if mon.skipDuplicateDataRace() {
+			return nil, false
+		}
 		return mon.extractErrors("unknown error"), true
 	}
 	if len(mon.output) > 2*mon.beforeContext {
@@ -535,6 +564,55 @@ func (mon *monitor) waitForOutput() {
 		select {
 		case out, ok := <-mon.outc:
 			if !ok {
+				return
+			}
+			mon.output = append(mon.output, out...)
+		case <-timer.C:
+			return
+		case <-Shutdown:
+			return
+		}
+	}
+}
+
+func (mon *monitor) skipDuplicateDataRace() bool {
+	if len(mon.dataRaceSignatures) == 0 {
+		return false
+	}
+	const waitForTrace = 5 * time.Second
+	log.Logf(1, "VM %v: waiting up to %v for complete data race output", mon.inst.Index(), waitForTrace)
+	mon.waitForOutputDuration(waitForTrace)
+	rep := mon.reporter.ParseFrom(mon.output, mon.curPos)
+	if rep == nil {
+		log.Logf(1, "VM %v: data race filter detected crash markers but parser returned nil", mon.inst.Index())
+		return false
+	}
+	sig := report.DataRaceSignature(rep)
+	if sig == "" {
+		log.Logf(0, "VM %v: data race filter could not compute signature for %q", mon.inst.Index(), rep.Title)
+		return false
+	}
+	if _, ok := mon.dataRaceSignatures[sig]; !ok {
+		log.Logf(1, "VM %v: data race signature %q not found in cache (%d entries)",
+			mon.inst.Index(), sig, len(mon.dataRaceSignatures))
+		return false
+	}
+	log.Logf(0, "VM %v: skipping duplicate data race %q", mon.inst.Index(), sig)
+	mon.curPos = min(rep.SkipPos, len(mon.output))
+	return true
+}
+
+func (mon *monitor) waitForOutputDuration(d time.Duration) {
+	if d <= 0 {
+		return
+	}
+	timer := time.NewTimer(d)
+	defer timer.Stop()
+	for {
+		select {
+		case out, ok := <-mon.outc:
+			if !ok {
+				mon.outc = nil
 				return
 			}
 			mon.output = append(mon.output, out...)

@@ -273,6 +273,15 @@ type Experimental struct {
 
 	// Configure the UAF validation pipeline.
 	UAFValidate *UAFValidateConfig `json:"uaf_validate,omitempty"`
+
+	// Skip duplicate data race reports once they've been observed.
+	// When enabled, syz-manager keeps an in-memory cache of data race signatures
+	// and asks VM monitors to ignore matches in that cache so that fuzzing
+	// continues without rebooting the VM for already-known races.
+	SkipDuplicateDataRaces bool `json:"skip_duplicate_data_races,omitempty"`
+	// Bounded size for the duplicate data race signature cache. Older entries
+	// are discarded once the limit is exceeded (default: 10000).
+	MaxDataRaceCombinations int `json:"max_data_race_combinations,omitempty"`
 }
 
 type UAFValidateConfig struct {

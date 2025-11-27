@@ -8,13 +8,12 @@ Use of this source code is governed by Apache 2 LICENSE that can be found in the
 <head>
 	<title>{{.PageTitle}}</title>
 	{{HEAD}}
-</head>
-<body>
-	<header id="topbar">
-		<table class="position_table">
-			<tr>
-				<td>
-					<h1><a href="/">syzkaller</a>{{if .Name}}: {{.Name}}{{end}}</h1>
+	<style>
+	body {
+		background: #f7f7f7;
+	}
+	</style>
+				<h1><a href="/">syzkaller</a>{{if .Name}}: {{.Name}}{{end}}</h1>
 				</td>
 				<td>
 					<form action="/action" method="post">

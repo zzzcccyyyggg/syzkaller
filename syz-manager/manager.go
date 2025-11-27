@@ -93,12 +93,14 @@ type Manager struct {
 	snapshotSource *queue.Distributor
 	phase          int
 
-	disabledHashes   map[string]struct{}
-	newRepros        [][]byte
-	lastMinCorpus    int
-	memoryLeakFrames map[string]bool
-	dataRaceFrames   map[string]bool
-	saturatedCalls   map[string]bool
+	disabledHashes               map[string]struct{}
+	newRepros                    [][]byte
+	lastMinCorpus                int
+	memoryLeakFrames             map[string]bool
+	dataRaceFrames               map[string]bool
+	reportedDataRaceCombinations map[string]struct{}
+	dataRaceCombinationOrder     []string
+	saturatedCalls               map[string]bool
 
 	externalReproQueue chan *manager.Crash
 	crashes            chan *manager.Crash
@@ -229,6 +231,8 @@ const (
 	phaseTriagedHub
 )
 
+const defaultMaxDataRaceCombinations = 10000
+
 func main() {
 	flag.Parse()
 	if !prog.GitRevisionKnown() {
@@ -310,6 +314,9 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		crashes:            make(chan *manager.Crash, 10),
 		saturatedCalls:     make(map[string]bool),
 		reportGenerator:    manager.ReportGeneratorCache(cfg),
+	}
+	if cfg.Experimental.SkipDuplicateDataRaces {
+		mgr.reportedDataRaceCombinations = make(map[string]struct{})
 	}
 	if cfg.Experimental.UAFMode || cfg.Experimental.UAFValidate != nil {
 		store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
@@ -667,7 +674,7 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 	injectExec := make(chan bool, 10)
 	serv.CreateInstance(inst.Index(), injectExec, updInfo)
 
-	reps, vmInfo, err := mgr.runInstanceInner(ctx, inst,
+	runOpts := []func(*vm.RunOptions){
 		vm.WithExitCondition(vm.ExitTimeout),
 		vm.WithInjectExecuting(injectExec),
 		vm.WithEarlyFinishCb(func() {
@@ -675,7 +682,12 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 			// running for several seconds even after kernel has printed a crash report.
 			// This litters the log, and we want to prevent it.
 			serv.StopFuzzing(inst.Index())
-		}))
+		}),
+	}
+	if opt := mgr.dataRaceFilterOption(); opt != nil {
+		runOpts = append(runOpts, opt)
+	}
+	reps, vmInfo, err := mgr.runInstanceInner(ctx, inst, runOpts...)
 	var extraExecs []report.ExecutorInfo
 	var rep *report.Report
 	if len(reps) != 0 {
@@ -747,6 +759,24 @@ func (mgr *Manager) runInstanceInner(ctx context.Context, inst *vm.Instance, opt
 	return reps, vmInfo, nil
 }
 
+func (mgr *Manager) dataRaceFilterOption() func(*vm.RunOptions) {
+	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		return nil
+	}
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if len(mgr.reportedDataRaceCombinations) == 0 {
+		log.Logf(1, "data race filter requested but no signatures recorded yet")
+		return nil
+	}
+	signatures := make(map[string]struct{}, len(mgr.reportedDataRaceCombinations))
+	for key := range mgr.reportedDataRaceCombinations {
+		signatures[key] = struct{}{}
+	}
+	log.Logf(0, "installing duplicate data race filter with %d signatures", len(signatures))
+	return vm.WithDuplicateDataRaceFilter(signatures)
+}
+
 func (mgr *Manager) emailCrash(crash *manager.Crash) {
 	if len(mgr.cfg.EmailAddrs) == 0 {
 		return
@@ -766,6 +796,7 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 	if err := mgr.reporter.Symbolize(crash.Report); err != nil {
 		log.Errorf("failed to symbolize report: %v", err)
 	}
+	mgr.recordDataRaceCombination(crash.Report)
 	if crash.Type == crash_pkg.MemoryLeak {
 		mgr.mu.Lock()
 		mgr.memoryLeakFrames[crash.Frame] = true
@@ -844,6 +875,37 @@ func (mgr *Manager) saveCrash(crash *manager.Crash) bool {
 		go mgr.emailCrash(crash)
 	}
 	return mgr.NeedRepro(crash)
+}
+
+func (mgr *Manager) recordDataRaceCombination(rep *report.Report) {
+	if !mgr.cfg.Experimental.SkipDuplicateDataRaces {
+		return
+	}
+	sig := report.DataRaceSignature(rep)
+	if sig == "" {
+		log.Logf(0, "data race signature missing for title %q", rep.Title)
+		return
+	}
+	mgr.mu.Lock()
+	defer mgr.mu.Unlock()
+	if mgr.reportedDataRaceCombinations == nil {
+		mgr.reportedDataRaceCombinations = make(map[string]struct{})
+	}
+	if _, exists := mgr.reportedDataRaceCombinations[sig]; exists {
+		return
+	}
+	log.Logf(0, "recorded data race signature %q", sig)
+	mgr.reportedDataRaceCombinations[sig] = struct{}{}
+	mgr.dataRaceCombinationOrder = append(mgr.dataRaceCombinationOrder, sig)
+	limit := mgr.cfg.Experimental.MaxDataRaceCombinations
+	if limit <= 0 {
+		limit = defaultMaxDataRaceCombinations
+	}
+	for len(mgr.dataRaceCombinationOrder) > limit {
+		oldest := mgr.dataRaceCombinationOrder[0]
+		mgr.dataRaceCombinationOrder = mgr.dataRaceCombinationOrder[1:]
+		delete(mgr.reportedDataRaceCombinations, oldest)
+	}
 }
 
 func (mgr *Manager) needLocalRepro(crash *manager.Crash) bool {

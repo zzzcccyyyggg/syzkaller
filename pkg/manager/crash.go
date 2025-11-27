@@ -208,14 +208,16 @@ type CrashInfo struct {
 	Log   string // filename relative to the workdir
 
 	// These fields are only set if full=true.
-	Tag    string
-	Report string // filename relative to workdir
-	Time   time.Time
+	Tag      string
+	Report   string // filename relative to workdir
+	Time     time.Time
+	DataRace *report.CustomDataRaceInfo
 }
 
 type BugInfo struct {
 	ID            string
 	Title         string
+	DisplayTitle  string
 	TailTitles    []*report.TitleFreqRank
 	FirstTime     time.Time
 	LastTime      time.Time
@@ -225,6 +227,7 @@ type BugInfo struct {
 	ReproAttempts int
 	Crashes       []*CrashInfo
 	Rank          int
+	DataRace      *report.CustomDataRaceInfo
 }
 
 func (cs *CrashStore) BugInfo(id string, full bool) (*BugInfo, error) {
@@ -240,6 +243,7 @@ func (cs *CrashStore) BugInfo(id string, full bool) (*BugInfo, error) {
 		return nil, err
 	}
 	ret.Title = strings.TrimSpace(string(desc))
+	ret.DisplayTitle = ret.Title
 
 	// Bug rank may go up over time if we observe higher ranked bugs as a consequence of the first failure.
 	ret.Rank = report.TitlesToImpact(ret.Title)
@@ -256,6 +260,7 @@ func (cs *CrashStore) BugInfo(id string, full bool) (*BugInfo, error) {
 	if err != nil {
 		return nil, err
 	}
+	var firstReport string
 	for _, f := range files {
 		if strings.HasPrefix(f, "log") {
 			index, err := strconv.ParseUint(f[3:], 10, 64)
@@ -273,6 +278,14 @@ func (cs *CrashStore) BugInfo(id string, full bool) (*BugInfo, error) {
 			ret.StraceFile = filepath.Join(dir, f)
 		} else if strings.HasPrefix(f, "repro") {
 			ret.ReproAttempts++
+		} else if strings.HasPrefix(f, "report") && firstReport == "" {
+			firstReport = filepath.Join(dir, f)
+		}
+	}
+	if firstReport != "" {
+		if data, err := os.ReadFile(firstReport); err == nil {
+			ret.DataRace = report.ParseCustomDataRace(data)
+			ret.DisplayTitle = bugDisplayTitle(ret.Title, ret.DataRace)
 		}
 	}
 	if !full {
@@ -287,6 +300,13 @@ func (cs *CrashStore) BugInfo(id string, full bool) (*BugInfo, error) {
 		reportFile := filepath.Join("crashes", id, fmt.Sprintf("report%d", crash.Index))
 		if osutil.IsExist(filepath.Join(cs.BaseDir, reportFile)) {
 			crash.Report = reportFile
+			if repBytes, err := os.ReadFile(filepath.Join(cs.BaseDir, reportFile)); err == nil {
+				crash.DataRace = report.ParseCustomDataRace(repBytes)
+				if crash.DataRace != nil && ret.DataRace == nil {
+					ret.DataRace = crash.DataRace
+					ret.DisplayTitle = bugDisplayTitle(ret.Title, ret.DataRace)
+				}
+			}
 		}
 	}
 	sort.Slice(ret.Crashes, func(i, j int) bool {
@@ -323,6 +343,17 @@ func (cs *CrashStore) BugList() ([]*BugInfo, error) {
 		log.Logf(0, "some stored crashes are inconsistent: %d skipped, last error %v", errCount, lastErr)
 	}
 	return ret, nil
+}
+
+func bugDisplayTitle(defaultTitle string, dataRace *report.CustomDataRaceInfo) string {
+	if summary := summarizeCustomDataRace(dataRace); summary != "" {
+		return summary
+	}
+	return defaultTitle
+}
+
+func summarizeCustomDataRace(info *report.CustomDataRaceInfo) string {
+	return report.CustomDataRaceBugTitle(info)
 }
 
 func crashHash(title string) string {
