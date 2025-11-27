@@ -50,6 +50,7 @@ type barrierSeed struct {
 	entry           *UAFCorpusEntry
 	execOpts        flatrpc.ExecOpts
 	barrierPrograms []*prog.Prog
+	replayPlan      UAFCorpusReplayPlan
 	syncable        bool
 	synced          bool
 }
@@ -62,6 +63,8 @@ type UAFCorpusEntry struct {
 	PairBasicInfo ddrd.MayUAFPair
 	Signals       ddrd.UAFSignal
 	Barrier       BarrierSnapshot
+	ReplayPlan    UAFCorpusReplayPlan
+	Profile       UAFPairProfile
 	Timestamp     time.Time
 	Kind          barrierSeedKind
 }
@@ -72,6 +75,46 @@ type BarrierSnapshot struct {
 	GroupID      int64
 	GroupSize    int
 	ProcList     []int
+}
+
+// UAFCorpusReplayPlan carries deterministic replay hints such as executor start delays.
+type UAFCorpusReplayPlan struct {
+	DelaysMicros []int64
+}
+
+// UAFPairProfile captures intersection fields that uniquely identify a UAF pair.
+type UAFPairProfile struct {
+	FreeAccessName uint64
+	UseAccessName  uint64
+	FreeCallStack  uint64
+	UseCallStack   uint64
+}
+
+func (plan UAFCorpusReplayPlan) clone() UAFCorpusReplayPlan {
+	if len(plan.DelaysMicros) == 0 {
+		return UAFCorpusReplayPlan{}
+	}
+	return UAFCorpusReplayPlan{DelaysMicros: append([]int64(nil), plan.DelaysMicros...)}
+}
+
+func (plan UAFCorpusReplayPlan) IsZero() bool {
+	return len(plan.DelaysMicros) == 0
+}
+
+func newUAFPairProfile(pair *ddrd.MayUAFPair) UAFPairProfile {
+	if pair == nil {
+		return UAFPairProfile{}
+	}
+	return UAFPairProfile{
+		FreeAccessName: pair.FreeAccessName,
+		UseAccessName:  pair.UseAccessName,
+		FreeCallStack:  pair.FreeCallStack,
+		UseCallStack:   pair.UseCallStack,
+	}
+}
+
+func (p UAFPairProfile) IsZero() bool {
+	return p.FreeAccessName == 0 && p.UseAccessName == 0 && p.FreeCallStack == 0 && p.UseCallStack == 0
 }
 
 func newUAFMode(f *Fuzzer) *uafMode {
@@ -161,6 +204,7 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	now := time.Now()
 	barrier := buildBarrierSnapshot(req, res)
 	groupTemplate := snapshotProgramGroup(req)
+	plan := snapshotReplayPlan(req)
 	// groupID := int64(0)
 	// if res != nil {
 	// 	groupID = res.BarrierGroupID
@@ -191,12 +235,14 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 		if len(groupTemplate) != 0 {
 			entry.Programs = clonePrograms(groupTemplate)
 		}
+		entry.ReplayPlan = plan.clone()
 		seed := &barrierSeed{
-			kind:     seedKindUAF,
-			entry:    entry,
-			execOpts: req.ExecOpts,
-			syncable: true,
-			synced:   false,
+			kind:       seedKindUAF,
+			entry:      entry,
+			execOpts:   req.ExecOpts,
+			replayPlan: plan.clone(),
+			syncable:   true,
+			synced:     false,
 		}
 		if len(req.BarrierPrograms) != 0 {
 			seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
@@ -230,7 +276,8 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	}
 	barrier := buildBarrierSnapshot(req, res)
 	group := snapshotProgramGroup(req)
-	key := coverageSeedKey(raw, barrier, req.Prog, group)
+	plan := snapshotReplayPlan(req)
+	key := coverageSeedKey(raw, barrier, req.Prog, group, plan)
 	if u.corpus != nil {
 		u.corpus.mergeCoverage(raw)
 	}
@@ -238,19 +285,20 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	entry := newUAFCorpusEntry(req.Prog, nil, barrier, time.Now())
 	entry.Kind = seedKindCoverage
 	entry.Programs = clonePrograms(group)
+	entry.ReplayPlan = plan.clone()
 	seed := &barrierSeed{
-		kind:     seedKindCoverage,
-		entry:    entry,
-		execOpts: req.ExecOpts,
-		syncable: false,
-		synced:   true,
+		kind:       seedKindCoverage,
+		entry:      entry,
+		execOpts:   req.ExecOpts,
+		replayPlan: plan.clone(),
+		syncable:   false,
+		synced:     true,
 	}
 	if len(req.BarrierPrograms) != 0 {
 		seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
 	} else if len(entry.Programs) != 0 {
 		seed.barrierPrograms = clonePrograms(entry.Programs)
 	}
-
 	u.mu.Lock()
 	if _, exists := u.entries[key]; exists {
 		u.mu.Unlock()
@@ -333,6 +381,15 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 		if len(programs) != 0 {
 			req.BarrierPrograms = clonePrograms(programs)
 		}
+		plan := seed.replayPlan
+		if plan.IsZero() {
+			plan = seed.entry.ReplayPlan
+		}
+		if !plan.IsZero() {
+			if err := req.SetBarrierStartDelays(plan.DelaysMicros); err != nil {
+				u.fuzzer.Logf(0, "uaf: failed to set barrier delays for seed: %v", err)
+			}
+		}
 	}
 	u.queue.Submit(req)
 }
@@ -382,11 +439,12 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 			entry.PairBasicInfo.UseAccessType)
 		clone := entry.clone()
 		seed := &barrierSeed{
-			kind:     clone.Kind,
-			entry:    clone,
-			execOpts: setFlags(flatrpc.ExecFlagCollectSignal),
-			syncable: clone.Kind == seedKindUAF,
-			synced:   clone.Kind != seedKindUAF,
+			kind:       clone.Kind,
+			entry:      clone,
+			execOpts:   setFlags(flatrpc.ExecFlagCollectSignal),
+			replayPlan: clone.ReplayPlan.clone(),
+			syncable:   clone.Kind == seedKindUAF,
+			synced:     clone.Kind != seedKindUAF,
 		}
 		if len(clone.Programs) != 0 {
 			seed.barrierPrograms = clonePrograms(clone.Programs)
@@ -448,6 +506,13 @@ func snapshotProgramGroup(req *queue.Request) []*prog.Prog {
 	return nil
 }
 
+func snapshotReplayPlan(req *queue.Request) UAFCorpusReplayPlan {
+	if req == nil || len(req.BarrierStartDelayUs) == 0 {
+		return UAFCorpusReplayPlan{}
+	}
+	return UAFCorpusReplayPlan{DelaysMicros: append([]int64(nil), req.BarrierStartDelayUs...)}
+}
+
 func buildBarrierSnapshot(req *queue.Request, res *queue.Result) BarrierSnapshot {
 	snapshot := BarrierSnapshot{
 		Participants: req.BarrierParticipants,
@@ -477,6 +542,7 @@ func newUAFCorpusEntry(program *prog.Prog, pair *ddrd.MayUAFPair, barrier Barrie
 	if pair != nil {
 		entry.PairBasicInfo = *pair
 		entry.Signals = cloneSignal(ddrd.FromUAFPairs([]*ddrd.MayUAFPair{pair}, ddrd.UAFSignalPrioHigh))
+		entry.Profile = newUAFPairProfile(pair)
 	}
 	return entry
 }
@@ -505,7 +571,13 @@ func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
 	}
 	clone.Signals = cloneSignal(entry.Signals)
 	clone.Barrier = entry.Barrier.clone()
+	clone.ReplayPlan = entry.ReplayPlan.clone()
 	return &clone
+}
+
+// Clone returns a deep copy of the corpus entry for external consumers.
+func (entry *UAFCorpusEntry) Clone() *UAFCorpusEntry {
+	return entry.clone()
 }
 
 func (entry *UAFCorpusEntry) PairID() uint64 {
@@ -582,7 +654,7 @@ func aggregateCoverageSignals(triage map[int]*triageCall) []uint64 {
 	return merged
 }
 
-func coverageSeedKey(raw []uint64, barrier BarrierSnapshot, program *prog.Prog, group []*prog.Prog) string {
+func coverageSeedKey(raw []uint64, barrier BarrierSnapshot, program *prog.Prog, group []*prog.Prog, plan UAFCorpusReplayPlan) string {
 	var procList []int64
 	if len(barrier.ProcList) != 0 {
 		procList = make([]int64, len(barrier.ProcList))
@@ -595,8 +667,12 @@ func coverageSeedKey(raw []uint64, barrier BarrierSnapshot, program *prog.Prog, 
 		serialized = program.Serialize()
 	}
 	groupData := serializeProgramGroup(group)
+	var delays []int64
+	if len(plan.DelaysMicros) != 0 {
+		delays = append([]int64(nil), plan.DelaysMicros...)
+	}
 	return "cov-" + hash.String("cov", raw, barrier.Participants, barrier.GroupID,
-		int64(barrier.GroupSize), procList, serialized, groupData)
+		int64(barrier.GroupSize), procList, serialized, groupData, delays)
 }
 
 func serializeProgramGroup(programs []*prog.Prog) []byte {

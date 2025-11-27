@@ -21,6 +21,8 @@
 #include <vector>
 #include "ukc.h"
 #include "ddrd/trace_manager.h"
+
+#include "barrier_limits.h"
 inline std::ostream& operator<<(std::ostream& ss, const rpc::ExecRequestRawT& req)
 {
 	return ss << "id=" << req.id
@@ -183,10 +185,15 @@ public:
 			Restart();
 		attempts_ = 0;
 		msg_ = std::move(msg);
-		if (state_ == State::Started)
+		bool wait_for_barrier = msg.barrier_group_size > 0 && barrier_handshake_cb_ != nullptr;
+		if (state_ == State::Started) {
 			Handshake();
-		else
+		} else if (wait_for_barrier) {
+			waiting_barrier_release_ = true;
+			barrier_handshake_cb_(this, msg.barrier_group_id, msg.barrier_index);
+		} else {
 			Execute();
+		}
 		return true;
 	}
 
@@ -195,6 +202,14 @@ public:
 		return state_ == State::Idle && !msg_;
 	}
 	void SetStageBarrierCallback(std::function<void(const StagedBarrierResult&)> cb) { stage_barrier_cb_ = std::move(cb); }
+	void SetBarrierHandshakeCallback(std::function<void(Proc*, int64_t, int)> cb) { barrier_handshake_cb_ = std::move(cb); }
+	void BeginBarrierExecution()
+	{
+		if (!waiting_barrier_release_ || state_ != State::Idle || !msg_)
+			return;
+		waiting_barrier_release_ = false;
+		Execute();
+	}
  	bool IsAvailable() const 
 	{ 
 		return state_ == State::Idle || state_ == State::Started; 
@@ -309,6 +324,8 @@ private:
 	uint64 wait_end_ = 0;
 	bool has_pending_result_ = false; // barrier result staged, waiting for flush
 	std::function<void(const StagedBarrierResult&)> stage_barrier_cb_; // late-bound callback set by Runner
+	std::function<void(Proc*, int64_t, int)> barrier_handshake_cb_;
+	bool waiting_barrier_release_ = false;
 
 	friend std::ostream& operator<<(std::ostream& ss, const Proc& proc)
 	{
@@ -500,17 +517,30 @@ private:
 				all_call_signal |= 1ull << call;
 		}
 		memcpy(req_shmem_.Mem(), msg_->data.data(), std::min(msg_->data.size(), kMaxInput));
-		execute_req req{
-		    .magic = kInMagic,
-		    .id = static_cast<uint64>(msg_->id),
-		    .type = msg_->type,
-		    .exec_flags = static_cast<uint64>(msg_->exec_opts->exec_flags()),
-		    .all_call_signal = all_call_signal,
-		    .all_extra_signal = all_extra_signal,
-		    .barrier_group_id = msg_->barrier_group_id,
-		    .barrier_index = msg_->barrier_index,
-		    .barrier_group_size = msg_->barrier_group_size,
-		};
+		execute_req req = {};
+		req.magic = kInMagic;
+		req.id = static_cast<uint64>(msg_->id);
+		req.type = msg_->type;
+		req.exec_flags = static_cast<uint64>(msg_->exec_opts->exec_flags());
+		req.all_call_signal = all_call_signal;
+		req.all_extra_signal = all_extra_signal;
+		req.barrier_group_id = msg_->barrier_group_id;
+		req.barrier_index = msg_->barrier_index;
+		req.barrier_group_size = msg_->barrier_group_size;
+		if (msg_->barrier_group_size > 0 && !msg_->barrier_start_delay_us.empty()) {
+			uint32_t count = std::min<uint32_t>(msg_->barrier_start_delay_us.size(), kMaxBarrierDelays);
+			req.barrier_delay_len = count;
+			for (uint32_t i = 0; i < count; i++)
+				req.barrier_start_delay_us[i] = msg_->barrier_start_delay_us[i];
+		}
+		if (msg_->ukc_is_valid) {
+			req.ukc_use_name = msg_->ukc_use_name;
+			req.ukc_use_stack = msg_->ukc_use_stack;
+			req.ukc_free_name = msg_->ukc_free_name;
+			req.ukc_free_stack = msg_->ukc_free_stack;
+			req.ukc_use_access_delay_time = msg_->ukc_use_access_delay_time;
+			req.ukc_is_valid = true;
+		}
 		exec_start_ = current_time_ms();
 		ChangeState(State::Executing);
 		if (write(req_pipe_, &req, sizeof(req)) != sizeof(req)) {
@@ -630,7 +660,12 @@ private:
 		if (state_ == State::Handshaking) {
 			debug("proc slot %d (exec %d): got handshake reply\n", slot_, id_);
 			ChangeState(State::Idle);
-			Execute();
+			if (msg_ && msg_->barrier_group_size > 0 && barrier_handshake_cb_) {
+				waiting_barrier_release_ = true;
+				barrier_handshake_cb_(this, msg_->barrier_group_id, msg_->barrier_index);
+			} else {
+				Execute();
+			}
 		} else if (state_ == State::Executing) {
 			debug("proc slot %d (exec %d): got execute reply\n", slot_, id_);
 			HandleCompletion(status);
@@ -734,7 +769,7 @@ public:
 	}
 
 	// Prepare DDRD for a barrier group execution
-	void PrepareForGroup(bool collect_uaf, bool collect_extended)
+	void PrepareForGroup(bool collect_uaf, bool collect_extended, const rpc::ExecRequestRawT* req)
 	{
 		ClearOutput();
 		active_for_group_ = false;
@@ -761,8 +796,39 @@ public:
 
 		active_for_group_ = true;
 
+#if GOOS_linux
+		if (collect_uaf) {
+			bool valid = false;
+			ukc_device_uaf_pair_t pair = {};
+			if (req && req->ukc_is_valid) {
+				pair.use_name = req->ukc_use_name;
+				pair.use_stack = req->ukc_use_stack;
+				pair.free_name = req->ukc_free_name;
+				pair.free_stack = req->ukc_free_stack;
+				pair.use_access_delay_time = req->ukc_use_access_delay_time;
+				pair.is_valid = true;
+				valid = true;
+			} else if (ukc_preload_valid) {
+				pair.use_name = ukc_preload_pair.use_name;
+				pair.use_stack = ukc_preload_pair.use_stack;
+				pair.free_name = ukc_preload_pair.free_name;
+				pair.free_stack = ukc_preload_pair.free_stack;
+				pair.use_access_delay_time = ukc_preload_pair.use_access_delay_time;
+				pair.is_valid = true;
+				valid = true;
+			}
+
+			if (valid) {
+				ukc_set_may_uaf_pair(&pair);
+			} else {
+				ukc_clear_may_uaf_pair();
+			}
+		}
+#endif
+
 		// Switch to LOG mode
-		ukc_enter_log_mode();
+		if (collect_uaf || collect_extended)
+			ukc_enter_log_mode();
 		debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
 
@@ -804,10 +870,12 @@ public:
 
 		for (int i = 0; i < count; i++) {
 			const may_uaf_pair_t& pair = output_.basic_pairs[i];
-			debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
+			debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_stack=0x%016llx use_stack=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
 			      i,
 			      static_cast<unsigned long long>(pair.free_access_name),
 			      static_cast<unsigned long long>(pair.use_access_name),
+			      static_cast<unsigned long long>(pair.free_call_stack),
+			      static_cast<unsigned long long>(pair.use_call_stack),
 			      pair.free_tid,
 			      pair.use_tid,
 			      pair.free_sn,
@@ -938,6 +1006,37 @@ public:
 			      (long long)active.group_id, staged.index, active.completed, active.group_size);
 		}
 	}
+	void BarrierMemberReady(Proc* proc, int64_t group_id, int index)
+	{
+		auto it = active_barriers_.find(group_id);
+		if (it == active_barriers_.end()) {
+			if (proc)
+				proc->BeginBarrierExecution();
+			return;
+		}
+		ActiveBarrierExecution& active = it->second;
+		if (index < 0 || index >= active.group_size)
+			return;
+		if (active.ready_procs.empty()) {
+			active.ready_procs.resize(active.group_size, nullptr);
+			active.handshake_ready.resize(active.group_size, false);
+		}
+		if (!active.handshake_ready[index]) {
+			active.handshake_ready[index] = true;
+			active.ready++;
+		}
+		active.ready_procs[index] = proc;
+		if (!active.released && active.ready == active.group_size) {
+			active.released = true;
+			for (int i = 0; i < active.group_size; i++) {
+				Proc* member = nullptr;
+				if (i < static_cast<int>(active.ready_procs.size()))
+					member = active.ready_procs[i];
+				if (member)
+					member->BeginBarrierExecution();
+			}
+		}
+	}
 	Runner(Connection& conn, int vm_index, const char* bin)
 	    : conn_(conn),
 	      vm_index_(vm_index)
@@ -953,6 +1052,7 @@ public:
 		// Install staging callback for each proc now that Runner methods defined.
 		for (auto& p : procs_) {
 			p->SetStageBarrierCallback([this](const StagedBarrierResult& r){ StageBarrierResult(r); });
+			p->SetBarrierHandshakeCallback([this](Proc* proc, int64_t group_id, int index){ BarrierMemberReady(proc, group_id, index); });
 		}
 
 		for (;;)
@@ -977,6 +1077,10 @@ private:
 		int32_t group_size = 0;
 		int32_t completed = 0; // number of members that have executed (staged)
 		bool ddrd_active = false;
+		int32_t ready = 0; // number of members that finished handshake
+		bool released = false;
+		std::vector<Proc*> ready_procs;
+		std::vector<bool> handshake_ready;
 		std::vector<StagedBarrierResult> pending_results; // index -> staged result
 	};
 
@@ -1394,17 +1498,21 @@ private:
 		// Check if any member requests DDRD and prepare
 		bool collect_uaf = false;
 		bool collect_extended = false;
+		const rpc::ExecRequestRawT* uaf_req = nullptr;
+
 		for (const auto& member : group.members) {
 			if (member.has_value() && member->exec_opts) {
 				auto flags = member->exec_opts->exec_flags();
-				if (IsSet(flags, rpc::ExecFlag::CollectDdrdUaf))
+				if (IsSet(flags, rpc::ExecFlag::CollectDdrdUaf)) {
 					collect_uaf = true;
+					uaf_req = &(*member);
+				}
 				if (IsSet(flags, rpc::ExecFlag::CollectDdrdExtended))
 					collect_extended = true;
 			}
 		}
 		if (collect_uaf || collect_extended) {
-			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended);
+			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, uaf_req);
 			group.ddrd_active = true;
 		} else {
 			group.ddrd_active = false;
@@ -1421,6 +1529,10 @@ private:
 		active.group_size = static_cast<int32_t>(selected.size());
 		active.completed = 0;
 		active.ddrd_active = group.ddrd_active;
+		active.ready = 0;
+		active.released = false;
+		active.ready_procs.assign(active.group_size, nullptr);
+		active.handshake_ready.assign(active.group_size, false);
 		active_barriers_[group_id] = active;
 
 		for (size_t i = 0; i < selected.size(); i++) {

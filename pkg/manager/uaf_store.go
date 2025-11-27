@@ -22,12 +22,26 @@ type UAFCorpusStore struct {
 }
 
 type storedUAFCorpusEntry struct {
-	Program   []byte                 `json:"program"`
-	CallIdx   int                    `json:"call_idx"`
-	Pair      ddrd.MayUAFPair        `json:"pair"`
-	Signals   []uint64               `json:"signals,omitempty"`
-	Barrier   fuzzer.BarrierSnapshot `json:"barrier"`
-	Timestamp time.Time              `json:"timestamp"`
+	Program    []byte                 `json:"program"`
+	Programs   [][]byte               `json:"programs,omitempty"`
+	CallIdx    int                    `json:"call_idx"`
+	Pair       ddrd.MayUAFPair        `json:"pair"`
+	Signals    []uint64               `json:"signals,omitempty"`
+	Barrier    fuzzer.BarrierSnapshot `json:"barrier"`
+	ReplayPlan *storedReplayPlan      `json:"replay_plan,omitempty"`
+	Profile    *storedPairProfile     `json:"profile,omitempty"`
+	Timestamp  time.Time              `json:"timestamp"`
+}
+
+type storedReplayPlan struct {
+	DelaysMicros []int64 `json:"delays_micros,omitempty"`
+}
+
+type storedPairProfile struct {
+	FreeAccessName uint64 `json:"free_access_name,omitempty"`
+	UseAccessName  uint64 `json:"use_access_name,omitempty"`
+	FreeCallStack  uint64 `json:"free_call_stack,omitempty"`
+	UseCallStack   uint64 `json:"use_call_stack,omitempty"`
 }
 
 func NewUAFCorpusStore(workdir string, target *prog.Target) (*UAFCorpusStore, error) {
@@ -105,6 +119,22 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	if entry.Prog != nil {
 		stored.Program = entry.Prog.Serialize()
 	}
+	if len(entry.Programs) != 0 {
+		stored.Programs = serializeProgramGroup(entry.Programs)
+	}
+	if !entry.ReplayPlan.IsZero() {
+		stored.ReplayPlan = &storedReplayPlan{
+			DelaysMicros: append([]int64(nil), entry.ReplayPlan.DelaysMicros...),
+		}
+	}
+	if !entry.Profile.IsZero() {
+		stored.Profile = &storedPairProfile{
+			FreeAccessName: entry.Profile.FreeAccessName,
+			UseAccessName:  entry.Profile.UseAccessName,
+			FreeCallStack:  entry.Profile.FreeCallStack,
+			UseCallStack:   entry.Profile.UseCallStack,
+		}
+	}
 	return json.Marshal(stored)
 }
 
@@ -151,6 +181,34 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		}
 		entry.Prog = progObj
 	}
+	if store.target != nil && len(stored.Programs) != 0 {
+		group, err := store.deserializeProgramGroup(stored.Programs)
+		if err != nil {
+			return nil, err
+		}
+		entry.Programs = group
+	}
+	if stored.ReplayPlan != nil {
+		entry.ReplayPlan = fuzzer.UAFCorpusReplayPlan{
+			DelaysMicros: append([]int64(nil), stored.ReplayPlan.DelaysMicros...),
+		}
+	}
+	if stored.Profile != nil {
+		entry.Profile = fuzzer.UAFPairProfile{
+			FreeAccessName: stored.Profile.FreeAccessName,
+			UseAccessName:  stored.Profile.UseAccessName,
+			FreeCallStack:  stored.Profile.FreeCallStack,
+			UseCallStack:   stored.Profile.UseCallStack,
+		}
+	} else {
+		// Fall back to the pair metadata if an explicit profile was not persisted.
+		entry.Profile = fuzzer.UAFPairProfile{
+			FreeAccessName: stored.Pair.FreeAccessName,
+			UseAccessName:  stored.Pair.UseAccessName,
+			FreeCallStack:  stored.Pair.FreeCallStack,
+			UseCallStack:   stored.Pair.UseCallStack,
+		}
+	}
 	return entry, nil
 }
 
@@ -163,4 +221,36 @@ func sliceToSignal(values []uint64) ddrd.UAFSignal {
 		signal[val] = struct{}{}
 	}
 	return signal
+}
+
+func serializeProgramGroup(programs []*prog.Prog) [][]byte {
+	if len(programs) == 0 {
+		return nil
+	}
+	serialized := make([][]byte, len(programs))
+	for i, p := range programs {
+		if p == nil {
+			continue
+		}
+		serialized[i] = p.Serialize()
+	}
+	return serialized
+}
+
+func (store *UAFCorpusStore) deserializeProgramGroup(data [][]byte) ([]*prog.Prog, error) {
+	if len(data) == 0 {
+		return nil, nil
+	}
+	group := make([]*prog.Prog, len(data))
+	for i, blob := range data {
+		if len(blob) == 0 {
+			continue
+		}
+		progObj, err := store.target.Deserialize(blob, prog.NonStrict)
+		if err != nil {
+			return nil, fmt.Errorf("deserialize barrier program %d: %w", i, err)
+		}
+		group[i] = progObj
+	}
+	return group, nil
 }

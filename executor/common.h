@@ -739,7 +739,8 @@ static void loop(void)
 		}
 #if GOOS_linux
 	// Ensure the parent process resets the UKC controller state after each run.
-	ukc_enter_monitor_mode();
+	if (!flag_barrier)
+		ukc_enter_monitor_mode();
 #endif
 		reply_execute(0);
 #endif

@@ -138,9 +138,16 @@ Extend existing manager⇄fuzzer sync payloads:
 - Manager side persists the authoritative corpus in `pkg/manager/uaf_store.go` using `uaf-corpus.db`, hydrates new fuzzer instances via `mgr.enqueueUAFCorpusSeeds`, and logs store growth during the main loop.
 - Fuzzer side exposes `PendingUAFCorpusEntries`/`EnqueueUAFCorpus` in `pkg/fuzzer/fuzzer.go`, restores persisted seeds through `uaf.restore`, and pushes them onto the dedicated queue with barrier metadata preserved.
 - Configuration gating lives under `experimental.uaf_mode`; enabling it wires the store initialization, DDRD exec flags, and barrier helpers without affecting non-UAF runs.
-- Persistence currently captures program bodies, barrier snapshots, hashed signals, and timestamps; extended traces remain TODO and are called out in the open questions section.
+- Persistence now captures program bodies, full barrier program groups, optional replay delay plans, barrier snapshots, hashed signals, and timestamps; extended traces remain TODO and are called out in the open questions section.
 
-## 11. Summary
+## 11. Validation Mode
+- `syz-manager` exposes a dedicated `-mode uaf-validate` path that reuses the persisted UAF corpus to run deterministic validation cycles.
+- Validation orchestrates barrier-aware executions through `pkg/uafvalidate`, scheduling per-entry replay delays and isolating unique pair signatures.
+- A lightweight executor adapter wraps `instance.ExecProgInstance`, so validation VMs reuse the standard execprog/executor stack while honouring configured timeouts.
+- Results are persisted in `pkg/manager/uaf_validated_store.go`, tracking confirmation status, barrier metadata, and replay plans for each pair signature.
+- Fresh statistics (`uaf validated`, `uaf validation failures`) and logs surface progress through the existing HTTP/metrics pipeline.
+
+## 12. Summary
 The proposed framework augments syzkaller with a UAF-focused fuzzing loop that:
 - Executes programs under DDRD barrier control, guaranteeing clean tracing per cycle.
 - Captures every `may_uaf_pair` as a first-class corpus entry with associated metadata.

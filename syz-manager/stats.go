@@ -20,6 +20,8 @@ type Stats struct {
 	statFuzzingTime   *stat.Val
 	statAvgBootTime   *stat.Val
 	statCoverFiltered *stat.Val
+	statUAFValidated  *stat.Val
+	statUAFFailed     *stat.Val
 }
 
 func (mgr *Manager) initStats() {
@@ -77,4 +79,6 @@ func (mgr *Manager) initStats() {
 			return int(image.StatImages.Load())
 		})
 	mgr.statCoverFiltered = stat.New("filtered coverage", "", stat.NoGraph)
+	mgr.statUAFValidated = stat.New("uaf validated", "Total number of confirmed UAF pairs", stat.Simple, stat.NoGraph)
+	mgr.statUAFFailed = stat.New("uaf validation failures", "Total number of failed UAF validation attempts", stat.Simple, stat.NoGraph)
 }

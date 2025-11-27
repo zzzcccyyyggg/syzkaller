@@ -270,6 +270,16 @@ type Experimental struct {
 
 	// Enable the UAF-focused fuzzing mode that prioritizes DDRD results.
 	UAFMode bool `json:"uaf_mode"`
+
+	// Configure the UAF validation pipeline.
+	UAFValidate *UAFValidateConfig `json:"uaf_validate,omitempty"`
+}
+
+type UAFValidateConfig struct {
+	MaxConcurrent    int `json:"max_concurrent"`
+	DelayRetryBudget int `json:"delay_retry_budget"`
+	TimeoutSeconds   int `json:"timeout_seconds"`
+	RepeatCount      int `json:"repeat_count"`
 }
 
 type FocusArea struct {

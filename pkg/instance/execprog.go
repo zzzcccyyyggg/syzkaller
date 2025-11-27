@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/csource"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	"github.com/google/syzkaller/pkg/report"
@@ -103,6 +104,39 @@ func CreateExecProgInstance(vmPool *vm.Pool, vmIndex int, mgrCfg *mgrconfig.Conf
 	return ret, nil
 }
 
+// DefaultExecOpts returns the csource.Options that syz-manager would normally
+// use when executing programs under the current manager configuration.
+func (inst *ExecProgInstance) DefaultExecOpts() csource.Options {
+	if inst == nil || inst.mgrCfg == nil {
+		return csource.Options{}
+	}
+	return csource.DefaultOpts(inst.mgrCfg)
+}
+
+// ManagerConfig returns the manager configuration associated with the execprog instance.
+func (inst *ExecProgInstance) ManagerConfig() *mgrconfig.Config {
+	if inst == nil {
+		return nil
+	}
+	return inst.mgrCfg
+}
+
+// ExecutorBinary returns the path to the executor binary within the VM.
+func (inst *ExecProgInstance) ExecutorBinary() string {
+	if inst == nil {
+		return ""
+	}
+	return inst.executorBin
+}
+
+// Reporter returns the reporter used by the execprog instance.
+func (inst *ExecProgInstance) Reporter() *report.Reporter {
+	if inst == nil {
+		return nil
+	}
+	return inst.reporter
+}
+
 func (inst *ExecProgInstance) runCommand(command string, duration time.Duration,
 	exitCondition vm.ExitCondition) (*RunResult, error) {
 	start := time.Now()
@@ -170,6 +204,7 @@ type ExecParams struct {
 	// If ExitConditions is empty, RunSyzProg() will assume instance.SyzExitConditions.
 	// RunCProg() always runs with binExitConditions.
 	ExitConditions vm.ExitCondition
+	UkcPair        *ddrd.MayUAFPair
 }
 
 func (inst *ExecProgInstance) RunCProg(params ExecParams) (*RunResult, error) {
@@ -193,14 +228,14 @@ func (inst *ExecProgInstance) RunCProgRaw(src []byte, target *prog.Target,
 }
 
 func (inst *ExecProgInstance) RunSyzProgFile(progFile string, duration time.Duration,
-	opts csource.Options, exitCondition vm.ExitCondition) (*RunResult, error) {
+	opts csource.Options, exitCondition vm.ExitCondition, ukcPair *ddrd.MayUAFPair) (*RunResult, error) {
 	vmProgFile, err := inst.VMInstance.Copy(progFile)
 	if err != nil {
 		return nil, &TestError{Title: fmt.Sprintf("failed to copy prog to VM: %v", err)}
 	}
 	target := inst.mgrCfg.SysTarget
 	command := ExecprogCmd(inst.execprogBin, inst.executorBin, target.OS, target.Arch, inst.mgrCfg.Type, opts,
-		!inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown, vmProgFile)
+		!inst.OldFlagsCompatMode, inst.mgrCfg.Timeouts.Slowdown, vmProgFile, ukcPair)
 	return inst.runCommand(command, duration, exitCondition)
 }
 
@@ -214,5 +249,5 @@ func (inst *ExecProgInstance) RunSyzProg(params ExecParams) (*RunResult, error) 
 	if params.ExitConditions == 0 {
 		params.ExitConditions = SyzExitConditions
 	}
-	return inst.RunSyzProgFile(progFile, params.Duration, params.Opts, params.ExitConditions)
+	return inst.RunSyzProgFile(progFile, params.Duration, params.Opts, params.ExitConditions, params.UkcPair)
 }

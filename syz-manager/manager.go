@@ -111,7 +111,8 @@ type Manager struct {
 
 	reproLoop *manager.ReproLoop
 
-	uafStore *manager.UAFCorpusStore
+	uafStore          *manager.UAFCorpusStore
+	uafValidatedStore *manager.UAFValidatedStore
 
 	Stats
 }
@@ -177,6 +178,22 @@ var (
 			return nil
 		},
 	}
+	ModeUAFValidate = &Mode{
+		Name:        "uaf-validate",
+		Description: `run validation over persisted UAF pairs and exit when finished`,
+		CheckConfig: func(cfg *mgrconfig.Config) error {
+			if cfg.Experimental.UAFValidate == nil {
+				return fmt.Errorf("experimental.uaf_validate must be configured")
+			}
+			if cfg.Experimental.UAFValidate.MaxConcurrent <= 0 {
+				return fmt.Errorf("experimental.uaf_validate.max_concurrent must be > 0")
+			}
+			if !cfg.Experimental.BarrierMode {
+				return fmt.Errorf("experimental.uaf_validate requires barrier_mode to be enabled")
+			}
+			return nil
+		},
+	}
 
 	modes = []*Mode{
 		ModeFuzzing,
@@ -185,6 +202,7 @@ var (
 		ModeCorpusRun,
 		ModeRunTests,
 		ModeIfaceProbe,
+		ModeUAFValidate,
 	}
 )
 
@@ -293,7 +311,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		saturatedCalls:     make(map[string]bool),
 		reportGenerator:    manager.ReportGeneratorCache(cfg),
 	}
-	if cfg.Experimental.UAFMode {
+	if cfg.Experimental.UAFMode || cfg.Experimental.UAFValidate != nil {
 		store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
 		if err != nil {
 			log.Fatalf("failed to initialize uaf corpus store: %v", err)
@@ -302,6 +320,18 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		defer func() {
 			if err := store.Close(); err != nil {
 				log.Errorf("uaf corpus store close failed: %v", err)
+			}
+		}()
+	}
+	if cfg.Experimental.UAFValidate != nil {
+		validated, err := manager.NewUAFValidatedStore(cfg.Workdir)
+		if err != nil {
+			log.Fatalf("failed to initialize uaf validated store: %v", err)
+		}
+		mgr.uafValidatedStore = validated
+		defer func() {
+			if err := validated.Close(); err != nil {
+				log.Errorf("uaf validated store close failed: %v", err)
 			}
 		}()
 	}
@@ -398,6 +428,10 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 			}
 		}()
 	}
+	if mgr.mode == ModeUAFValidate {
+		mgr.runUAFValidateMode(ctx)
+		return
+	}
 	go mgr.trackUsedFiles()
 	go mgr.processFuzzingResults(ctx)
 	mgr.pool.Loop(ctx)
@@ -407,9 +441,21 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 func (mgr *Manager) exit(reason string) {
 	log.Logf(0, "%v finished, shutting down...", reason)
 	mgr.writeBench()
-	close(vm.Shutdown)
+	closeShutdown(vm.Shutdown)
 	time.Sleep(10 * time.Second)
 	os.Exit(0)
+}
+
+func closeShutdown(ch chan struct{}) {
+	defer func() {
+		if r := recover(); r != nil {
+			if fmt.Sprint(r) == "close of closed channel" {
+				return
+			}
+			panic(r)
+		}
+	}()
+	close(ch)
 }
 
 func (mgr *Manager) heartbeatLoop() {

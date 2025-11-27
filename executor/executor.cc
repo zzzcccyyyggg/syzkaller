@@ -28,8 +28,16 @@
 
 #include "pkg/flatrpc/flatrpc.h"
 
+#include "barrier_limits.h"
+
 #if GOOS_linux
+#define may_uaf_pair_t ukc_device_uaf_pair_t
+#define may_race_pair_t ukc_device_race_pair_t
+#define may_race_pair_list_t ukc_device_race_pair_list_t
 #include "ukc.h"
+#undef may_uaf_pair_t
+#undef may_race_pair_t
+#undef may_race_pair_list_t
 #include "ddrd/race_detector.h"
 #include <fcntl.h>
 #include <sys/ioctl.h>
@@ -76,6 +84,8 @@ typedef unsigned char uint8;
 const int kMaxFd = 250;
 const int kFdLimit = 256;
 const int kMaxThreads = 32;
+static_assert(kMaxBarrierDelays <= static_cast<uint32_t>(kMaxThreads),
+	      "barrier delay slots exceed thread capacity");
 const int kInPipeFd = kMaxFd - 1; // remapped from stdin
 const int kOutPipeFd = kMaxFd - 2; // remapped from stdout
 const int kCoverFd = kOutPipeFd - kMaxThreads;
@@ -302,6 +312,19 @@ static bool all_extra_signal;
 static int64_t barrier_group_id;
 static int32_t barrier_index;
 static int32_t barrier_group_size;
+static uint32_t barrier_delay_len;
+static int64_t barrier_start_delay_us[kMaxBarrierDelays];
+#if GOOS_linux
+struct UkcPreloadPair {
+	uint64_t use_name = 0;
+	uint64_t use_stack = 0;
+	uint64_t free_name = 0;
+	uint64_t free_stack = 0;
+	int32_t use_access_delay_time = 0;
+};
+static bool ukc_preload_valid;
+static UkcPreloadPair ukc_preload_pair;
+#endif
 
 // Tunable timeouts, received with execute_req.
 static uint64 syscall_timeout_ms;
@@ -571,6 +594,14 @@ struct execute_req {
 	int64_t barrier_group_id;
 	int32_t barrier_index;
 	int32_t barrier_group_size;
+	uint32_t barrier_delay_len;
+	int64_t barrier_start_delay_us[kMaxBarrierDelays];
+	uint64_t ukc_use_name;
+	uint64_t ukc_use_stack;
+	uint64_t ukc_free_name;
+	uint64_t ukc_free_stack;
+	int32_t ukc_use_access_delay_time;
+	bool ukc_is_valid;
 };
 
 struct execute_reply {
@@ -1016,6 +1047,24 @@ void parse_execute(const execute_req& req)
 	barrier_group_id = req.barrier_group_id;
 	barrier_index = req.barrier_index;
 	barrier_group_size = req.barrier_group_size;
+ 	barrier_delay_len = 0;
+ 	memset(barrier_start_delay_us, 0, sizeof(barrier_start_delay_us));
+	if (flag_barrier && req.barrier_delay_len > 0) {
+		barrier_delay_len = std::min<uint32_t>(req.barrier_delay_len, kMaxBarrierDelays);
+ 		for (uint32_t i = 0; i < barrier_delay_len; i++)
+ 			barrier_start_delay_us[i] = req.barrier_start_delay_us[i];
+ 	}
+#if GOOS_linux
+	ukc_preload_valid = req.ukc_is_valid;
+	ukc_preload_pair = {};
+	if (ukc_preload_valid) {
+		ukc_preload_pair.use_name = req.ukc_use_name;
+		ukc_preload_pair.use_stack = req.ukc_use_stack;
+		ukc_preload_pair.free_name = req.ukc_free_name;
+		ukc_preload_pair.free_stack = req.ukc_free_stack;
+		ukc_preload_pair.use_access_delay_time = req.ukc_use_access_delay_time;
+	}
+#endif
 
 	debug("[%llums] exec opts: reqid=%llu type=%llu procid=%llu threaded=%d cover=%d comps=%d dedup=%d signal=%d ddrd_uaf=%d ddrd_race=%d ddrd_ext=%d"
 	      " sandbox=%d/%d/%d/%d timeouts=%llu/%llu/%llu kernel_64_bit=%d\n",
@@ -1075,6 +1124,28 @@ void execute_glob()
 	output_data->result_offset.store(off, std::memory_order_release);
 }
 
+static void apply_barrier_start_delay()
+{
+	if (!flag_barrier || barrier_delay_len == 0)
+		return;
+	if (barrier_index < 0)
+		return;
+	uint32_t idx = static_cast<uint32_t>(barrier_index);
+	if (idx >= barrier_delay_len)
+		return;
+	int64_t delay = barrier_start_delay_us[idx];
+	if (delay <= 0)
+		return;
+	struct timespec ts = {};
+	ts.tv_sec = delay / 1000000;
+	int64_t rem = delay % 1000000;
+	if (rem < 0)
+		rem = 0;
+	ts.tv_nsec = rem * 1000;
+	while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+		;
+}
+
 // execute_one executes program stored in input_data.
 void execute_one()
 {
@@ -1113,6 +1184,7 @@ void execute_one()
 			output_data->Reset();
 		}
 	}
+	apply_barrier_start_delay();
 	uint64 start = current_time_ms();
 	uint8* input_pos = input_data;
 

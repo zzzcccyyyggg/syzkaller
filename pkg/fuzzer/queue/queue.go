@@ -41,11 +41,16 @@ type Request struct {
 	BarrierPrograms []*prog.Prog
 	// BarrierProcList contains proc indices extracted from BarrierParticipants in ascending order.
 	BarrierProcList []int
+	// BarrierStartDelayUs carries per-proc start delays in microseconds, ordered like BarrierProcList.
+	BarrierStartDelayUs []int64
 
 	// Return all signal for these calls instead of new signal.
 	ReturnAllSignal []int
 	ReturnError     bool
 	ReturnOutput    bool
+
+	// UkcPair optionally carries May-UAF metadata to preload the UKC controller.
+	UkcPair *ddrd.MayUAFPair
 
 	// This stat will be incremented on request completion.
 	Stat *stat.Val
@@ -82,6 +87,7 @@ func (r *Request) SetBarrier(mask uint64) {
 		r.ExecOpts.ExecFlags &^= flatrpc.ExecFlagBarrier
 		r.BarrierPrograms = nil
 		r.BarrierProcList = nil
+		r.BarrierStartDelayUs = nil
 	}
 }
 
@@ -111,6 +117,30 @@ func (r *Request) SetBarrierPrograms(programs []*prog.Prog) error {
 		}
 	}
 	r.BarrierPrograms = programs
+	return nil
+}
+
+// SetBarrierStartDelays assigns per-proc executor start delays in microseconds. The provided slice must
+// correspond to BarrierProcList ordering. Passing nil clears the plan.
+func (r *Request) SetBarrierStartDelays(delays []int64) error {
+	if len(delays) == 0 {
+		r.BarrierStartDelayUs = nil
+		return nil
+	}
+	if !r.Barrier {
+		return fmt.Errorf("barrier delays require barrier execution")
+	}
+	expected := bits.OnesCount64(r.BarrierParticipants)
+	if expected == 0 {
+		return fmt.Errorf("barrier participants mask is empty")
+	}
+	if len(delays) != expected {
+		return fmt.Errorf("mismatched barrier delay count: have %d want %d", len(delays), expected)
+	}
+	if len(r.BarrierProcList) != expected {
+		r.BarrierProcList = enumerateBarrierProcs(r.BarrierParticipants)
+	}
+	r.BarrierStartDelayUs = append([]int64(nil), delays...)
 	return nil
 }
 
@@ -145,8 +175,12 @@ func (r *Request) Done(res *Result) {
 		r.Stat.Add(1)
 	}
 	r.initChannel()
-	r.result = res
-	close(r.done)
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	if r.result == nil {
+		r.result = res
+		close(r.done)
+	}
 }
 
 var ErrRequestAborted = errors.New("context closed while waiting the result")
@@ -213,6 +247,18 @@ func (r *Request) Validate() error {
 			return fmt.Errorf("barrier programs are incomplete: have %d want %d", len(r.BarrierPrograms), expected)
 		}
 	}
+	if len(r.BarrierStartDelayUs) != 0 {
+		if !r.Barrier {
+			return fmt.Errorf("barrier delays require barrier execution")
+		}
+		expected := bits.OnesCount64(r.BarrierParticipants)
+		if expected == 0 {
+			return fmt.Errorf("barrier participants mask is empty")
+		}
+		if len(r.BarrierStartDelayUs) != expected {
+			return fmt.Errorf("barrier delay count mismatch: have %d want %d", len(r.BarrierStartDelayUs), expected)
+		}
+	}
 	return nil
 }
 
@@ -232,6 +278,9 @@ func (r *Request) hash() hash.Sig {
 		panic(err)
 	}
 	if err := enc.Encode(r.BarrierProcList); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(r.BarrierStartDelayUs); err != nil {
 		panic(err)
 	}
 	if err := enc.Encode(len(r.BarrierPrograms)); err != nil {

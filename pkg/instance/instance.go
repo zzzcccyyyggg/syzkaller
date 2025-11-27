@@ -19,6 +19,7 @@ import (
 	"github.com/google/syzkaller/pkg/build"
 	"github.com/google/syzkaller/pkg/config"
 	"github.com/google/syzkaller/pkg/csource"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
@@ -462,7 +463,7 @@ func (inst *inst) csourceOptions() (csource.Options, error) {
 
 // nolint:revive
 func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Options,
-	optionalFlags bool, slowdown int, progFile string) string {
+	optionalFlags bool, slowdown int, progFile string, ukcPair *ddrd.MayUAFPair) string {
 	repeatCount := 1
 	if opts.Repeat {
 		repeatCount = 0
@@ -480,6 +481,10 @@ func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Optio
 	if opts.Fault && opts.FaultCall >= 0 {
 		optionalArg = fmt.Sprintf(" -fault_call=%v -fault_nth=%v",
 			opts.FaultCall, opts.FaultNth)
+	}
+	if ukcPair != nil {
+		optionalArg += fmt.Sprintf(" -ukc_use_name=%d -ukc_use_stack=%d -ukc_free_name=%d -ukc_free_stack=%d -ukc_use_access_delay_time=%d",
+			ukcPair.UseAccessName, ukcPair.UseCallStack, ukcPair.FreeAccessName, ukcPair.FreeCallStack, ukcPair.TimeDiff)
 	}
 	if optionalFlags {
 		optionalArg += " " + tool.OptionalFlags([]tool.Flag{

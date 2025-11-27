@@ -21,6 +21,7 @@ import (
 	"github.com/google/syzkaller/pkg/cover/backend"
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/db"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/log"
@@ -80,6 +81,12 @@ var (
 	// Note, however, that we do not have to do the same for `syz-prog2c`, as `collide` was there false
 	// by default.
 	_ = flag.Bool("collide", false, "(DEPRECATED) collide syscalls to provoke data races")
+
+	flagUkcUseName            = flag.Uint64("ukc_use_name", 0, "UKC use access name")
+	flagUkcUseStack           = flag.Uint64("ukc_use_stack", 0, "UKC use access stack")
+	flagUkcFreeName           = flag.Uint64("ukc_free_name", 0, "UKC free access name")
+	flagUkcFreeStack          = flag.Uint64("ukc_free_stack", 0, "UKC free access stack")
+	flagUkcUseAccessDelayTime = flag.Int("ukc_use_access_delay_time", 0, "UKC use access delay time")
 )
 
 func main() {
@@ -250,6 +257,15 @@ func (ctx *Context) Next() *queue.Request {
 
 	req := &queue.Request{
 		Prog: p,
+	}
+	if *flagUkcUseName != 0 {
+		req.UkcPair = &ddrd.MayUAFPair{
+			UseAccessName:  *flagUkcUseName,
+			UseCallStack:   *flagUkcUseStack,
+			FreeAccessName: *flagUkcFreeName,
+			FreeCallStack:  *flagUkcFreeStack,
+			TimeDiff:       uint64(*flagUkcUseAccessDelayTime),
+		}
 	}
 	if ctx.hints {
 		req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectComps

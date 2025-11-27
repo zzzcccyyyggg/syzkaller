@@ -214,6 +214,9 @@ func Complete(cfg *Config) error {
 	if err := cfg.initBarrierMask(); err != nil {
 		return err
 	}
+	if err := cfg.initUAFValidate(); err != nil {
+		return err
+	}
 	cfg.initTimeouts()
 	cfg.VMLess = cfg.Type == "none"
 	return nil
@@ -306,6 +309,26 @@ func (cfg *Config) initTimeouts() {
 	if cfg.VMRunningTime > 0 {
 		cfg.Timeouts.VMRunningTime = time.Duration(cfg.VMRunningTime) * time.Second
 	}
+}
+
+func (cfg *Config) initUAFValidate() error {
+	if cfg.Experimental.UAFValidate == nil {
+		return nil
+	}
+	validate := cfg.Experimental.UAFValidate
+	if validate.MaxConcurrent <= 0 {
+		validate.MaxConcurrent = 1
+	}
+	if validate.DelayRetryBudget <= 0 {
+		validate.DelayRetryBudget = 1
+	}
+	if validate.TimeoutSeconds <= 0 {
+		validate.TimeoutSeconds = 90
+	}
+	if validate.RepeatCount <= 0 {
+		validate.RepeatCount = 1
+	}
+	return nil
 }
 
 func checkNonEmpty(fields ...string) error {

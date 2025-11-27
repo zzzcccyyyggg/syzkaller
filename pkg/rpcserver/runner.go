@@ -7,6 +7,7 @@ import (
 	"bytes"
 	"errors"
 	"fmt"
+	"math"
 	"math/bits"
 	"os"
 	"slices"
@@ -25,6 +26,32 @@ import (
 	"github.com/google/syzkaller/sys/targets"
 	"github.com/google/syzkaller/vm/dispatcher"
 )
+
+func ukcPairAvailable(pair *ddrd.MayUAFPair) bool {
+	if pair == nil {
+		return false
+	}
+	return pair.FreeAccessName != 0 || pair.UseAccessName != 0 ||
+		pair.FreeCallStack != 0 || pair.UseCallStack != 0
+}
+
+func ukcDelayMicros(pair *ddrd.MayUAFPair) int32 {
+	if pair == nil || pair.TimeDiff == 0 {
+		return 0
+	}
+	diff := pair.TimeDiff
+	if diff > math.MaxInt64 {
+		diff = math.MaxInt64
+	}
+	micros := int64(diff) / int64(time.Microsecond)
+	if micros > math.MaxInt32 {
+		return math.MaxInt32
+	}
+	if micros < math.MinInt32 {
+		return math.MinInt32
+	}
+	return int32(micros)
+}
 
 type Runner struct {
 	id            int
@@ -360,6 +387,10 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 	default:
 		panic(fmt.Sprintf("unhandled request type %v", req.Type))
 	}
+	// if ctx.barrier != nil && msg.Try == 0 {
+	// 	log.Logf(0, "barrier trace: %s group=%d index=%d proc=%d state=handshake",
+	// 		time.Now().Format(time.RFC3339Nano), ctx.barrier.id, ctx.barrierIndex, proc)
+	// }
 	runner.lastExec.Note(int(msg.Id), proc, data, osutil.MonotonicNano())
 	select {
 	case runner.injectExec <- true:
@@ -449,7 +480,12 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	ctx.barrier.results[ctx.barrierIndex] = member
 	ctx.barrier.contexts[ctx.barrierIndex] = nil
+	// log.Logf(0, "barrier trace: %s group=%d index=%d proc=%d state=staged completed=%d/%d",
+	// 	time.Now().Format(time.RFC3339Nano), ctx.barrier.id, ctx.barrierIndex, int(msg.Proc),
+	// 	ctx.barrier.completed, len(ctx.barrier.contexts))
 	if ctx.barrier.completed == len(ctx.barrier.contexts) {
+		// log.Logf(0, "barrier trace: %s group=%d state=flush-trigger members=%d",
+		// 	time.Now().Format(time.RFC3339Nano), ctx.barrier.id, len(ctx.barrier.contexts))
 		runner.finishBarrierGroup(ctx.barrier)
 	}
 	// log.Logf(0, "runner %d: result processing done req=%d proc=%d barrier=%t barrier_id=%d duration=%s", runner.id, msg.Id, msg.Proc, isBarrier, barrierID, time.Since(start))
@@ -664,6 +700,17 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		execReq.BarrierGroupId = ctx.barrier.id
 		execReq.BarrierIndex = int32(ctx.barrierIndex)
 		execReq.BarrierGroupSize = int32(len(ctx.barrier.participants))
+		if len(req.BarrierStartDelayUs) != 0 {
+			execReq.BarrierStartDelayUs = append([]int64(nil), req.BarrierStartDelayUs...)
+		}
+	}
+	if pair := req.UkcPair; ukcPairAvailable(pair) {
+		execReq.UkcUseName = pair.UseAccessName
+		execReq.UkcUseStack = pair.UseCallStack
+		execReq.UkcFreeName = pair.FreeAccessName
+		execReq.UkcFreeStack = pair.FreeCallStack
+		execReq.UkcUseAccessDelayTime = ukcDelayMicros(pair)
+		execReq.UkcIsValid = true
 	}
 	msg := &flatrpc.HostMessage{
 		Msg: &flatrpc.HostMessages{

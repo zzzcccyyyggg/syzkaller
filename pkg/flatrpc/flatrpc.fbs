@@ -78,6 +78,12 @@ table InfoReplyRaw {
 table FileInfoRaw {
 	name			:string;
 	exists			:bool;
+	ukc_use_name	:uint64;
+	ukc_use_stack	:uint64;
+	ukc_free_name	:uint64;
+	ukc_free_stack	:uint64;
+	ukc_use_access_delay_time	:int32;
+	ukc_is_valid	:bool;
 	error			:string;
 	data			:[uint8];
 }
@@ -194,6 +200,15 @@ table ExecRequestRaw {
 	barrier_index		:int32;
 	// Total number of procs that are expected to participate in the barrier.
 	barrier_group_size	:int32;
+	// Optional per-proc start delay in microseconds, ordered by barrier_index.
+	barrier_start_delay_us	:[int64];
+	// Optional may-UAF metadata propagated to executors for preloading UKC controller.
+	ukc_use_name	:uint64;
+	ukc_use_stack	:uint64;
+	ukc_free_name	:uint64;
+	ukc_free_stack	:uint64;
+	ukc_use_access_delay_time	:int32;
+	ukc_is_valid	:bool;
 }
 
 table SignalUpdateRaw {
