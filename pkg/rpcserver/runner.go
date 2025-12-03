@@ -419,9 +419,9 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	// log.Logf(0, "runner %d: result processing start req=%d proc=%d barrier=%t barrier_id=%d", runner.id, msg.Id, msg.Proc, isBarrier, barrierID)
 	if analysis != nil {
-		// log.Logf(0, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
+		log.Logf(1, "ddrd: collected report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d uaf=%d extended=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID, len(analysis.UAFPairs), len(analysis.Extended))
 	} else if runner.debug {
-		log.Logf(1, "ddrd: no report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID)
+		// log.Logf(1, "ddrd: no report for req=%d vm=%d proc=%d barrier=%t barrier_id=%d", msg.Id, runner.id, msg.Proc, ctx.barrier != nil, barrierID)
 	}
 	status := queue.Success
 	var resErr error
@@ -646,7 +646,7 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		allSignal[i] = int32(call)
 	}
 	opts := req.ExecOpts
-	if ctx.barrier != nil {
+	if ctx.barrier != nil && !req.DisableDdrd {
 		opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
 	}
 	if runner.debug {
@@ -762,9 +762,9 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 	delete(runner.barrierGroups, group.id)
 	members := make([]*queue.BarrierMemberResult, len(group.results))
 	copy(members, group.results)
-	if totalUAF, totalExtended := summarizeDdrdResults(members); totalUAF != 0 || totalExtended != 0 {
-		log.Logf(0, "ddrd: barrier group %d aggregated results uaf=%d extended=%d", group.id, totalUAF, totalExtended)
-	}
+	// if totalUAF, totalExtended := summarizeDdrdResults(members); totalUAF != 0 || totalExtended != 0 {
+	// 	log.Logf(0, "ddrd: barrier group %d aggregated results uaf=%d extended=%d", group.id, totalUAF, totalExtended)
+	// }
 	status, resErr := summarizeBarrierStatus(members)
 	// log.Logf(0, "barrier group %d finished: status=%s members=%d err=%v", group.id, status.String(), len(members), resErr)
 	var primary *queue.BarrierMemberResult

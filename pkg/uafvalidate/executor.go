@@ -177,6 +177,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		ReturnOutput: true,
 		ReturnError:  true,
 		Important:    true,
+		DisableDdrd:  execReq.DisableDdrd,
 	}
 	if execReq.RepeatTimes > 0 {
 		// For barrier mode, we can't easily use syz-execprog's -repeat flag because
@@ -635,7 +636,9 @@ func (m *validationManager) MachineChecked(features flatrpc.Feature, syscalls ma
 	opts := fuzzer.DefaultExecOpts(m.cfg, features, m.debug)
 	opts.ExecFlags &^= flatrpc.ExecFlagThreaded
 	if m.request.UkcPair != nil {
-		opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+		if !m.request.DisableDdrd {
+			opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+		}
 	}
 	source := queue.Callback(func() *queue.Request {
 		if m.request == nil {

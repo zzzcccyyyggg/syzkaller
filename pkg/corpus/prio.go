@@ -41,6 +41,7 @@ func (pl *ProgramsList) saveProgram(p *prog.Prog, signal signal.Signal) {
 func (corpus *Corpus) ChooseProgram(r *rand.Rand) *prog.Prog {
 	corpus.mu.RLock()
 	defer corpus.mu.RUnlock()
+	// log.Logf(0, "corpus length: %d", len(corpus.progsMap))
 	if len(corpus.progsMap) == 0 {
 		return nil
 	}

@@ -122,16 +122,15 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	}
 	if fuzzer.uaf != nil {
 		ret.uafQueue = queue.Plain()
-		fuzzer.uaf.setQueue(ret.uafQueue)
-		sources = append(sources, ret.uafQueue)
+		sources = append(sources, ret.triageQueue)
 		sources = append(sources,
+			queue.Alternate(ret.smashQueue, skipQueue),
 			queue.Callback(fuzzer.genFuzz),
 		)
 
 	} else {
 		sources = append(sources, ret.triageQueue)
 		sources = append(sources,
-			queue.Alternate(ret.smashQueue, skipQueue),
 			queue.Callback(fuzzer.genFuzz),
 		)
 	}
@@ -206,6 +205,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 	// We do it before unblocking the waiting threads because
 	// it may result it concurrent modification of req.Prog.
 	var triage map[int]*triageCall
+	// log.Logf(0, "aaaa")
 	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal > 0 && res.Info != nil && !dontTriage {
 		for call, info := range res.Info.Calls {
 			fuzzer.triageProgCall(req.Prog, info, call, &triage)
@@ -344,6 +344,10 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 
 	// Either generate a new input or mutate an existing one.
 	mutateRate := 0.95
+	// log.Logf(0, "corpus length: %d", len(fuzzer.Config.Corpus.Programs()))
+	// for len(fuzzer.Config.Corpus.Programs()) == 0 {
+	// 	continue
+	// }
 	if !fuzzer.Config.Coverage {
 		// If we don't have real coverage signal, generate programs
 		// more frequently because fallback signal is weak.

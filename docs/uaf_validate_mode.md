@@ -9,17 +9,18 @@ The UAF validate mode replays persisted Use-After-Free candidates under controll
    - Allocates barrier delays via the delay manager.
    - Sets up a fresh executor instance via `validatorExecutorFactory`.
    - Runs the entry, capturing execution output, crash metadata, and DDRD reports.
-3. **Repeat Loop**: Every candidate runs `RepeatCount` times (default 3). Success is only acknowledged after the final repeat completes without crashes or executor errors.
-4. **Intersection Tracking**: On each successful repeat, DDRD pairs are intersected to identify pairs stable across runs. The last iteration publishes the stable set in the result payload.
-5. **Result Handling**: `syz-manager/uaf_validate.go` consumes `ValidationResult` objects, logs status per run, updates counters, and persists the consolidated outcome into `uaf-validated.db`.
+3. **Repeat Loop**: Every candidate runs `RepeatCount` times (default 1). Each repeat is attempted until it either succeeds, crashes, or hits the per-repeat retry budget; the final run’s outcome determines the confirmation status.
+4. **Intersection Tracking**: On each successful repeat, DDRD pairs are intersected to identify those that appear at least `repeat/2 + 1` times. The last iteration publishes the stable set in the result payload and optionally kicks off pair verification.
+5. **Result Handling & Verification**: `syz-manager/uaf_validate.go` consumes `ValidationResult` objects, logs status per run, updates counters, triggers verification for stable pairs, and persists the consolidated outcome into `uaf-validated.db`.
 6. **Shutdown**: Once all tasks finish and channels drain, the manager exits cleanly using the guarded shutdown helper to avoid double-close panics.
 
 ## Key Components
 - **`pkg/uafvalidate/StageManager`**
   - Handles task queuing, worker lifecycle, repeat scheduling, and intersection collection.
   - Guards against context cancellation (SIGINT, timeout) and aborts in-flight tasks gracefully.
+  - Launches verification runs for stable DDRD pairs, skipping any already marked as invalid in `invalid_uaf.db`.
 - **`validatorExecutorFactory` (`syz-manager/uaf_validate.go`)**
-  - Reuses the VM pool in round-robin fashion, setting up `instance.ExecProg` adapters for validation runs.
+  - Reuses the VM pool in round-robin fashion, setting up `instance.ExecProg` adapters for validation runs according to `uaf_validate.max_concurrent` (clamped to the VM count).
 - **Delay Management** (`pkg/uafvalidate/delay.go`)
   - Builds per-run barrier delays and retries within a configurable budget to tame flakiness.
 
@@ -27,17 +28,22 @@ The UAF validate mode replays persisted Use-After-Free candidates under controll
 - `MaxConcurrent`: Caps worker count (auto-clamped to VM pool size).
 - `DelayRetryBudget`: Maximum retries per repeat when crashes or transient errors occur.
 - `TimeoutSeconds`: Execution timeout for each repeat.
-- `RepeatCount`: Number of successful repeats required for confirmation.
+- `RepeatCount`: Total number of repeats attempted per entry (default 1). Stable pair intersection requires `repeat/2 + 1` successful observations.
 - `Debug`: Surfaces additional logging when enabled.
+
+Additional runtime files:
+- `invalid_uaf.db`: Tracks DDRD pairs that failed dedicated verification so future runs can skip them early.
 
 ## Logging & Diagnostics
 - **Per-Run Status**: Success, crash, or executor error is logged with repeat indices and pair counts.
-- **Stable Intersection**: Final repeat logs the number of stable DDRD pairs and enumerates each with access names, call stack hashes (`free_stack` / `use_stack`), signal, timing, sequence numbers, lock classification, and access type.
+- **Stable Intersection**: Final repeat logs the number of stable DDRD pairs (meeting the majority threshold) and enumerates each with access names, call stack hashes (`free_stack` / `use_stack`), signal, timing, sequence numbers, lock classification, and access type.
+- **Verification Phase**: Stable pairs are rerun (default 3 repeats) with targeted DDRD collection; pairs that fail to trigger are persisted into `invalid_uaf.db` to avoid future verification attempts.
 - **Executor Debug**: Runner-side debug (via `executor/executor_runner.h`) prints DDRD pairs with stack hashes, aiding correlation with kernel traces.
 
 ## Persistence Artifacts
 - `uaf-corpus.db`: Source corpus entries (programs, barriers, replay plans, original DDRD metadata).
 - `uaf-validated.db`: Validation outcomes with attempts, notes, timestamps, last seen pairs, and stable intersections.
+- `invalid_uaf.db`: Cache of DDRD pairs that consistently fail verification, preventing repeat work.
 
 ## Error Handling
 - Executor errors and crashes trigger retries (bounded by the delay budget). Persistent failures mark the entry as `failed` with diagnostic notes.

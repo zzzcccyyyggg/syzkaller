@@ -455,8 +455,8 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
         RacePair* race_pair = &race_pairs[basic_count];
         uaf_buffer[basic_count].use_access_name  = race_pair->first.var_name;
         uaf_buffer[basic_count].free_access_name  = race_pair->second.var_name;
-        uaf_buffer[basic_count].use_access_name   = race_pair->first.call_stack_hash;
-        uaf_buffer[basic_count].free_access_name   = race_pair->second.call_stack_hash;
+        uaf_buffer[basic_count].use_call_stack   = race_pair->first.call_stack_hash;
+        uaf_buffer[basic_count].free_call_stack   = race_pair->second.call_stack_hash;
         uaf_buffer[basic_count].use_sn           = race_pair->first.sn;
         uaf_buffer[basic_count].free_sn          = race_pair->second.sn;
         uaf_buffer[basic_count].lock_type     = race_pair->lock_status;

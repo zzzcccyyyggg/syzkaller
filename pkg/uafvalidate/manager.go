@@ -26,6 +26,7 @@ type ExecutionRequest struct {
 	Delays      []int64
 	TargetPair  *ddrd.MayUAFPair
 	RepeatTimes int
+	DisableDdrd bool
 }
 
 type ExecutionResult struct {
@@ -454,6 +455,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 
+		pairCopy := pair
 		exec, err := sm.factory(ctx)
 		if err != nil {
 			log.Logf(0, "uafvalidate: failed to create executor for verification: %v", err)
@@ -463,8 +465,9 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		req := &ExecutionRequest{
 			Entry:       task.entry,
 			Delays:      sm.delay.BuildDelays(task.entry),
-			TargetPair:  &pair,
+			TargetPair:  &pairCopy,
 			RepeatTimes: 3,
+			DisableDdrd: true,
 		}
 
 		execRes, runErr := exec.Run(ctx, req)

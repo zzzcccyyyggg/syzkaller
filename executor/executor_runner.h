@@ -785,6 +785,33 @@ public:
 		active_for_group_ = false;
 		extended_requested_ = collect_extended;
 
+		bool set_pair = false;
+		ukc_device_uaf_pair_t pair = {};
+		if (req && req->ukc_is_valid) {
+			pair.use_name = req->ukc_use_name;
+			pair.use_stack = req->ukc_use_stack;
+			pair.free_name = req->ukc_free_name;
+			pair.free_stack = req->ukc_free_stack;
+			pair.use_access_delay_time = req->ukc_use_access_delay_time;
+			pair.is_valid = true;
+			set_pair = true;
+		} else if (collect_uaf && ukc_preload_valid) {
+			pair.use_name = ukc_preload_pair.use_name;
+			pair.use_stack = ukc_preload_pair.use_stack;
+			pair.free_name = ukc_preload_pair.free_name;
+			pair.free_stack = ukc_preload_pair.free_stack;
+			pair.use_access_delay_time = ukc_preload_pair.use_access_delay_time;
+			pair.is_valid = true;
+			set_pair = true;
+		}
+
+		if (set_pair) {
+			ukc_enter_monitor_mode();
+			ukc_set_may_uaf_pair(&pair);
+		} else if (collect_uaf) {
+			ukc_clear_may_uaf_pair();
+		}
+
 		if (!collect_uaf && !collect_extended)
 			return;
 
@@ -805,36 +832,6 @@ public:
 		}
 
 		active_for_group_ = true;
-
-#if GOOS_linux
-		if (collect_uaf) {
-			bool valid = false;
-			ukc_device_uaf_pair_t pair = {};
-			if (req && req->ukc_is_valid) {
-				pair.use_name = req->ukc_use_name;
-				pair.use_stack = req->ukc_use_stack;
-				pair.free_name = req->ukc_free_name;
-				pair.free_stack = req->ukc_free_stack;
-				pair.use_access_delay_time = req->ukc_use_access_delay_time;
-				pair.is_valid = true;
-				valid = true;
-			} else if (ukc_preload_valid) {
-				pair.use_name = ukc_preload_pair.use_name;
-				pair.use_stack = ukc_preload_pair.use_stack;
-				pair.free_name = ukc_preload_pair.free_name;
-				pair.free_stack = ukc_preload_pair.free_stack;
-				pair.use_access_delay_time = ukc_preload_pair.use_access_delay_time;
-				pair.is_valid = true;
-				valid = true;
-			}
-
-			if (valid) {
-				ukc_set_may_uaf_pair(&pair);
-			} else {
-				ukc_clear_may_uaf_pair();
-			}
-		}
-#endif
 
 		// Switch to LOG mode
 		if (collect_uaf || collect_extended)
@@ -1520,25 +1517,32 @@ private:
 		// Check if any member requests DDRD and prepare
 		bool collect_uaf = false;
 		bool collect_extended = false;
-		const rpc::ExecRequestRawT* uaf_req = nullptr;
+		bool has_ukc_pair = false;
+		const rpc::ExecRequestRawT* setup_req = nullptr;
 
 		for (const auto& member : group.members) {
-			if (member.has_value() && member->exec_opts) {
+			if (!member.has_value())
+				continue;
+			if (member->exec_opts) {
 				auto flags = member->exec_opts->exec_flags();
 				if (IsSet(flags, rpc::ExecFlag::CollectDdrdUaf)) {
 					collect_uaf = true;
-					uaf_req = &(*member);
+					setup_req = &(*member);
 				}
 				if (IsSet(flags, rpc::ExecFlag::CollectDdrdExtended))
 					collect_extended = true;
 			}
+			if (member->ukc_is_valid) {
+				has_ukc_pair = true;
+				if (!setup_req)
+					setup_req = &(*member);
+			}
 		}
-		if (collect_uaf || collect_extended) {
-			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, uaf_req);
-			group.ddrd_active = true;
-		} else {
-			group.ddrd_active = false;
-		}
+		if (collect_uaf || collect_extended || has_ukc_pair)
+			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, setup_req);
+		group.ddrd_active = collect_uaf || collect_extended;
+#else
+		group.ddrd_active = false;
 #endif
 
 		// debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",

@@ -252,8 +252,8 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 		u.entries[key] = seed
 		u.corpus.addSeed(key, entry)
 		seeds = append(seeds, seed)
-		total := len(u.entries)
-		u.fuzzer.Logf(0, "uaf: queued uaf pair seed %s (total=%d)", key, total)
+		// total := len(u.entries)
+		// u.fuzzer.Logf(0, "uaf: queued uaf pair seed %s (total=%d)", key, total)
 	}
 	u.mu.Unlock()
 	// u.fuzzer.Logf(0, "uaf: handleNewPairs unlocked barrier_id=%d new_seeds=%d", groupID, len(seeds))

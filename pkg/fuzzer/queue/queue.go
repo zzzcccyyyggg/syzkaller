@@ -52,6 +52,9 @@ type Request struct {
 	// UkcPair optionally carries May-UAF metadata to preload the UKC controller.
 	UkcPair *ddrd.MayUAFPair
 
+	// DisableDdrd prevents automatic DDRD collection even for barrier executions.
+	DisableDdrd bool
+
 	// This stat will be incremented on request completion.
 	Stat *stat.Val
 
@@ -284,6 +287,9 @@ func (r *Request) hash() hash.Sig {
 		panic(err)
 	}
 	if err := enc.Encode(len(r.BarrierPrograms)); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(r.DisableDdrd); err != nil {
 		panic(err)
 	}
 	for _, prog := range r.BarrierPrograms {
