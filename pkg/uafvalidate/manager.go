@@ -22,11 +22,12 @@ type Executor interface {
 type ExecutorFactory func(ctx context.Context) (Executor, error)
 
 type ExecutionRequest struct {
-	Entry       *fuzzer.UAFCorpusEntry
-	Delays      []int64
-	TargetPair  *ddrd.MayUAFPair
-	RepeatTimes int
-	DisableDdrd bool
+	Entry         *fuzzer.UAFCorpusEntry
+	Delays        []int64
+	TargetPair    *ddrd.MayUAFPair
+	RepeatTimes   int
+	DisableDdrd   bool
+	StopOnSuccess bool
 }
 
 type ExecutionResult struct {
@@ -34,6 +35,7 @@ type ExecutionResult struct {
 	Duration       time.Duration
 	Crashed        bool
 	CrashTitle     string
+	CrashReport    []byte
 	Ddrd           *ddrd.Report
 	TriggeredCount int
 }
@@ -64,6 +66,7 @@ type StageManager struct {
 	results chan *ValidationResult
 
 	invalidDB *db.DB
+	validDB   *db.DB
 
 	mu          sync.Mutex
 	pending     map[string]*validationTask
@@ -79,6 +82,8 @@ var zeroSignatureKey = SignatureKey(fuzzer.UAFPairProfile{})
 const (
 	crashLostConnection = "lost connection to test machine"
 	crashTimedOut       = "timed out"
+	maxCrashReportSize  = 64 << 10
+	crashReportFallback = "no report captured"
 )
 
 type validationTask struct {
@@ -116,6 +121,14 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		} else {
 			sm.invalidDB = d
 			log.Logf(0, "uafvalidate: loaded %d invalid pairs from db", len(d.Records))
+		}
+		validPath := filepath.Join(cfg.Workdir, "validated_uaf.db")
+		vd, err := db.Open(validPath, true)
+		if err != nil {
+			log.Logf(0, "uafvalidate: failed to open validated pair db: %v", err)
+		} else {
+			sm.validDB = vd
+			log.Logf(0, "uafvalidate: loaded %d validated pairs from db", len(vd.Records))
 		}
 	}
 
@@ -454,6 +467,10 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+		if sm.isValidated(key) {
+			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+			continue
+		}
 
 		pairCopy := pair
 		exec, err := sm.factory(ctx)
@@ -463,11 +480,12 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		req := &ExecutionRequest{
-			Entry:       task.entry,
-			Delays:      sm.delay.BuildDelays(task.entry),
-			TargetPair:  &pairCopy,
-			RepeatTimes: 3,
-			DisableDdrd: true,
+			Entry:         task.entry,
+			Delays:        sm.delay.BuildDelays(task.entry),
+			TargetPair:    &pairCopy,
+			RepeatTimes:   3,
+			DisableDdrd:   true,
+			StopOnSuccess: true,
 		}
 
 		execRes, runErr := exec.Run(ctx, req)
@@ -486,6 +504,12 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			}
 			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t triggered=%d/%d status=%s",
 				execRes.Duration, execRes.Crashed, execRes.TriggeredCount, req.RepeatTimes, status)
+			if execRes.TriggeredCount > 0 {
+				reportData := serializeCrashReport(execRes)
+				sm.markValidated(key, reportData)
+				log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, string(reportData))
+				continue
+			}
 
 			if execRes.TriggeredCount == 0 {
 				sm.markInvalid(key)
@@ -514,4 +538,43 @@ func (sm *StageManager) markInvalid(key string) {
 	if err := sm.invalidDB.Flush(); err != nil {
 		log.Logf(0, "uafvalidate: failed to flush invalid db: %v", err)
 	}
+}
+
+func (sm *StageManager) isValidated(key string) bool {
+	if sm.validDB == nil {
+		return false
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	_, ok := sm.validDB.Records[key]
+	return ok
+}
+
+func (sm *StageManager) markValidated(key string, data []byte) {
+	if sm.validDB == nil {
+		return
+	}
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.validDB.Save(key, data, 0)
+	if err := sm.validDB.Flush(); err != nil {
+		log.Logf(0, "uafvalidate: failed to flush validated db: %v", err)
+	}
+}
+
+func serializeCrashReport(res *ExecutionResult) []byte {
+	if res == nil {
+		return []byte(crashReportFallback)
+	}
+	data := res.CrashReport
+	if len(data) == 0 {
+		data = res.Output
+	}
+	if len(data) == 0 {
+		return []byte(crashReportFallback)
+	}
+	if len(data) > maxCrashReportSize {
+		data = data[:maxCrashReportSize]
+	}
+	return append([]byte{}, data...)
 }

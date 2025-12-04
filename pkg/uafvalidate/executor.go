@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"math/bits"
 	"net"
+	"strconv"
 	"sync/atomic"
 	"time"
 
@@ -116,6 +117,9 @@ func (e *ExecutorAdapter) runSingle(ctx context.Context, req *ExecutionRequest) 
 	if res.Report != nil {
 		result.Crashed = true
 		result.CrashTitle = res.Report.Title
+		if len(res.Report.Report) != 0 {
+			result.CrashReport = append([]byte{}, res.Report.Report...)
+		}
 	}
 	return result, nil
 }
@@ -380,6 +384,10 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 						pair.FreeCallStack == execReq.TargetPair.FreeCallStack &&
 						pair.UseCallStack == execReq.TargetPair.UseCallStack {
 						triggeredCount++
+						if execReq.StopOnSuccess {
+							runCancel()
+							completed = target
+						}
 						break
 					}
 				}
@@ -417,6 +425,15 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	reports := execOutcome.reports
 	runErr := execOutcome.err
 
+	if execReq.TargetPair != nil {
+		if matches := crashMatchesTargetPair(reports, execReq.TargetPair); matches > triggeredCount {
+			triggeredCount = matches
+			if execReq.StopOnSuccess && triggeredCount > 0 {
+				runCancel()
+			}
+		}
+	}
+
 	serveErr := cleanupServe()
 
 	var runnerErr error
@@ -433,20 +450,42 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	}
 
 	if runErr != nil {
+		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
+			log.Logf(0, "uafvalidate: barrier request recovered crash result after VM error: %v", runErr)
+			return result, nil
+		}
 		if errors.Is(runErr, context.DeadlineExceeded) {
-			return &ExecutionResult{Duration: time.Since(start), CrashTitle: crashTimedOut, Crashed: true, Output: append([]byte{}, output...)}, nil
+			return &ExecutionResult{
+				Duration:    time.Since(start),
+				CrashTitle:  crashTimedOut,
+				Crashed:     true,
+				Output:      append([]byte{}, output...),
+				CrashReport: cloneReportBody(firstNonNilReport(reports)),
+			}, nil
 		}
 		if !errors.Is(runErr, context.Canceled) {
 			return nil, fmt.Errorf("run barrier request: %w", runErr)
 		}
 	}
 	if runnerErr != nil && !errors.Is(runnerErr, context.Canceled) {
+		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
+			log.Logf(0, "uafvalidate: barrier request recovered crash result after runner error: %v", runnerErr)
+			return result, nil
+		}
 		return nil, fmt.Errorf("runner error: %w", runnerErr)
 	}
 	if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
+			log.Logf(0, "uafvalidate: barrier request recovered crash result after rpc server error: %v", serveErr)
+			return result, nil
+		}
 		return nil, fmt.Errorf("rpc server error: %w", serveErr)
 	}
 	if res == nil {
+		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
+			log.Logf(0, "uafvalidate: barrier request recovered crash result with no queue result")
+			return result, nil
+		}
 		log.Logf(0, "uafvalidate: barrier request returned no result after %s", time.Since(start))
 		return nil, fmt.Errorf("barrier execution produced no result")
 	}
@@ -455,19 +494,23 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	if len(execOutput) == 0 && len(output) != 0 {
 		execOutput = output
 	}
+	rep := firstNonNilReport(reports)
 
 	result := &ExecutionResult{
 		Output:         append([]byte{}, execOutput...),
 		Duration:       time.Since(start),
 		TriggeredCount: triggeredCount,
 	}
+	if rep != nil {
+		result.CrashReport = cloneReportBody(rep)
+	}
 	if res.Ddrd != nil {
 		result.Ddrd = res.Ddrd.Clone()
 	}
 
-	if len(reports) != 0 && reports[0] != nil {
+	if rep != nil {
 		result.Crashed = true
-		result.CrashTitle = reports[0].Title
+		result.CrashTitle = rep.Title
 		log.Logf(0, "uafvalidate: barrier request status=%s crashed=true duration=%s", res.Status, result.Duration)
 		return result, nil
 	}
@@ -610,6 +653,98 @@ func isZeroUkcPair(pair ddrd.MayUAFPair) bool {
 
 func newValidationManager(cfg *mgrconfig.Config, req *queue.Request, debug bool) *validationManager {
 	return &validationManager{cfg: cfg, request: req, debug: debug}
+}
+
+func crashMatchesTargetPair(reports []*report.Report, target *ddrd.MayUAFPair) int {
+	if target == nil || len(reports) == 0 {
+		return 0
+	}
+	want := targetVarNames(target)
+	if len(want) == 0 {
+		return 0
+	}
+	matches := 0
+	for _, rep := range reports {
+		if reportMatchesVarNames(rep, want) {
+			matches++
+		}
+	}
+	return matches
+}
+
+func firstNonNilReport(reports []*report.Report) *report.Report {
+	for _, rep := range reports {
+		if rep != nil {
+			return rep
+		}
+	}
+	return nil
+}
+
+func cloneReportBody(rep *report.Report) []byte {
+	if rep == nil || len(rep.Report) == 0 {
+		return nil
+	}
+	return append([]byte{}, rep.Report...)
+}
+
+func crashFallbackResult(execReq *ExecutionRequest, reports []*report.Report, output []byte, start time.Time) *ExecutionResult {
+	if execReq == nil || execReq.TargetPair == nil {
+		return nil
+	}
+	matches := crashMatchesTargetPair(reports, execReq.TargetPair)
+	if matches == 0 {
+		return nil
+	}
+	rep := firstNonNilReport(reports)
+	title := ""
+	if rep != nil {
+		title = rep.Title
+	}
+	return &ExecutionResult{
+		Output:         append([]byte{}, output...),
+		Duration:       time.Since(start),
+		TriggeredCount: matches,
+		Crashed:        true,
+		CrashTitle:     title,
+		CrashReport:    cloneReportBody(rep),
+	}
+}
+
+func targetVarNames(pair *ddrd.MayUAFPair) map[string]struct{} {
+	if pair == nil {
+		return nil
+	}
+	want := make(map[string]struct{}, 2)
+	if pair.FreeAccessName != 0 {
+		want[strconv.FormatUint(pair.FreeAccessName, 10)] = struct{}{}
+	}
+	if pair.UseAccessName != 0 {
+		want[strconv.FormatUint(pair.UseAccessName, 10)] = struct{}{}
+	}
+	return want
+}
+
+func reportMatchesVarNames(rep *report.Report, want map[string]struct{}) bool {
+	if rep == nil || len(want) == 0 {
+		return false
+	}
+	info := rep.CustomDataRace
+	if info == nil {
+		info = report.ParseCustomDataRace(rep.Report)
+	}
+	if info == nil || len(info.Entries) == 0 {
+		return false
+	}
+	for _, entry := range info.Entries {
+		if entry == nil {
+			continue
+		}
+		if _, ok := want[entry.VarName]; ok {
+			return true
+		}
+	}
+	return false
 }
 
 type validationManager struct {
