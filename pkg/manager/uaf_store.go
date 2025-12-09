@@ -26,6 +26,7 @@ type storedUAFCorpusEntry struct {
 	Programs   [][]byte               `json:"programs,omitempty"`
 	CallIdx    int                    `json:"call_idx"`
 	Pair       ddrd.MayUAFPair        `json:"pair"`
+	Pairs      []ddrd.MayUAFPair      `json:"pairs,omitempty"`
 	Signals    []uint64               `json:"signals,omitempty"`
 	Barrier    fuzzer.BarrierSnapshot `json:"barrier"`
 	ReplayPlan *storedReplayPlan      `json:"replay_plan,omitempty"`
@@ -116,6 +117,15 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 		Barrier:   entry.Barrier,
 		Timestamp: entry.Timestamp,
 	}
+	if len(entry.Pairs) != 0 {
+		stored.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
+		for _, pair := range entry.Pairs {
+			if pair == nil {
+				continue
+			}
+			stored.Pairs = append(stored.Pairs, *pair)
+		}
+	}
 	if entry.Prog != nil {
 		stored.Program = entry.Prog.Serialize()
 	}
@@ -174,6 +184,20 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		Barrier:       stored.Barrier,
 		Timestamp:     stored.Timestamp,
 	}
+	if len(stored.Pairs) != 0 {
+		entry.Pairs = make([]*ddrd.MayUAFPair, 0, len(stored.Pairs))
+		for i := range stored.Pairs {
+			pair := stored.Pairs[i]
+			copyPair := pair
+			entry.Pairs = append(entry.Pairs, &copyPair)
+		}
+	} else if !isZeroMayUAFPair(stored.Pair) {
+		pairCopy := stored.Pair
+		entry.Pairs = []*ddrd.MayUAFPair{&pairCopy}
+	}
+	if len(entry.Pairs) != 0 {
+		entry.PairBasicInfo = *entry.Pairs[0]
+	}
 	if store.target != nil && len(stored.Program) != 0 {
 		progObj, err := store.target.Deserialize(stored.Program, prog.NonStrict)
 		if err != nil {
@@ -210,6 +234,11 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		}
 	}
 	return entry, nil
+}
+
+func isZeroMayUAFPair(pair ddrd.MayUAFPair) bool {
+	return pair.FreeAccessName == 0 && pair.UseAccessName == 0 &&
+		pair.FreeCallStack == 0 && pair.UseCallStack == 0
 }
 
 func sliceToSignal(values []uint64) ddrd.UAFSignal {

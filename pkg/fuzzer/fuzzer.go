@@ -33,6 +33,8 @@ type Fuzzer struct {
 	ddrd   *ddrd.Store
 	uaf    *uafMode
 
+	uafBootstrapDone atomic.Bool
+
 	ctx          context.Context
 	mu           sync.Mutex
 	rnd          *rand.Rand
@@ -97,7 +99,6 @@ type execQueues struct {
 	candidateQueue       *queue.PlainQueue
 	triageQueue          *queue.DynamicOrderer
 	smashQueue           *queue.PlainQueue
-	uafQueue             *queue.PlainQueue
 	source               queue.Source
 }
 
@@ -121,7 +122,6 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		ret.candidateQueue,
 	}
 	if fuzzer.uaf != nil {
-		ret.uafQueue = queue.Plain()
 		sources = append(sources, ret.triageQueue)
 		sources = append(sources,
 			queue.Alternate(ret.smashQueue, skipQueue),
@@ -361,7 +361,7 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	if req == nil {
 		req = genProgRequest(fuzzer, rnd)
 	}
-	if fuzzer.uaf != nil {
+	if fuzzer.uafReady() {
 		fuzzer.applyBarrier(req)
 		flags := ProgFlags(0)
 		if req.Barrier {
@@ -570,6 +570,21 @@ func (fuzzer *Fuzzer) EnqueueUAFCorpus(entries []*UAFCorpusEntry) int {
 		return 0
 	}
 	return fuzzer.uaf.restore(entries)
+}
+
+func (fuzzer *Fuzzer) ActivateUAFMode() bool {
+	if fuzzer == nil || fuzzer.uaf == nil {
+		return false
+	}
+	if !fuzzer.uafBootstrapDone.CompareAndSwap(false, true) {
+		return false
+	}
+	fuzzer.Logf(1, "uaf: enabling barrier fuzzing after corpus triage")
+	return true
+}
+
+func (fuzzer *Fuzzer) uafReady() bool {
+	return fuzzer != nil && fuzzer.uaf != nil && fuzzer.uafBootstrapDone.Load()
 }
 
 func (fuzzer *Fuzzer) RunningJobs() []*JobInfo {

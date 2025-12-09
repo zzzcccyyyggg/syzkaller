@@ -31,18 +31,28 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	progAlt := target.Generate(rand.NewSource(2), 2, ct)
 
 	signal := uint64(0xdeadbeef)
+	primary := &ddrd.MayUAFPair{
+		Signal:         signal,
+		FreeAccessName: 0x10,
+		UseAccessName:  0x20,
+		FreeCallStack:  0x30,
+		UseCallStack:   0x40,
+	}
+	secondary := &ddrd.MayUAFPair{
+		Signal:         signal + 1,
+		FreeAccessName: 0x11,
+		UseAccessName:  0x21,
+		FreeCallStack:  0x31,
+		UseCallStack:   0x41,
+	}
+	pairs := []*ddrd.MayUAFPair{primary, secondary}
 	entry := &fuzzer.UAFCorpusEntry{
-		Prog:     progMain.Clone(),
-		Programs: []*prog.Prog{progMain.Clone(), progAlt.Clone()},
-		PairBasicInfo: ddrd.MayUAFPair{
-			Signal:         signal,
-			FreeAccessName: 0x10,
-			UseAccessName:  0x20,
-			FreeCallStack:  0x30,
-			UseCallStack:   0x40,
-		},
-		Signals: ddrd.UAFSignal{signal: {}},
-		Barrier: fuzzer.BarrierSnapshot{Participants: 0x3, ProcList: []int{0, 1}},
+		Prog:          progMain.Clone(),
+		Programs:      []*prog.Prog{progMain.Clone(), progAlt.Clone()},
+		PairBasicInfo: *primary,
+		Pairs:         pairs,
+		Signals:       ddrd.FromUAFPairs(pairs, ddrd.UAFSignalPrioHigh),
+		Barrier:       fuzzer.BarrierSnapshot{Participants: 0x3, ProcList: []int{0, 1}},
 		ReplayPlan: fuzzer.UAFCorpusReplayPlan{
 			DelaysMicros: []int64{1500, 2500},
 		},
@@ -94,6 +104,18 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	for i, delay := range entry.ReplayPlan.DelaysMicros {
 		if got.ReplayPlan.DelaysMicros[i] != delay {
 			t.Fatalf("delay[%d]=%d want %d", i, got.ReplayPlan.DelaysMicros[i], delay)
+		}
+	}
+	if len(got.Pairs) != len(entry.Pairs) {
+		t.Fatalf("pairs length mismatch: got %d want %d", len(got.Pairs), len(entry.Pairs))
+	}
+	for i, want := range entry.Pairs {
+		gotPair := got.Pairs[i]
+		if gotPair == nil {
+			t.Fatalf("missing pair at %d", i)
+		}
+		if *gotPair != *want {
+			t.Fatalf("pair %d mismatch: got=%+v want=%+v", i, *gotPair, *want)
 		}
 	}
 	if got.Profile.FreeAccessName != entry.PairBasicInfo.FreeAccessName {

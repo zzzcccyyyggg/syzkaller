@@ -1453,6 +1453,7 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 
 		// Update the state machine.
 		if fuzzer.CandidateTriageFinished() {
+			fuzzer.ActivateUAFMode()
 			if mgr.mode == ModeCorpusTriage {
 				mgr.exit("corpus triage")
 			}

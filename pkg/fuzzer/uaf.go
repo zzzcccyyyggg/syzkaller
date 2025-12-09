@@ -33,12 +33,13 @@ type uafMode struct {
 	mu      sync.Mutex
 	entries map[string]*barrierSeed
 	corpus  *uafCorpus
+	pairs   map[uint64]*ddrd.MayUAFPair
 }
 
 type uafCorpus struct {
 	mu        sync.RWMutex
 	seeds     map[string]*UAFCorpusEntry
-	pairIDs   map[uint64]struct{}
+	pairs     map[uint64]*ddrd.MayUAFPair
 	coverage  cover.Cover
 	statSeeds *stat.Val
 	statCover *stat.Val
@@ -60,6 +61,7 @@ type UAFCorpusEntry struct {
 	Prog          *prog.Prog
 	Programs      []*prog.Prog
 	CallIdx       int
+	Pairs         []*ddrd.MayUAFPair
 	PairBasicInfo ddrd.MayUAFPair
 	Signals       ddrd.UAFSignal
 	Barrier       BarrierSnapshot
@@ -125,13 +127,14 @@ func newUAFMode(f *Fuzzer) *uafMode {
 		fuzzer:  f,
 		entries: make(map[string]*barrierSeed),
 		corpus:  newUAFCorpus(),
+		pairs:   make(map[uint64]*ddrd.MayUAFPair),
 	}
 }
 
 func newUAFCorpus() *uafCorpus {
 	uc := &uafCorpus{
-		seeds:   make(map[string]*UAFCorpusEntry),
-		pairIDs: make(map[uint64]struct{}),
+		seeds: make(map[string]*UAFCorpusEntry),
+		pairs: make(map[uint64]*ddrd.MayUAFPair),
 	}
 	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer",
 		stat.Console, stat.Graph("uaf"), func() int {
@@ -149,7 +152,7 @@ func newUAFCorpus() *uafCorpus {
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
-			return len(uc.pairIDs)
+			return len(uc.pairs)
 		})
 	return uc
 }
@@ -162,8 +165,15 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry) {
 	uc.mu.Lock()
 	defer uc.mu.Unlock()
 	uc.seeds[key] = clone
-	if id := clone.PairID(); id != 0 {
-		uc.pairIDs[id] = struct{}{}
+	for _, pair := range clone.Pairs {
+		if pair == nil {
+			continue
+		}
+		id := pair.UAFPairID()
+		if id == 0 {
+			continue
+		}
+		uc.pairs[id] = pair
 	}
 }
 
@@ -197,6 +207,23 @@ func (u *uafMode) setQueue(q *queue.PlainQueue) {
 	u.queue = q
 }
 
+func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
+	if u == nil || pair == nil {
+		return nil
+	}
+	id := pair.UAFPairID()
+	if id == 0 {
+		return nil
+	}
+	if existing, ok := u.pairs[id]; ok {
+		return existing
+	}
+	clone := new(ddrd.MayUAFPair)
+	*clone = *pair
+	u.pairs[id] = clone
+	return clone
+}
+
 func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []*ddrd.MayUAFPair) {
 	if u == nil || len(pairs) == 0 || req == nil || req.Prog == nil {
 		return
@@ -205,65 +232,55 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	barrier := buildBarrierSnapshot(req, res)
 	groupTemplate := snapshotProgramGroup(req)
 	plan := snapshotReplayPlan(req)
-	// groupID := int64(0)
-	// if res != nil {
-	// 	groupID = res.BarrierGroupID
-	// }
-	// start := time.Now()
-	// u.fuzzer.Logf(0, "uaf: handleNewPairs begin barrier_id=%d pairs=%d", groupID, len(pairs))
 
 	u.mu.Lock()
-	// u.fuzzer.Logf(0, "uaf: handleNewPairs locked barrier_id=%d pairs=%d existing=%d", groupID, len(pairs), len(u.entries))
-	var seeds []*barrierSeed
+	var batch []*ddrd.MayUAFPair
 	for _, pair := range pairs {
-		if pair == nil {
-			// u.fuzzer.Logf(1, "uaf: handleNewPairs skip nil pair barrier_id=%d", groupID)
+		cloned := u.addPairLocked(pair)
+		if cloned == nil {
 			continue
 		}
-		id := pair.UAFPairID()
-		if id == 0 {
-			// u.fuzzer.Logf(1, "uaf: handleNewPairs skip zero id barrier_id=%d", groupID)
-			continue
-		}
-		key := uafSeedKey(id)
-		if _, exists := u.entries[key]; exists {
-			// u.fuzzer.Logf(0, "uaf: handleNewPairs duplicate pair barrier_id=%d id=%016x", groupID, id)
-			continue
-		}
-		entry := newUAFCorpusEntry(req.Prog, pair, barrier, now)
-		entry.Kind = seedKindUAF
-		if len(groupTemplate) != 0 {
-			entry.Programs = clonePrograms(groupTemplate)
-		}
-		entry.ReplayPlan = plan.clone()
-		seed := &barrierSeed{
-			kind:       seedKindUAF,
-			entry:      entry,
-			execOpts:   req.ExecOpts,
-			replayPlan: plan.clone(),
-			syncable:   true,
-			synced:     false,
-		}
-		if len(req.BarrierPrograms) != 0 {
-			seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
-		} else if len(entry.Programs) != 0 {
-			seed.barrierPrograms = clonePrograms(entry.Programs)
-		}
-		u.entries[key] = seed
-		u.corpus.addSeed(key, entry)
-		seeds = append(seeds, seed)
-		// total := len(u.entries)
-		// u.fuzzer.Logf(0, "uaf: queued uaf pair seed %s (total=%d)", key, total)
+		batch = append(batch, cloned)
 	}
 	u.mu.Unlock()
-	// u.fuzzer.Logf(0, "uaf: handleNewPairs unlocked barrier_id=%d new_seeds=%d", groupID, len(seeds))
-
-	for _, seed := range seeds {
-		// u.fuzzer.Logf(0, "uaf: handleNewPairs enqueue start barrier_id=%d", groupID)
-		u.enqueueSeed(seed)
-		// u.fuzzer.Logf(0, "uaf: handleNewPairs enqueue done barrier_id=%d", groupID)
+	if len(batch) == 0 {
+		return
 	}
-	// u.fuzzer.Logf(0, "uaf: handleNewPairs done barrier_id=%d duration=%s", groupID, time.Since(start))
+
+	entry := newUAFCorpusEntry(req.Prog, batch, barrier, now)
+	entry.Kind = seedKindUAF
+	if len(groupTemplate) != 0 {
+		entry.Programs = clonePrograms(groupTemplate)
+	}
+	entry.ReplayPlan = plan.clone()
+	seed := &barrierSeed{
+		kind:       seedKindUAF,
+		entry:      entry,
+		execOpts:   req.ExecOpts,
+		replayPlan: plan.clone(),
+		syncable:   true,
+		synced:     false,
+	}
+	if len(req.BarrierPrograms) != 0 {
+		seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
+	} else if len(entry.Programs) != 0 {
+		seed.barrierPrograms = clonePrograms(entry.Programs)
+	}
+	id := entry.PairID()
+	if id == 0 {
+		return
+	}
+	key := uafSeedKey(id)
+	u.mu.Lock()
+	if _, exists := u.entries[key]; exists {
+		u.mu.Unlock()
+		return
+	}
+	u.entries[key] = seed
+	u.corpus.addSeed(key, entry)
+	u.mu.Unlock()
+
+	u.enqueueSeed(seed)
 }
 
 func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage map[int]*triageCall) {
@@ -438,6 +455,9 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		// 	entry.PairBasicInfo.LockType,
 		// 	entry.PairBasicInfo.UseAccessType)
 		clone := entry.clone()
+		for _, pair := range clone.Pairs {
+			u.addPairLocked(pair)
+		}
 		seed := &barrierSeed{
 			kind:       clone.Kind,
 			entry:      clone,
@@ -530,7 +550,7 @@ func buildBarrierSnapshot(req *queue.Request, res *queue.Result) BarrierSnapshot
 	return snapshot
 }
 
-func newUAFCorpusEntry(program *prog.Prog, pair *ddrd.MayUAFPair, barrier BarrierSnapshot, ts time.Time) *UAFCorpusEntry {
+func newUAFCorpusEntry(program *prog.Prog, pairs []*ddrd.MayUAFPair, barrier BarrierSnapshot, ts time.Time) *UAFCorpusEntry {
 	entry := &UAFCorpusEntry{
 		CallIdx:   -1,
 		Barrier:   barrier.clone(),
@@ -539,12 +559,34 @@ func newUAFCorpusEntry(program *prog.Prog, pair *ddrd.MayUAFPair, barrier Barrie
 	if program != nil {
 		entry.Prog = program.Clone()
 	}
-	if pair != nil {
-		entry.PairBasicInfo = *pair
-		entry.Signals = cloneSignal(ddrd.FromUAFPairs([]*ddrd.MayUAFPair{pair}, ddrd.UAFSignalPrioHigh))
-		entry.Profile = newUAFPairProfile(pair)
+	if len(pairs) != 0 {
+		entry.Pairs = clonePairs(pairs)
+		if len(entry.Pairs) != 0 {
+			entry.PairBasicInfo = *entry.Pairs[0]
+			entry.Signals = cloneSignal(ddrd.FromUAFPairs(entry.Pairs, ddrd.UAFSignalPrioHigh))
+			entry.Profile = newUAFPairProfile(entry.Pairs[0])
+		}
 	}
 	return entry
+}
+
+func clonePairs(pairs []*ddrd.MayUAFPair) []*ddrd.MayUAFPair {
+	if len(pairs) == 0 {
+		return nil
+	}
+	cloned := make([]*ddrd.MayUAFPair, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair == nil {
+			continue
+		}
+		copyPair := new(ddrd.MayUAFPair)
+		*copyPair = *pair
+		cloned = append(cloned, copyPair)
+	}
+	if len(cloned) == 0 {
+		return nil
+	}
+	return cloned
 }
 
 func cloneSignal(signal ddrd.UAFSignal) ddrd.UAFSignal {
@@ -568,6 +610,9 @@ func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
 	}
 	if len(entry.Programs) != 0 {
 		clone.Programs = clonePrograms(entry.Programs)
+	}
+	if len(entry.Pairs) != 0 {
+		clone.Pairs = clonePairs(entry.Pairs)
 	}
 	clone.Signals = cloneSignal(entry.Signals)
 	clone.Barrier = entry.Barrier.clone()

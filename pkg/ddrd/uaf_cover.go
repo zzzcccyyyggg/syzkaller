@@ -4,6 +4,7 @@
 package ddrd
 
 import (
+	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -22,11 +23,54 @@ import (
 // Uses the executor-generated signal as the primary identifier when available
 // And use the hash of all relevant fields if the signal is unavailable
 func (uaf *MayUAFPair) UAFPairID() uint64 {
-	// If executor provided a signal (based on access names + callstack hashes), use it
+	if uaf == nil {
+		return 0
+	}
 	if uaf.Signal != 0 {
 		return uaf.Signal
 	}
-	return 0
+	return computeExecutorUAFSignal(uaf)
+}
+
+const (
+	fnv64OffsetBasis = 1469598103934665603
+	fnv64Prime       = 1099511628211
+	uafPairMixConst  = 1315423911
+)
+
+func computeExecutorUAFSignal(uaf *MayUAFPair) uint64 {
+	if uaf == nil {
+		return 0
+	}
+	freeName := hashUint64Bytes(uaf.FreeAccessName)
+	freeStack := hashUint64Bytes(uaf.FreeCallStack)
+	useName := hashUint64Bytes(uaf.UseAccessName)
+	useStack := hashUint64Bytes(uaf.UseCallStack)
+
+	pair1 := useName ^ (useStack << 1)
+	pair2 := freeName ^ (freeStack << 1)
+	if pair1 > pair2 {
+		pair1, pair2 = pair2, pair1
+	}
+	return pair1*uint64(uafPairMixConst) ^ pair2
+}
+
+func hashUint64Bytes(val uint64) uint64 {
+	var buf [8]byte
+	binary.LittleEndian.PutUint64(buf[:], val)
+	return hashCStringBytes(buf[:])
+}
+
+func hashCStringBytes(data []byte) uint64 {
+	h := uint64(fnv64OffsetBasis)
+	for _, b := range data {
+		if b == 0 {
+			break
+		}
+		h ^= uint64(b)
+		h *= fnv64Prime
+	}
+	return h
 }
 
 // String returns a human-readable representation of the UAF pair
