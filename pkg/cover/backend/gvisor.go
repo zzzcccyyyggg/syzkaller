@@ -21,7 +21,10 @@ func makeGvisor(target *targets.Target, kernelDirs *mgrconfig.KernelDirs, module
 	if len(modules) != 0 {
 		return nil, fmt.Errorf("gvisor coverage does not support modules")
 	}
-	bin := filepath.Join(kernelDirs.Obj, target.KernelObject)
+	bin := kernelDirs.Object
+	if bin == "" && kernelDirs.Obj != "" {
+		bin = filepath.Join(kernelDirs.Obj, target.KernelObject)
+	}
 	// pkg/build stores runsc as 'vmlinux' (we pretent to be linux), but a local build will have it as 'runsc'.
 	if !osutil.IsExist(bin) {
 		bin = filepath.Join(filepath.Dir(bin), "runsc")

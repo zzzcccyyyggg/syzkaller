@@ -15,7 +15,6 @@ import (
 	"net"
 	"os"
 	"os/exec"
-	"path"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -268,7 +267,10 @@ func main() {
 		cfg.HubClient = ""
 	}
 	if cfg.Experimental.EnableKFuzzTest {
-		vmLinuxPath := path.Join(cfg.KernelObj, cfg.SysTarget.KernelObject)
+		vmLinuxPath := cfg.KernelObjectPath()
+		if vmLinuxPath == "" {
+			log.Fatalf("failed to enable KFuzzTest: kernel object path is not set")
+		}
 		log.Log(0, "enabling KFuzzTest targets")
 		_, err := kfuzztest.ActivateKFuzzTargets(cfg.Target, vmLinuxPath)
 		if err != nil {
@@ -1252,7 +1254,11 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 		for call := range enabledSyscalls {
 			delete(enabledSyscalls, call)
 		}
-		data, err := kfuzztest.ExtractData(path.Join(mgr.cfg.KernelObj, "vmlinux"))
+		vmLinuxPath := mgr.cfg.KernelObjectPath()
+		if vmLinuxPath == "" {
+			return nil, fmt.Errorf("kfuzztest requires kernel object path")
+		}
+		data, err := kfuzztest.ExtractData(vmLinuxPath)
 		if err != nil {
 			return nil, err
 		}
@@ -1542,7 +1548,7 @@ func (mgr *Manager) trackUsedFiles() {
 	addUsedFile(cfg.ExecprogBin)
 	addUsedFile(cfg.ExecutorBin)
 	addUsedFile(cfg.SSHKey)
-	if vmlinux := filepath.Join(cfg.KernelObj, mgr.sysTarget.KernelObject); osutil.IsExist(vmlinux) {
+	if vmlinux := cfg.KernelObjectPath(); osutil.IsExist(vmlinux) {
 		addUsedFile(vmlinux)
 	}
 	if cfg.Image != "9p" {

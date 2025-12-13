@@ -6,7 +6,6 @@ package report
 import (
 	"bytes"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -24,9 +23,8 @@ type bsd struct {
 
 func ctorBSD(cfg *config, oopses []*oops, symbolizeRes []*regexp.Regexp) (reporterImpl, error) {
 	var symbols map[string][]symbolizer.Symbol
-	kernelObject := ""
-	if cfg.kernelDirs.Obj != "" {
-		kernelObject = filepath.Join(cfg.kernelDirs.Obj, cfg.target.KernelObject)
+	kernelObject := cfg.kernelDirs.Object
+	if kernelObject != "" {
 		var err error
 		symbols, err = symbolizer.ReadTextSymbols(kernelObject)
 		if err != nil {

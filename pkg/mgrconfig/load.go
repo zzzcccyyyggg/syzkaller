@@ -354,12 +354,14 @@ func (cfg *Config) CompleteKernelDirs() {
 		cfg.KernelBuildSrc = cfg.KernelSrc
 	}
 	cfg.KernelBuildSrc = osutil.Abs(cfg.KernelBuildSrc)
+	cfg.Vmlinux = osutil.Abs(cfg.Vmlinux)
 }
 
 type KernelDirs struct {
 	Src      string
 	Obj      string
 	BuildSrc string
+	Object   string
 }
 
 func (cfg *Config) KernelDirs() *KernelDirs {
@@ -367,7 +369,18 @@ func (cfg *Config) KernelDirs() *KernelDirs {
 		Src:      cfg.KernelSrc,
 		Obj:      cfg.KernelObj,
 		BuildSrc: cfg.KernelBuildSrc,
+		Object:   cfg.KernelObjectPath(),
 	}
+}
+
+func (cfg *Config) KernelObjectPath() string {
+	if cfg.Vmlinux != "" {
+		return cfg.Vmlinux
+	}
+	if cfg.KernelObj == "" || cfg.SysTarget == nil || cfg.SysTarget.KernelObject == "" {
+		return ""
+	}
+	return filepath.Join(cfg.KernelObj, cfg.SysTarget.KernelObject)
 }
 
 func (cfg *Config) checkSSHParams() error {

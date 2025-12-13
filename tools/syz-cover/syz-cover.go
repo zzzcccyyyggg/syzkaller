@@ -67,6 +67,7 @@ var (
 		"there are missing coverage callbacks")
 )
 
+
 func toolFileCover() {
 	dateTo, err := civil.ParseDate(*flagDateTo)
 	if err != nil {
@@ -104,7 +105,11 @@ func toolFileCover() {
 }
 
 func initModules(cfg *mgrconfig.Config) []*vminfo.KernelModule {
-	modules, err := backend.DiscoverModules(cfg.SysTarget, cfg.KernelObj, cfg.ModuleObj)
+	kernelObject := cfg.KernelObjectPath()
+	if kernelObject == "" {
+		tool.Failf("kernel object path is not specified")
+	}
+	modules, err := backend.DiscoverModules(cfg.SysTarget, kernelObject, cfg.KernelObj, cfg.ModuleObj)
 	if err != nil {
 		tool.Fail(err)
 	}

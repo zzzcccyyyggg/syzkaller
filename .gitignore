@@ -38,3 +38,4 @@ executor/syscalls.h
 .cache/
 syzkaller-old/
 repro/
+DDRD/

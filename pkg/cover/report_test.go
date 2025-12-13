@@ -320,7 +320,7 @@ func generateReport(t *testing.T, target *targets.Target, test *Test) (*reports,
 			},
 		},
 	}
-	modules, err := backend.DiscoverModules(cfg.SysTarget, cfg.KernelObj, cfg.ModuleObj)
+	modules, err := backend.DiscoverModules(cfg.SysTarget, cfg.KernelObjectPath(), cfg.KernelObj, cfg.ModuleObj)
 	if err != nil {
 		return nil, err
 	}

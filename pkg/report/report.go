@@ -107,9 +107,10 @@ func (rep *Report) String() string {
 // NewReporter creates reporter for the specified OS/Type.
 func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
 	var localModules []*vminfo.KernelModule
-	if cfg.KernelObj != "" {
+	kernelObjectPath := cfg.KernelObjectPath()
+	if kernelObjectPath != "" {
 		var err error
-		localModules, err = backend.DiscoverModules(cfg.SysTarget, cfg.KernelObj, cfg.ModuleObj)
+		localModules, err = backend.DiscoverModules(cfg.SysTarget, kernelObjectPath, cfg.KernelObj, cfg.ModuleObj)
 		if err != nil {
 			return nil, err
 		}

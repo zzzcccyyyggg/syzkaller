@@ -16,10 +16,13 @@ import (
 	"github.com/google/syzkaller/sys/targets"
 )
 
-func DiscoverModules(target *targets.Target, objDir string, moduleObj []string) (
+func DiscoverModules(target *targets.Target, kernelObjectPath, objDir string, moduleObj []string) (
 	[]*vminfo.KernelModule, error) {
+	if kernelObjectPath == "" {
+		return nil, fmt.Errorf("kernel object path is not specified")
+	}
 	module := &vminfo.KernelModule{
-		Path: filepath.Join(objDir, target.KernelObject),
+		Path: kernelObjectPath,
 	}
 	textRange, err := elfReadTextSecRange(module)
 	if err != nil {
@@ -33,7 +36,14 @@ func DiscoverModules(target *targets.Target, objDir string, moduleObj []string) 
 		},
 	}
 	if target.OS == targets.Linux {
-		modules1, err := discoverModulesLinux(append([]string{objDir}, moduleObj...))
+		var searchDirs []string
+		if objDir != "" {
+			searchDirs = append(searchDirs, objDir)
+		} else if dir := filepath.Dir(kernelObjectPath); dir != "" && dir != "." {
+			searchDirs = append(searchDirs, dir)
+		}
+		searchDirs = append(searchDirs, moduleObj...)
+		modules1, err := discoverModulesLinux(searchDirs)
 		if err != nil {
 			return nil, err
 		}

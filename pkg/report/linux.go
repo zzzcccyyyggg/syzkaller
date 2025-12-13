@@ -39,9 +39,8 @@ type linux struct {
 
 func ctorLinux(cfg *config) (reporterImpl, []string, error) {
 	symbols := make(map[string]map[string][]symbolizer.Symbol)
-	vmlinux := ""
-	if cfg.kernelDirs.Obj != "" {
-		vmlinux = filepath.Join(cfg.kernelDirs.Obj, cfg.target.KernelObject)
+	vmlinux := cfg.kernelDirs.Object
+	if vmlinux != "" {
 		var err error
 		symbols[""], err = symbolizer.ReadTextSymbols(vmlinux)
 		if err != nil {

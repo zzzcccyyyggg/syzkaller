@@ -41,6 +41,10 @@ type Config struct {
 	// Directory with kernel object files (e.g. `vmlinux` for linux)
 	// (used for report symbolization, coverage reports and in tree modules finding, optional).
 	KernelObj string `json:"kernel_obj"`
+	// Optional explicit path to the kernel object file (e.g. vmlinux). If set,
+	// syzkaller uses this file instead of deriving the path from KernelObj and
+	// the target's default kernel object name.
+	Vmlinux string `json:"vmlinux,omitempty"`
 	// Directories with out-of-tree kernel module object files for coverage report generation (optional).
 	// KernelObj is also scanned for in-tree kernel modules and does not need to be duplicated here.
 	// Note: the modules need to be unstripped and contain debug info.

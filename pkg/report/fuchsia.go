@@ -6,7 +6,6 @@ package report
 import (
 	"bytes"
 	"fmt"
-	"path/filepath"
 	"regexp"
 	"strconv"
 	"strings"
@@ -49,8 +48,8 @@ func ctorFuchsia(cfg *config) (reporterImpl, []string, error) {
 		config: cfg,
 	}
 	ctx.ignores = append(ctx.ignores, fuchsiaIgnores...)
-	if ctx.kernelDirs.Obj != "" {
-		ctx.obj = filepath.Join(ctx.kernelDirs.Obj, ctx.target.KernelObject)
+	if ctx.kernelDirs.Object != "" {
+		ctx.obj = ctx.kernelDirs.Object
 	}
 	suppressions := []string{
 		"fatal exception: process /tmp/syz-executor", // OOM presumably

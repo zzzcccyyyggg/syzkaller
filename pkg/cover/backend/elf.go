@@ -8,7 +8,6 @@ import (
 	"encoding/binary"
 	"fmt"
 	"io"
-	"path/filepath"
 	"strings"
 
 	"github.com/google/syzkaller/pkg/log"
@@ -247,7 +246,10 @@ func elfReadTextSec(module *vminfo.KernelModule) (*elf.Section, error) {
 }
 
 func getLinuxPCBase(cfg *mgrconfig.Config) (uint64, error) {
-	bin := filepath.Join(cfg.KernelObj, cfg.SysTarget.KernelObject)
+	bin := cfg.KernelObjectPath()
+	if bin == "" {
+		return 0, fmt.Errorf("kernel object path is not specified")
+	}
 	file, err := elf.Open(bin)
 	if err != nil {
 		return 0, err

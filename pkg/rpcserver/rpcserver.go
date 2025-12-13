@@ -147,7 +147,7 @@ func NewNamedStats(name string) Stats {
 
 func New(cfg *RemoteConfig) (Server, error) {
 	var pcBase uint64
-	if cfg.KernelObj != "" {
+	if cfg.KernelObjectPath() != "" {
 		var err error
 		pcBase, err = cover.GetPCBase(cfg.Config)
 		if err != nil {

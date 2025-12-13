@@ -82,7 +82,10 @@ func (pr *prober) run() (*Info, error) {
 
 	info := &Info{}
 	pcIndexes := make(map[uint64]int)
-	kernelObj := filepath.Join(pr.cfg.KernelObj, pr.cfg.SysTarget.KernelObject)
+	kernelObj := pr.cfg.KernelObjectPath()
+	if kernelObj == "" {
+		return nil, fmt.Errorf("kernel object path is not specified")
+	}
 	sourceBase := filepath.Clean(pr.cfg.KernelSrc) + string(filepath.Separator)
 	i := 0
 	for desc := range pr.done {
