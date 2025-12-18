@@ -39,6 +39,8 @@ type Reporter struct {
 	interests    []*regexp.Regexp
 }
 
+var warningLineRegexp = regexp.MustCompile(`\bWARNING\b`)
+
 type Report struct {
 	// Title contains a representative description of the first oops.
 	Title string
@@ -131,6 +133,9 @@ func NewReporter(cfg *mgrconfig.Config) (*Reporter, error) {
 	interests, err := compileRegexps(cfg.Interests)
 	if err != nil {
 		return nil, err
+	}
+	if cfg.IgnoreWarningCrashes {
+		ignores = append(ignores, warningLineRegexp)
 	}
 	config := &config{
 		target:        cfg.SysTarget,

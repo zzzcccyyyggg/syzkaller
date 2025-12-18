@@ -415,8 +415,8 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 				history_offsets.push_back(hist_builder.Finish());
 			}
 			auto history_vector = history_offsets.empty()
-				? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>>()
-				: fbb.CreateVector(history_offsets);
+						  ? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdSerializedAccessRaw>>>()
+						  : fbb.CreateVector(history_offsets);
 			rpc::DdrdExtendedUafPairRawBuilder ext_builder(fbb);
 			if (ext.basic_index < uaf_offsets.size())
 				ext_builder.add_basic(uaf_offsets[ext.basic_index]);
@@ -432,11 +432,11 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 	}
 
 	auto uaf_vector = uaf_offsets.empty()
-		? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>>()
-		: fbb.CreateVector(uaf_offsets);
+			      ? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdUafPairRaw>>>()
+			      : fbb.CreateVector(uaf_offsets);
 	auto extended_vector = extended_offsets.empty()
-		? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>>()
-		: fbb.CreateVector(extended_offsets);
+				   ? flatbuffers::Offset<flatbuffers::Vector<flatbuffers::Offset<rpc::DdrdExtendedUafPairRaw>>>()
+				   : fbb.CreateVector(extended_offsets);
 
 	g_ddrd_runner_output = nullptr;
 
@@ -444,8 +444,12 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 }
 #else
 struct DdrdOutputState;
-static inline void ddrd_set_runner_output(const DdrdOutputState*) {}
-static inline void ddrd_clear_runner_output() {}
+static inline void ddrd_set_runner_output(const DdrdOutputState*)
+{
+}
+static inline void ddrd_clear_runner_output()
+{
+}
 static inline flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder&)
 {
 	return {};
@@ -654,9 +658,9 @@ static void setup_control_pipes();
 static bool coverage_filter(uint64 pc);
 static rpc::ComparisonRaw convert(const kcov_comparison_t& cmp);
 static flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64 req_id, uint32 num_calls,
-					uint64 elapsed, uint64 freshness, uint32 status, bool hanged,
-					const std::vector<uint8_t>* process_output, uint64 barrier_procs,
-					int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size);
+						uint64 elapsed, uint64 freshness, uint32 status, bool hanged,
+						const std::vector<uint8_t>* process_output, uint64 barrier_procs,
+						int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size);
 static void parse_execute(const execute_req& req);
 static void parse_handshake(const handshake_req& req);
 
@@ -1047,13 +1051,13 @@ void parse_execute(const execute_req& req)
 	barrier_group_id = req.barrier_group_id;
 	barrier_index = req.barrier_index;
 	barrier_group_size = req.barrier_group_size;
- 	barrier_delay_len = 0;
- 	memset(barrier_start_delay_us, 0, sizeof(barrier_start_delay_us));
+	barrier_delay_len = 0;
+	memset(barrier_start_delay_us, 0, sizeof(barrier_start_delay_us));
 	if (flag_barrier && req.barrier_delay_len > 0) {
 		barrier_delay_len = std::min<uint32_t>(req.barrier_delay_len, kMaxBarrierDelays);
- 		for (uint32_t i = 0; i < barrier_delay_len; i++)
- 			barrier_start_delay_us[i] = req.barrier_start_delay_us[i];
- 	}
+		for (uint32_t i = 0; i < barrier_delay_len; i++)
+			barrier_start_delay_us[i] = req.barrier_start_delay_us[i];
+	}
 #if GOOS_linux
 	ukc_preload_valid = req.ukc_is_valid;
 	ukc_preload_pair = {};
@@ -1701,8 +1705,8 @@ void write_extra_output()
 }
 
 flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64 req_id, uint32 num_calls, uint64 elapsed,
-			uint64 freshness, uint32 status, bool hanged, const std::vector<uint8_t>* process_output,
-			uint64 barrier_procs, int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size)
+					 uint64 freshness, uint32 status, bool hanged, const std::vector<uint8_t>* process_output,
+					 uint64 barrier_procs, int64_t barrier_group_id, int32_t barrier_index, int32_t barrier_group_size)
 {
 	// In snapshot mode the output size is fixed and output_size is always initialized, so use it.
 	int out_size = flag_snapshot ? output_size : output->size.load(std::memory_order_relaxed) ?
@@ -1738,7 +1742,7 @@ flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64
 	if (output_off.IsNull() && process_output)
 		output_off = fbb.CreateVector(*process_output);
 	auto exec_off = rpc::CreateExecResultRaw(fbb, req_id, proc_id, output_off, hanged, error_off, prog_info_off,
-					barrier_procs, barrier_group_id, barrier_index, barrier_group_size);
+						 barrier_procs, barrier_group_id, barrier_index, barrier_group_size);
 	auto msg_off = rpc::CreateExecutorMessageRaw(fbb, rpc::ExecutorMessagesRaw::ExecResult,
 						     flatbuffers::Offset<void>(exec_off.o));
 	fbb.FinishSizePrefixed(msg_off);
@@ -1837,8 +1841,8 @@ void execute_call(thread_t* th)
 		NONFAILING(execute_syscall(call, th->args));
 
 	debug("#%d [%llums] <- %s=0x%llx (tid=%ld)",
-      th->id, current_time_ms() - start_time_ms,
-      call->name, (uint64)th->res, syscall(SYS_gettid));
+	      th->id, current_time_ms() - start_time_ms,
+	      call->name, (uint64)th->res, syscall(SYS_gettid));
 	if (th->res == (intptr_t)-1)
 		debug(" errno=%d", th->reserrno);
 	if (flag_coverage)

@@ -1,9 +1,11 @@
 package uafvalidate
 
 import (
+	"bytes"
 	"context"
 	"errors"
 	"fmt"
+	"math/rand"
 	"path/filepath"
 	"sort"
 	"sync"
@@ -68,8 +70,13 @@ type StageManager struct {
 	invalidDB *db.DB
 	validDB   *db.DB
 
+	// Layer 2: VarNamePair HB statistics store
+	varNameHBDB    *db.DB
+	varNameHBStore *VarNameHBStore
+
 	mu          sync.Mutex
 	pending     map[string]*validationTask
+	seenKeys    map[string]struct{} // tracks all keys that have been enqueued (including completed)
 	closed      bool
 	seq         uint64
 	tasksClosed bool
@@ -104,16 +111,18 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		}
 	}
 	sm := &StageManager{
-		cfg:     cfg,
-		delay:   NewDelayManager(defaultMaxBarrierDelays, cfg.DelayRetryBudget),
-		factory: factory,
-		tasks:   make(chan *validationTask, cfg.MaxConcurrent*2),
-		results: make(chan *ValidationResult, cfg.MaxConcurrent*2),
-		pending: make(map[string]*validationTask),
-		stable:  requiredStableCount(cfg.RepeatCount),
+		cfg:      cfg,
+		delay:    NewDelayManager(defaultMaxBarrierDelays, cfg.DelayRetryBudget),
+		factory:  factory,
+		tasks:    make(chan *validationTask, cfg.MaxConcurrent*2),
+		results:  make(chan *ValidationResult, cfg.MaxConcurrent*2),
+		pending:  make(map[string]*validationTask),
+		seenKeys: make(map[string]struct{}),
+		stable:   requiredStableCount(cfg.RepeatCount),
 	}
 
 	if cfg.Workdir != "" {
+		// Layer 1: Exact match invalid DB
 		dbPath := filepath.Join(cfg.Workdir, "invalid_uaf.db")
 		d, err := db.Open(dbPath, true)
 		if err != nil {
@@ -122,6 +131,8 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 			sm.invalidDB = d
 			log.Logf(0, "uafvalidate: loaded %d invalid pairs from db", len(d.Records))
 		}
+
+		// Validated DB
 		validPath := filepath.Join(cfg.Workdir, "validated_uaf.db")
 		vd, err := db.Open(validPath, true)
 		if err != nil {
@@ -129,6 +140,16 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		} else {
 			sm.validDB = vd
 			log.Logf(0, "uafvalidate: loaded %d validated pairs from db", len(vd.Records))
+		}
+
+		// Layer 2: VarNamePair HB statistics DB
+		hbPath := filepath.Join(cfg.Workdir, "varname_hb_stats.db")
+		hbDB, err := db.Open(hbPath, true)
+		if err != nil {
+			log.Logf(0, "uafvalidate: failed to open varname HB stats db: %v", err)
+		} else {
+			sm.varNameHBDB = hbDB
+			sm.varNameHBStore = NewVarNameHBStore(hbDB)
 		}
 	}
 
@@ -159,6 +180,7 @@ func (sm *StageManager) Run(ctx context.Context) {
 	close(sm.results)
 }
 
+// Close signals that no more entries will be enqueued. Use Shutdown for immediate termination.
 func (sm *StageManager) Close() {
 	sm.closeOnce.Do(func() {
 		sm.mu.Lock()
@@ -166,6 +188,38 @@ func (sm *StageManager) Close() {
 		sm.maybeCloseTasksLocked()
 		sm.mu.Unlock()
 	})
+}
+
+// Shutdown forces immediate shutdown by closing the tasks channel.
+func (sm *StageManager) Shutdown() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	sm.closed = true
+	if !sm.tasksClosed {
+		close(sm.tasks)
+		sm.tasksClosed = true
+	}
+}
+
+// HasPending returns true if there are tasks currently being processed.
+func (sm *StageManager) HasPending() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return len(sm.pending) > 0
+}
+
+// PendingCount returns the number of tasks currently being processed.
+func (sm *StageManager) PendingCount() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return len(sm.pending)
+}
+
+// SeenCount returns the total number of entries that have been enqueued (including completed).
+func (sm *StageManager) SeenCount() int {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return len(sm.seenKeys)
 }
 
 func (sm *StageManager) Results() <-chan *ValidationResult {
@@ -278,11 +332,87 @@ func retryReason(res *ValidationResult) string {
 	return "unknown"
 }
 
+// entrySkipThreshold is the minimum skip probability for a pair to be considered "skippable"
+const entrySkipThreshold = 0.8
+
+// shouldSkipEntry checks if all pairs in the entry have high HB confidence
+// and should be skipped entirely to avoid unnecessary execution
+func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool, reason string) {
+	if sm.varNameHBStore == nil {
+		return false, ""
+	}
+
+	// Collect all pairs from entry
+	var pairs []*ddrd.MayUAFPair
+	for _, p := range entry.Pairs {
+		if p != nil {
+			pairs = append(pairs, p)
+		}
+	}
+
+	// If no pairs in Pairs slice, check PairBasicInfo
+	if len(pairs) == 0 {
+		if entry.PairBasicInfo.FreeAccessName != 0 || entry.PairBasicInfo.UseAccessName != 0 {
+			pairs = append(pairs, &entry.PairBasicInfo)
+		}
+	}
+
+	if len(pairs) == 0 {
+		return false, "" // No pairs, don't skip
+	}
+
+	// Check each pair's skip status
+	skippedCount := 0
+	totalProb := 0.0
+	validPairCount := 0
+
+	for _, pair := range pairs {
+		if pair == nil {
+			continue
+		}
+		validPairCount++
+
+		fullKey := pairKey(*pair)
+
+		// Layer 1: Exact match skip (invalid or already validated)
+		if sm.isInvalid(fullKey) || sm.isValidated(fullKey) {
+			skippedCount++
+			totalProb += 1.0
+			continue
+		}
+
+		// Layer 2: VarName HB probability check
+		stats := sm.varNameHBStore.GetByPair(pair)
+		prob := stats.SkipProbability()
+		totalProb += prob
+
+		// If probability is high enough, count as skippable
+		if prob >= entrySkipThreshold {
+			skippedCount++
+		}
+	}
+
+	// If all pairs would be skipped, skip the entire entry
+	if skippedCount == validPairCount && validPairCount > 0 {
+		avgProb := totalProb / float64(validPairCount)
+		return true, fmt.Sprintf("all %d pairs high HB (avg_prob=%.2f)", validPairCount, avgProb)
+	}
+
+	return false, ""
+}
+
 func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTask {
 	clone := entry.Clone()
 	if clone == nil {
 		return nil
 	}
+
+	// Pre-check: if all pairs have high HB confidence, skip entire entry
+	if skip, reason := sm.shouldSkipEntry(clone); skip {
+		log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
+		return nil
+	}
+
 	signature := clone.Profile
 	if IsZeroSignature(signature) && clone.PairBasicInfo.UAFPairID() != 0 {
 		signature = SignatureFromPair(&clone.PairBasicInfo)
@@ -300,6 +430,10 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		sm.seq++
 		key = fmt.Sprintf("anon-%d", sm.seq)
 	}
+	// Skip if already seen (in pending or previously completed)
+	if _, exists := sm.seenKeys[key]; exists {
+		return nil
+	}
 	if _, exists := sm.pending[key]; exists {
 		return nil
 	}
@@ -309,6 +443,7 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		key:       key,
 	}
 	sm.pending[key] = task
+	sm.seenKeys[key] = struct{}{}
 	return task
 }
 
@@ -341,12 +476,14 @@ func (sm *StageManager) complete(task *validationTask) {
 	}
 	sm.mu.Lock()
 	delete(sm.pending, task.key)
+	log.Logf(0, "uafvalidate: complete key=%s pending=%d closed=%t tasksClosed=%t", task.key, len(sm.pending), sm.closed, sm.tasksClosed)
 	sm.maybeCloseTasksLocked()
 	sm.mu.Unlock()
 }
 
 func (sm *StageManager) maybeCloseTasksLocked() {
 	if sm.closed && !sm.tasksClosed && len(sm.pending) == 0 {
+		log.Logf(0, "uafvalidate: closing tasks channel")
 		close(sm.tasks)
 		sm.tasksClosed = true
 	}
@@ -455,22 +592,42 @@ func requiredStableCount(repeat int) int {
 
 func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validationTask, stablePairs []ddrd.MayUAFPair) {
 	log.Logf(0, "uafvalidate: starting verification phase for key=%s pairs=%d", task.key, len(stablePairs))
+
 	for i, pair := range stablePairs {
 		if ctx.Err() != nil {
 			return
 		}
 
-		key := pairKey(pair)
-		if sm.isInvalid(key) {
-			log.Logf(0, "uafvalidate: skipping known invalid pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+		fullKey := pairKey(pair)       // Full key (with CallStack)
+		vnKey := VarNamePairKey(&pair) // VarName key (without CallStack)
+
+		// ========== Layer 1: Exact match skip ==========
+		if sm.isInvalid(fullKey) {
+			log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
 
-		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
-		if sm.isValidated(key) {
+		if sm.isValidated(fullKey) {
 			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
+
+		// ========== Layer 2: VarName probabilistic skip ==========
+		if sm.varNameHBStore != nil {
+			skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
+			if skip {
+				log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
+					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+				continue
+			}
+			if prob > 0 {
+				log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
+					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+			}
+		}
+
+		// ========== Execute verification ==========
+		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 
 		pairCopy := pair
 		exec, err := sm.factory(ctx)
@@ -483,7 +640,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			Entry:         task.entry,
 			Delays:        sm.delay.BuildDelays(task.entry),
 			TargetPair:    &pairCopy,
-			RepeatTimes:   3,
+			RepeatTimes:   10,
 			DisableDdrd:   true,
 			StopOnSuccess: true,
 		}
@@ -493,28 +650,83 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			closer.Close()
 		}
 
+		// Extract crash info
+		crashInfo := ""
+		if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
+			crashInfo = fmt.Sprintf(" crash=%q", execRes.CrashTitle)
+		}
+
 		if runErr != nil {
-			log.Logf(0, "uafvalidate: verification run failed: %v", runErr)
-		} else {
-			status := "Not Triggerable"
-			if execRes.TriggeredCount >= 2 {
-				status = "Stable"
-			} else if execRes.TriggeredCount > 0 {
-				status = "Not Stable"
+			// Log run error with any available crash info
+			if crashInfo != "" {
+				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
+			} else {
+				log.Logf(0, "uafvalidate: verification run failed: %v", runErr)
 			}
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t triggered=%d/%d status=%s",
-				execRes.Duration, execRes.Crashed, execRes.TriggeredCount, req.RepeatTimes, status)
-			if execRes.TriggeredCount > 0 {
-				reportData := serializeCrashReport(execRes)
-				sm.markValidated(key, reportData)
-				log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, string(reportData))
-				continue
+			if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
+				log.Logf(0, "uafvalidate: crash detected during failed run: %s", execRes.CrashTitle)
+				if len(execRes.CrashReport) > 0 {
+					reportPreview := string(execRes.CrashReport)
+					if len(reportPreview) > 500 {
+						reportPreview = reportPreview[:500] + "..."
+					}
+					log.Logf(0, "uafvalidate: crash report preview:\n%s", reportPreview)
+				}
+			}
+			continue // Execution error, don't update statistics
+		}
+
+		// ========== Update statistics ==========
+		status := "Not Triggerable"
+		if execRes.TriggeredCount >= 2 {
+			status = "Stable"
+		} else if execRes.TriggeredCount > 0 {
+			status = "Not Stable"
+		}
+
+		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s",
+			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status)
+
+		if execRes.TriggeredCount > 0 {
+			// ========== Success: proves not HB relationship ==========
+			// Serialize the validated entry including triggering programs
+			reportData := serializeValidatedEntry(execRes, task.entry)
+			sm.markValidated(fullKey, reportData)
+
+			// Update VarName HB statistics (success)
+			if sm.varNameHBStore != nil {
+				sm.varNameHBStore.RecordSuccess(&pairCopy)
+				stats := sm.varNameHBStore.GetByPair(&pairCopy)
+				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f",
+					vnKey, stats.HBConfidence())
 			}
 
-			if execRes.TriggeredCount == 0 {
-				sm.markInvalid(key)
+			// Log a summary (not full data to avoid log flooding)
+			reportPreview := string(reportData)
+			if len(reportPreview) > 2000 {
+				reportPreview = reportPreview[:2000] + "...[truncated]"
 			}
+			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
+			continue
 		}
+
+		// ========== Failure: increase HB confidence ==========
+		// Layer 1: Mark this exact pair as invalid
+		sm.markInvalid(fullKey)
+
+		// Layer 2: Update VarName HB statistics (failure)
+		if sm.varNameHBStore != nil {
+			sm.varNameHBStore.RecordFailure(&pairCopy)
+			stats := sm.varNameHBStore.GetByPair(&pairCopy)
+			log.Logf(0, "uafvalidate: pair failed verification, HB conf updated: vnkey=%s new_conf=%.2f skip_prob=%.2f",
+				vnKey, stats.HBConfidence(), stats.SkipProbability())
+		}
+	}
+
+	// Output statistics summary
+	if sm.varNameHBStore != nil {
+		total, highConf := sm.varNameHBStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase complete, VarName HB stats: total=%d high_confidence=%d", total, highConf)
 	}
 }
 
@@ -577,4 +789,80 @@ func serializeCrashReport(res *ExecutionResult) []byte {
 		data = data[:maxCrashReportSize]
 	}
 	return append([]byte{}, data...)
+}
+
+// serializeValidatedEntry serializes the validated entry including the triggering programs.
+// Format:
+//
+//	=== CRASH REPORT ===
+//	<crash report content>
+//	=== TRIGGERING PROGRAMS ===
+//	--- PROGRAM 0 ---
+//	<program 0 source>
+//	--- PROGRAM 1 ---
+//	<program 1 source>
+//	...
+//	=== BARRIER INFO ===
+//	Participants: <mask>
+//	GroupID: <id>
+//	GroupSize: <size>
+//	=== REPLAY PLAN ===
+//	Delays: <delays>
+func serializeValidatedEntry(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry) []byte {
+	var buf bytes.Buffer
+
+	// Section 1: Crash Report
+	buf.WriteString("=== CRASH REPORT ===\n")
+	reportData := serializeCrashReport(res)
+	buf.Write(reportData)
+	buf.WriteString("\n")
+
+	if entry == nil {
+		return buf.Bytes()
+	}
+
+	// Section 2: Triggering Programs
+	buf.WriteString("\n=== TRIGGERING PROGRAMS ===\n")
+	if len(entry.Programs) > 0 {
+		for i, p := range entry.Programs {
+			buf.WriteString(fmt.Sprintf("--- PROGRAM %d ---\n", i))
+			if p != nil {
+				buf.Write(p.Serialize())
+			} else {
+				buf.WriteString("<nil>\n")
+			}
+			buf.WriteString("\n")
+		}
+	} else if entry.Prog != nil {
+		// Fallback to single Prog if Programs is empty
+		buf.WriteString("--- PROGRAM 0 ---\n")
+		buf.Write(entry.Prog.Serialize())
+		buf.WriteString("\n")
+	} else {
+		buf.WriteString("<no programs>\n")
+	}
+
+	// Section 3: Barrier Info
+	buf.WriteString("\n=== BARRIER INFO ===\n")
+	buf.WriteString(fmt.Sprintf("Participants: 0x%x\n", entry.Barrier.Participants))
+	buf.WriteString(fmt.Sprintf("GroupID: %d\n", entry.Barrier.GroupID))
+	buf.WriteString(fmt.Sprintf("GroupSize: %d\n", entry.Barrier.GroupSize))
+	if len(entry.Barrier.ProcList) > 0 {
+		buf.WriteString(fmt.Sprintf("ProcList: %v\n", entry.Barrier.ProcList))
+	}
+
+	// Section 4: Replay Plan (delays)
+	buf.WriteString("\n=== REPLAY PLAN ===\n")
+	if len(entry.ReplayPlan.DelaysMicros) > 0 {
+		buf.WriteString(fmt.Sprintf("Delays: %v\n", entry.ReplayPlan.DelaysMicros))
+	} else {
+		buf.WriteString("Delays: <none>\n")
+	}
+
+	// Truncate if too large
+	result := buf.Bytes()
+	if len(result) > maxCrashReportSize*2 {
+		result = result[:maxCrashReportSize*2]
+	}
+	return result
 }

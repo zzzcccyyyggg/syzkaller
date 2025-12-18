@@ -190,6 +190,8 @@ type Config struct {
 	// Completely ignore reports matching these regexps (don't save nor reboot),
 	// must match the first line of crash message.
 	Ignores []string `json:"ignores,omitempty"`
+	// Ignore kernel WARNING splats (first line contains the word WARNING) entirely.
+	IgnoreWarningCrashes bool `json:"ignore_warning_crashes,omitempty"`
 	// List of regexps to select bugs of interest.
 	// If this list is not empty and none of the regexps match a bug, it's suppressed.
 	// Regexps are matched against bug title, guilty file and maintainer emails.
@@ -289,10 +291,21 @@ type Experimental struct {
 }
 
 type UAFValidateConfig struct {
-	MaxConcurrent    int `json:"max_concurrent"`
-	DelayRetryBudget int `json:"delay_retry_budget"`
-	TimeoutSeconds   int `json:"timeout_seconds"`
-	RepeatCount      int `json:"repeat_count"`
+	MaxConcurrent                 int `json:"max_concurrent"`
+	DelayRetryBudget              int `json:"delay_retry_budget"`
+	TimeoutSeconds                int `json:"timeout_seconds"`
+	RepeatCount                   int `json:"repeat_count"`
+	ExecutorProgramTimeoutSeconds int `json:"executor_program_timeout_seconds,omitempty"`
+	ExecutorSyscallTimeoutMillis  int `json:"executor_syscall_timeout_millis,omitempty"`
+	// ContinuousMode enables incremental corpus reloading instead of one-shot validation.
+	// When enabled, the validator periodically reloads new entries from the corpus.
+	ContinuousMode bool `json:"continuous_mode,omitempty"`
+	// IncrementalReloadMinutes specifies how often to reload new corpus entries in continuous mode.
+	// Defaults to 10 minutes if unset or zero.
+	IncrementalReloadMinutes int `json:"incremental_reload_minutes,omitempty"`
+	// IdleReloadSeconds specifies how long to wait before reloading when no tasks are pending.
+	// Defaults to 30 seconds if unset or zero.
+	IdleReloadSeconds int `json:"idle_reload_seconds,omitempty"`
 }
 
 type FocusArea struct {

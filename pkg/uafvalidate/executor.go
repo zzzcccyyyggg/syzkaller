@@ -27,20 +27,12 @@ import (
 
 // ExecutorAdapter wraps an ExecProgInstance so it can be reused by the validator.
 type ExecutorAdapter struct {
-	inst         *instance.ExecProgInstance
-	cfg          Config
-	rpcAddr      string
-	forwardPort  int
-	forwardAddr  string
-	forwardReady bool
+	inst *instance.ExecProgInstance
+	cfg  Config
 }
 
 func NewExecutorAdapter(inst *instance.ExecProgInstance, cfg Config) *ExecutorAdapter {
-	adapter := &ExecutorAdapter{inst: inst, cfg: cfg.withDefaults()}
-	if inst != nil && inst.ManagerConfig() != nil {
-		adapter.rpcAddr = inst.ManagerConfig().RPC
-	}
-	return adapter
+	return &ExecutorAdapter{inst: inst, cfg: cfg.withDefaults()}
 }
 
 func (e *ExecutorAdapter) Run(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
@@ -141,9 +133,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		return nil, fmt.Errorf("missing manager configuration for execprog instance")
 	}
 	cfgCopy := *mgrCfg
-	if e.forwardReady && e.forwardPort != 0 {
-		cfgCopy.RPC = fmt.Sprintf("127.0.0.1:%d", e.forwardPort)
-	}
+	// RPC address will be set after we know the server port
 	if participants > cfgCopy.Procs {
 		cfgCopy.Procs = participants
 	}
@@ -264,29 +254,21 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		return nil, fmt.Errorf("listen rpc server: %w", err)
 	}
 
-	if e.forwardReady && e.forwardPort != 0 && serv.Port() != e.forwardPort {
-		return nil, fmt.Errorf("rpc server port mismatch: got %d want %d", serv.Port(), e.forwardPort)
+	// Always forward the new RPC server port; don't try to reuse old port mappings
+	// since the RPC server creates a new listener each time with a potentially different port.
+	addr, err := e.inst.VMInstance.Forward(serv.Port())
+	if err != nil {
+		return nil, fmt.Errorf("forward runner port: %w", err)
 	}
-	var fwdAddr string
-	if !e.forwardReady || e.forwardAddr == "" {
-		addr, err := e.inst.VMInstance.Forward(serv.Port())
-		if err != nil {
-			return nil, fmt.Errorf("forward runner port: %w", err)
-		}
-		fwdAddr = addr
-		e.forwardAddr = addr
-		e.forwardPort = serv.Port()
-		e.forwardReady = true
-	} else {
-		fwdAddr = e.forwardAddr
-	}
+	fwdAddr := addr
 	host, portStr, err := net.SplitHostPort(fwdAddr)
 	if err != nil {
 		return nil, fmt.Errorf("split forwarded address: %w", err)
 	}
 
-	vmIdx := e.inst.VMInstance.Index()
-	command := fmt.Sprintf("%s runner %d %s %s", executorBin, vmIdx, host, portStr)
+	// Use runner ID 0 since each validation task has its own RPC server.
+	// The runner ID must match what we pass to CreateInstance below.
+	command := fmt.Sprintf("%s runner 0 %s %s", executorBin, host, portStr)
 
 	ctx, cancel := context.WithTimeout(parentCtx, e.cfg.ExecutionTimeout)
 	defer cancel()
@@ -511,7 +493,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	if rep != nil {
 		result.Crashed = true
 		result.CrashTitle = rep.Title
-		log.Logf(0, "uafvalidate: barrier request status=%s crashed=true duration=%s", res.Status, result.Duration)
+		log.Logf(0, "uafvalidate: vm=%d barrier request status=%s crashed=true crash=%q duration=%s", vmIndex, res.Status, rep.Title, result.Duration)
 		return result, nil
 	}
 
@@ -540,7 +522,11 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		result.CrashTitle = "unknown execution status"
 	}
 
-	log.Logf(0, "uafvalidate: vm=%d barrier request status=%s crashed=%t duration=%s", vmIndex, res.Status, result.Crashed, result.Duration)
+	crashInfo := ""
+	if result.Crashed && result.CrashTitle != "" {
+		crashInfo = fmt.Sprintf(" crash=%q", result.CrashTitle)
+	}
+	log.Logf(0, "uafvalidate: vm=%d barrier request status=%s crashed=%t%s duration=%s", vmIndex, res.Status, result.Crashed, crashInfo, result.Duration)
 
 	return result, nil
 }

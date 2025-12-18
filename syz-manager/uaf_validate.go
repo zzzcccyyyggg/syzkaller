@@ -3,7 +3,6 @@ package main
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
@@ -17,6 +16,16 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	if mgr.uafStore == nil {
 		log.Fatalf("uaf validation requires persisted corpus store")
 	}
+
+	cfg := mgr.cfg.Experimental.UAFValidate
+
+	// Check if continuous mode is enabled
+	if cfg.ContinuousMode {
+		mgr.runUAFValidateContinuousMode(ctx)
+		return
+	}
+
+	// Original one-shot mode
 	entries, err := mgr.uafStore.Entries()
 	if err != nil {
 		log.Fatalf("failed to load persisted uaf entries: %v", err)
@@ -26,7 +35,7 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		mgr.exit("uaf-validate")
 		return
 	}
-	cfg := mgr.cfg.Experimental.UAFValidate
+
 	validatorCfg := uafvalidate.Config{
 		MaxConcurrent:    cfg.MaxConcurrent,
 		DelayRetryBudget: cfg.DelayRetryBudget,
@@ -77,15 +86,27 @@ func (mgr *Manager) validatorExecutorFactory(cfg uafvalidate.Config) uafvalidate
 			return nil, fmt.Errorf("uaf validation: vm pool is empty")
 		}
 	}
-	var mu sync.Mutex
-	nextIndex := 0
+
+	// Use a channel-based pool to properly manage VM index allocation.
+	// This ensures that each VM index is only used by one executor at a time.
+	availableVMs := make(chan int, vmCount)
+	for i := 0; i < vmCount; i++ {
+		availableVMs <- i
+	}
+
 	return func(ctx context.Context) (uafvalidate.Executor, error) {
-		mu.Lock()
-		index := nextIndex % vmCount
-		nextIndex++
-		mu.Unlock()
+		// Wait for an available VM index
+		var index int
+		select {
+		case index = <-availableVMs:
+		case <-ctx.Done():
+			return nil, ctx.Err()
+		}
+
 		vmInst, err := mgr.vmPool.Create(ctx, index)
 		if err != nil {
+			// Return the index to the pool on failure
+			availableVMs <- index
 			return nil, err
 		}
 		if *flagDebug {
@@ -94,13 +115,37 @@ func (mgr *Manager) validatorExecutorFactory(cfg uafvalidate.Config) uafvalidate
 		execInst, err := instance.SetupExecProg(vmInst, mgr.cfg, mgr.reporter, nil)
 		if err != nil {
 			vmInst.Close()
+			availableVMs <- index
 			return nil, err
 		}
 		if *flagDebug {
 			log.Logf(0, "uafvalidate: vm index=%d ready executor=%p", index, execInst)
 		}
-		return uafvalidate.NewExecutorAdapter(execInst, cfg), nil
+		// Wrap the adapter to return the VM index when closed
+		return &pooledExecutorAdapter{
+			ExecutorAdapter: uafvalidate.NewExecutorAdapter(execInst, cfg),
+			releaseVM:       func() { availableVMs <- index },
+		}, nil
 	}
+}
+
+// pooledExecutorAdapter wraps ExecutorAdapter and returns the VM index to the pool on close.
+type pooledExecutorAdapter struct {
+	*uafvalidate.ExecutorAdapter
+	releaseVM func()
+	closed    bool
+}
+
+func (p *pooledExecutorAdapter) Close() error {
+	if p.closed {
+		return nil
+	}
+	p.closed = true
+	err := p.ExecutorAdapter.Close()
+	if p.releaseVM != nil {
+		p.releaseVM()
+	}
+	return err
 }
 
 func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
@@ -194,4 +239,133 @@ func cloneMayPairs(pairs []ddrd.MayUAFPair) []ddrd.MayUAFPair {
 	cloned := make([]ddrd.MayUAFPair, len(pairs))
 	copy(cloned, pairs)
 	return cloned
+}
+
+// runUAFValidateContinuousMode runs the validation in continuous mode with incremental corpus reloading.
+func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
+	cfg := mgr.cfg.Experimental.UAFValidate
+
+	// Set up reload intervals with defaults
+	reloadInterval := time.Duration(cfg.IncrementalReloadMinutes) * time.Minute
+	if reloadInterval <= 0 {
+		reloadInterval = 10 * time.Minute
+	}
+	idleReloadInterval := time.Duration(cfg.IdleReloadSeconds) * time.Second
+	if idleReloadInterval <= 0 {
+		idleReloadInterval = 30 * time.Second
+	}
+
+	validatorCfg := uafvalidate.Config{
+		MaxConcurrent:    cfg.MaxConcurrent,
+		DelayRetryBudget: cfg.DelayRetryBudget,
+		ExecutionTimeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:            *flagDebug,
+		RepeatCount:      cfg.RepeatCount,
+		Workdir:          mgr.cfg.Workdir,
+	}
+	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
+		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
+	}
+	if validatorCfg.MaxConcurrent <= 0 {
+		validatorCfg.MaxConcurrent = 1
+	}
+
+	stage := uafvalidate.NewStageManager(validatorCfg, mgr.validatorExecutorFactory(validatorCfg))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start result handler
+	resultsDone := make(chan struct{})
+	go func() {
+		for res := range stage.Results() {
+			mgr.handleValidationResult(res)
+		}
+		close(resultsDone)
+	}()
+
+	// Start workers
+	runDone := make(chan struct{})
+	go func() {
+		stage.Run(runCtx)
+		close(runDone)
+	}()
+
+	// Initial load
+	var lastSeq uint64 = 0
+	entries, newSeq, err := mgr.uafStore.EntriesSince(0)
+	if err != nil {
+		log.Errorf("uaf validation: failed to load initial entries: %v", err)
+	} else {
+		lastSeq = newSeq
+		enqueued := 0
+		for _, entry := range entries {
+			stage.Enqueue(entry)
+			enqueued++
+		}
+		log.Logf(0, "uaf validation: initial load enqueued %d entries (seq=%d)", enqueued, lastSeq)
+	}
+
+	// Periodic reload ticker
+	ticker := time.NewTicker(reloadInterval)
+	defer ticker.Stop()
+
+	// Idle check ticker (more frequent)
+	idleTicker := time.NewTicker(idleReloadInterval)
+	defer idleTicker.Stop()
+
+	log.Logf(0, "uaf validation: continuous mode started (reload=%v, idle_reload=%v)", reloadInterval, idleReloadInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Logf(0, "uaf validation: context cancelled, shutting down")
+			stage.Shutdown()
+			<-runDone
+			<-resultsDone
+			mgr.exit("uaf-validate")
+			return
+
+		case <-ticker.C:
+			// Periodic incremental reload
+			newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
+			if err != nil {
+				log.Errorf("uaf validation: periodic reload failed: %v", err)
+				continue
+			}
+			if len(newEntries) > 0 {
+				lastSeq = newSeq
+				enqueued := 0
+				for _, entry := range newEntries {
+					stage.Enqueue(entry)
+					enqueued++
+				}
+				log.Logf(0, "uaf validation: periodic reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
+					enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
+			}
+
+		case <-idleTicker.C:
+			// Check if idle (no pending tasks)
+			if !stage.HasPending() {
+				newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
+				if err != nil {
+					log.Errorf("uaf validation: idle reload failed: %v", err)
+					continue
+				}
+				if len(newEntries) > 0 {
+					lastSeq = newSeq
+					enqueued := 0
+					for _, entry := range newEntries {
+						stage.Enqueue(entry)
+						enqueued++
+					}
+					log.Logf(0, "uaf validation: idle reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
+						enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
+				} else {
+					log.Logf(1, "uaf validation: idle, no new entries available (seq=%d, seen=%d)",
+						lastSeq, stage.SeenCount())
+				}
+			}
+		}
+	}
 }

@@ -1,5 +1,7 @@
 # syzkaller/sys/linux/kccwf_fs.txt
 
+include <uapi/linux/fcntl.h>
+
 close$kccwf(fd fd)
 dup$kccwf(oldfd fd) fd
 dup2$kccwf(oldfd fd, newfd fd) fd
@@ -87,6 +89,8 @@ sync_file_range$kccwf(fd fd, off intptr, nbytes intptr, flags flags[sync_file_fl
 
 # 基础文件操作
 open$kccwf(file ptr[in, string["/mnt/kccwf/testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
+open$kccwf_dir(file ptr[in, string["/mnt/kccwf"]], flags flags[open_flags], mode flags[open_mode]) fd_dir
+openat$kccwf(fd fd_dir, file ptr[in, string["testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
 
 # 目录操作
 mkdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]], mode flags[open_mode])

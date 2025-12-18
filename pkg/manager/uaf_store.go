@@ -75,6 +75,40 @@ func (store *UAFCorpusStore) Count() int {
 	return len(store.db.Records)
 }
 
+// EntriesSince returns entries with seq greater than sinceSeq along with the max seq seen.
+// This enables incremental reads of the corpus without reprocessing already-seen entries.
+func (store *UAFCorpusStore) EntriesSince(sinceSeq uint64) ([]*fuzzer.UAFCorpusEntry, uint64, error) {
+	if store == nil || store.db == nil {
+		return nil, sinceSeq, nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	maxSeq := sinceSeq
+	entries := make([]*fuzzer.UAFCorpusEntry, 0)
+	for _, rec := range store.db.Records {
+		if rec.Seq <= sinceSeq {
+			continue
+		}
+		if len(rec.Val) == 0 {
+			continue
+		}
+		if rec.Seq > maxSeq {
+			maxSeq = rec.Seq
+		}
+		entry, err := store.deserialize(rec.Val)
+		if err != nil {
+			log.Errorf("failed to deserialize uaf corpus entry: %v", err)
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	sort.Slice(entries, func(i, j int) bool {
+		return entries[i].Timestamp.Before(entries[j].Timestamp)
+	})
+	return entries, maxSeq, nil
+}
+
 func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) {
 	if store == nil || store.db == nil || len(entries) == 0 {
 		return 0, nil

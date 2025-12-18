@@ -1,12 +1,12 @@
-#ifndef SYZ_UKC_H 
+#ifndef SYZ_UKC_H
 #define SYZ_UKC_H
 
 #include <cstdarg>
 #include <cstdio>
-#include <sys/ioctl.h>  // ioctl、_IO/_IOW/_IOR（多数平台自带）
-#include <fcntl.h>      // open、O_RDWR、O_CLOEXEC
-#include <unistd.h>     // close
-#include <errno.h>      // errno
+#include <errno.h> // errno
+#include <fcntl.h> // open、O_RDWR、O_CLOEXEC
+#include <sys/ioctl.h> // ioctl、_IO/_IOW/_IOR（多数平台自带）
+#include <unistd.h> // close
 
 // 这里假定和内核模块共用同一个头，里面定义了：
 // kccwf_testing_tids_t / may_race_pair_list_t / check_phase_info_t /
@@ -15,13 +15,13 @@
 
 inline void ukc_print(const char* msg, ...)
 {
-    int err = errno;
-    va_list args;
-    va_start(args, msg);
-    vfprintf(stderr, msg, args);
-    va_end(args);
-    fflush(stderr);
-    errno = err;
+	int err = errno;
+	va_list args;
+	va_start(args, msg);
+	vfprintf(stderr, msg, args);
+	va_end(args);
+	fflush(stderr);
+	errno = err;
 }
 
 constexpr char kUkcDevicePath[] = "/dev/kccwf_ctl_dev";
@@ -37,21 +37,21 @@ constexpr char kUkcDevicePath[] = "/dev/kccwf_ctl_dev";
 #endif
 
 // 与内核 ctl_dev.h 中定义一一对应
-constexpr unsigned long kUkcTurnOff                 = _IO('c', 0);
-constexpr unsigned long kUkcStartMonitor            = _IO('c', 1);
-constexpr unsigned long kUkcStartLog                = _IO('c', 2);
-constexpr unsigned long kUkcStartCheckSyncPhase     = _IO('c', 3);
-constexpr unsigned long kUkcStartValidatePhase      = _IO('c', 4);
-constexpr unsigned long kUkcModifyTestingTid        = _IOW('c', 5, kccwf_testing_tids_t);
-constexpr unsigned long kUkcSetMayRacePairs         = _IOW('c', 6, may_race_pair_list_t);
-constexpr unsigned long kUkcGetMayRacePairs         = _IOR('c', 7, may_race_pair_list_t);
-constexpr unsigned long kUkcSetCheckPhaseInfo       = _IOW('c', 8, check_phase_info_t);
-constexpr unsigned long kUkcStartNoLockReproduce    = _IO('c', 9);
-constexpr unsigned long kUkcSetNoLockReproduceInfo  = _IOW('c', 10, nolockreproduce_info_t);
-constexpr unsigned long kUkcStartOneSidedReproduce  = _IO('c', 11);
-constexpr unsigned long kUkcSetOneSidedReproduceInfo= _IOW('c', 12, onesidedreproduce_info_t);
-constexpr unsigned long kUkcSetMayUafPair           = _IOW('c', 13, may_uaf_pair_t);
-constexpr unsigned long kUkcClearMayUafPair         = _IO('c', 14);
+constexpr unsigned long kUkcTurnOff = _IO('c', 0);
+constexpr unsigned long kUkcStartMonitor = _IO('c', 1);
+constexpr unsigned long kUkcStartLog = _IO('c', 2);
+constexpr unsigned long kUkcStartCheckSyncPhase = _IO('c', 3);
+constexpr unsigned long kUkcStartValidatePhase = _IO('c', 4);
+constexpr unsigned long kUkcModifyTestingTid = _IOW('c', 5, kccwf_testing_tids_t);
+constexpr unsigned long kUkcSetMayRacePairs = _IOW('c', 6, may_race_pair_list_t);
+constexpr unsigned long kUkcGetMayRacePairs = _IOR('c', 7, may_race_pair_list_t);
+constexpr unsigned long kUkcSetCheckPhaseInfo = _IOW('c', 8, check_phase_info_t);
+constexpr unsigned long kUkcStartNoLockReproduce = _IO('c', 9);
+constexpr unsigned long kUkcSetNoLockReproduceInfo = _IOW('c', 10, nolockreproduce_info_t);
+constexpr unsigned long kUkcStartOneSidedReproduce = _IO('c', 11);
+constexpr unsigned long kUkcSetOneSidedReproduceInfo = _IOW('c', 12, onesidedreproduce_info_t);
+constexpr unsigned long kUkcSetMayUafPair = _IOW('c', 13, may_uaf_pair_t);
+constexpr unsigned long kUkcClearMayUafPair = _IO('c', 14);
 
 // 小工具：打开 /dev，失败时打印日志
 static inline int ukc_open_dev()
@@ -310,4 +310,4 @@ static inline int ukc_set_may_uaf_pair(const may_uaf_pair_t* pair)
 	return ret;
 }
 
-#endif  // SYZ_UKC_H
+#endif // SYZ_UKC_H

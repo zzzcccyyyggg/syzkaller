@@ -183,33 +183,37 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		return
 	}
 	if job.flags&ProgSmashed == 0 {
-		job.fuzzer.startJob(job.fuzzer.statJobsSmash, &smashJob{
-			exec: job.fuzzer.smashQueue,
-			p:    p.Clone(),
-			info: &JobInfo{
-				Name:  p.String(),
-				Type:  "smash",
-				Calls: []string{p.CallName(call)},
-			},
-		})
-		if job.fuzzer.Config.Comparisons && call >= 0 {
-			job.fuzzer.startJob(job.fuzzer.statJobsHints, &hintsJob{
+		// Skip smash/hints/faultinject in UAF mode to avoid interfering with
+		// barrier synchronization and reduce unnecessary execution overhead.
+		if !job.fuzzer.Config.ModeUAF {
+			job.fuzzer.startJob(job.fuzzer.statJobsSmash, &smashJob{
 				exec: job.fuzzer.smashQueue,
 				p:    p.Clone(),
-				call: call,
 				info: &JobInfo{
 					Name:  p.String(),
-					Type:  "hints",
+					Type:  "smash",
 					Calls: []string{p.CallName(call)},
 				},
 			})
-		}
-		if job.fuzzer.Config.FaultInjection && call >= 0 {
-			job.fuzzer.startJob(job.fuzzer.statJobsFaultInjection, &faultInjectionJob{
-				exec: job.fuzzer.smashQueue,
-				p:    p.Clone(),
-				call: call,
-			})
+			if job.fuzzer.Config.Comparisons && call >= 0 {
+				job.fuzzer.startJob(job.fuzzer.statJobsHints, &hintsJob{
+					exec: job.fuzzer.smashQueue,
+					p:    p.Clone(),
+					call: call,
+					info: &JobInfo{
+						Name:  p.String(),
+						Type:  "hints",
+						Calls: []string{p.CallName(call)},
+					},
+				})
+			}
+			if job.fuzzer.Config.FaultInjection && call >= 0 {
+				job.fuzzer.startJob(job.fuzzer.statJobsFaultInjection, &faultInjectionJob{
+					exec: job.fuzzer.smashQueue,
+					p:    p.Clone(),
+					call: call,
+				})
+			}
 		}
 	}
 	job.fuzzer.Logf(2, "added new input for %v to the corpus: %s", callName, p)

@@ -306,6 +306,22 @@ func (cfg *Config) initTimeouts() {
 	}
 	// Note: we could also consider heavy debug tools (KASAN/KMSAN/KCSAN/KMEMLEAK) if necessary.
 	cfg.Timeouts = cfg.SysTarget.Timeouts(slowdown)
+	if validate := cfg.Experimental.UAFValidate; validate != nil {
+		if validate.ExecutorProgramTimeoutSeconds > 0 {
+			cfg.Timeouts.Program = time.Duration(validate.ExecutorProgramTimeoutSeconds) * time.Second
+		} else if validate.TimeoutSeconds > 0 {
+			cfg.Timeouts.Program = time.Duration(validate.TimeoutSeconds) * time.Second
+		}
+		if validate.ExecutorSyscallTimeoutMillis > 0 {
+			cfg.Timeouts.Syscall = time.Duration(validate.ExecutorSyscallTimeoutMillis) * time.Millisecond
+		}
+		if cfg.Timeouts.Syscall >= cfg.Timeouts.Program {
+			cfg.Timeouts.Syscall = cfg.Timeouts.Program / 2
+			if cfg.Timeouts.Syscall < time.Millisecond {
+				cfg.Timeouts.Syscall = time.Millisecond
+			}
+		}
+	}
 	if cfg.VMRunningTime > 0 {
 		cfg.Timeouts.VMRunningTime = time.Duration(cfg.VMRunningTime) * time.Second
 	}
@@ -327,6 +343,12 @@ func (cfg *Config) initUAFValidate() error {
 	}
 	if validate.RepeatCount <= 0 {
 		validate.RepeatCount = 1
+	}
+	if validate.ExecutorProgramTimeoutSeconds < 0 {
+		return fmt.Errorf("experimental.uaf_validate.executor_program_timeout_seconds must be >= 0")
+	}
+	if validate.ExecutorSyscallTimeoutMillis < 0 {
+		return fmt.Errorf("experimental.uaf_validate.executor_syscall_timeout_millis must be >= 0")
 	}
 	return nil
 }

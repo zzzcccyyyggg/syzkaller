@@ -380,6 +380,9 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		}
 	}
 	log.Logf(2, "[test]: genFuzz")
+	if req != nil {
+		fuzzer.prepare(req, 0, 0)
+	}
 
 	return req
 }

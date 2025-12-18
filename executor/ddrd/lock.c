@@ -49,20 +49,32 @@ LockRecord parse_lock_line(const char* line)
     return lock;
 }
 
-LockStatus determine_lock_status(const AccessRecord* a, const AccessRecord* b)
+static bool has_lock(const AccessRecord* rec)
 {
-    if (a->lock_count == 0 && b->lock_count == 0)
-        return LOCK_NO_LOCKS;
+    return rec && rec->lock_count > 0;
+}
 
-    if (a->lock_count == 0 || b->lock_count == 0)
-        return LOCK_ONE_SIDED_LOCK;
-
+static bool share_common_lock(const AccessRecord* a, const AccessRecord* b)
+{
     for (int i = 0; i < a->lock_count; i++) {
         for (int j = 0; j < b->lock_count; j++) {
             if (a->held_locks[i].ptr == b->held_locks[j].ptr)
-                return LOCK_SYNC_WITH_COMMON_LOCK;
+                return true;
         }
     }
+    return false;
+}
 
-    return LOCK_UNSYNC_LOCKS;
+LockStatus determine_lock_status(const AccessRecord* a, const AccessRecord* b)
+{
+    if (!has_lock(a) && !has_lock(b))
+        return LOCK_NO_LOCKS;
+
+    if (has_lock(a) && has_lock(b))
+        return share_common_lock(a, b) ? LOCK_SYNC_WITH_COMMON_LOCK : LOCK_UNSYNC_LOCKS;
+
+    if (has_lock(a))
+        return LOCK_FIRST_HAS_LOCKS;
+
+    return LOCK_SECOND_HAS_LOCKS;
 }

@@ -249,7 +249,8 @@ func TestStageManagerRepeat(t *testing.T) {
 	}
 	exec.mu.Lock()
 	defer exec.mu.Unlock()
-	if exec.runs != 3 {
-		t.Fatalf("expected executor run count 3, got %d", exec.runs)
+	// 3 repeats + 1 verification phase run = 4 total
+	if exec.runs != 4 {
+		t.Fatalf("expected executor run count 4, got %d", exec.runs)
 	}
 }

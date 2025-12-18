@@ -67,7 +67,6 @@ var (
 		"there are missing coverage callbacks")
 )
 
-
 func toolFileCover() {
 	dateTo, err := civil.ParseDate(*flagDateTo)
 	if err != nil {

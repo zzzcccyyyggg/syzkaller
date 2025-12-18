@@ -110,8 +110,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
 {
-    const uint64_t TIME_THRESHOLD = 42700;
-    const uint64_t FAST_THRESHOLD = 42700;
+    const uint64_t TIME_THRESHOLD = 427000000;
+    const uint64_t FAST_THRESHOLD = 427000000;
     int pair_count = 0;
 
     for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {
@@ -139,6 +139,8 @@ int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs
                 continue;
 
             LockStatus lock_status = determine_lock_status(a, b);
+            if (lock_status == LOCK_SYNC_WITH_COMMON_LOCK)
+                continue;
             RacePair* pair = &pairs[pair_count];
             if (a->access_time <= b->access_time) {
                 pair->first = *a;
@@ -227,6 +229,8 @@ int access_context_analyze_uaf_pairs(AccessContext* record_ctx, UAFPair* uaf_pai
                 continue;
 
             LockStatus lock_status = determine_lock_status(use_access, closest_free);
+            if (lock_status == LOCK_SYNC_WITH_COMMON_LOCK)
+                continue;
             UAFPair* uaf_pair = &uaf_pairs[pair_count];
             uaf_pair->use_access = *use_access;
             uaf_pair->free_access = *closest_free;

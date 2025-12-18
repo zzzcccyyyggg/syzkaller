@@ -172,8 +172,13 @@ public:
 			msg.avoid = 0;
 		if (msg.avoid & (1ull << slot_))
 			return false;
-		if (msg_)
-			fail("already have pending msg");
+		if (msg_) {
+			// Return false instead of failing to handle potential race conditions
+			// where a request arrives before the previous one is fully processed.
+			debug("proc slot %d (exec %d): already has pending msg, skipping request %llu\n",
+			      slot_, id_, static_cast<uint64>(msg.id));
+			return false;
+		}
 		if (wait_start_)
 			wait_end_ = current_time_ms();
 		// Restart every once in a while to not let too much state accumulate.
@@ -836,7 +841,7 @@ public:
 		// Switch to LOG mode
 		if (collect_uaf || collect_extended)
 			ukc_enter_log_mode();
-			// ukc_enter_monitor_mode();
+		// ukc_enter_monitor_mode();
 		debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
 
@@ -869,7 +874,7 @@ public:
 		//                                                           (int)kDdrdMaxUafPairs);
 		// 为避免更改过多 race 也先使用uaf pair的模型
 		int count = race_detector_analyze_and_generate_race_infos(&detector_, pairs.data(),
-									 (int)kDdrdMaxUafPairs);
+									  (int)kDdrdMaxUafPairs);
 		if (count <= 0) {
 			ClearOutput();
 			active_for_group_ = false;

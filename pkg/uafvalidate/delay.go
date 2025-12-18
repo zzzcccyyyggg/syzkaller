@@ -3,7 +3,9 @@ package uafvalidate
 import (
 	"math"
 	"math/bits"
+	"sort"
 
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/fuzzer"
 )
 
@@ -45,7 +47,10 @@ func (dm DelayManager) BuildDelays(entry *fuzzer.UAFCorpusEntry) []int64 {
 	if desired == 0 {
 		return nil
 	}
-	delays := append([]int64(nil), entry.ReplayPlan.DelaysMicros...)
+	delays := dm.deriveSmartDelays(entry)
+	if len(delays) == 0 {
+		delays = append([]int64(nil), entry.ReplayPlan.DelaysMicros...)
+	}
 	if len(delays) == 0 {
 		delays = make([]int64, desired)
 	}
@@ -65,6 +70,51 @@ func (dm DelayManager) BuildDelays(entry *fuzzer.UAFCorpusEntry) []int64 {
 		delays[i] = clampDelay(v)
 	}
 	return delays
+}
+
+func (dm DelayManager) deriveSmartDelays(entry *fuzzer.UAFCorpusEntry) []int64 {
+	if entry == nil || len(entry.Pairs) == 0 {
+		return nil
+	}
+	primary := selectPrimaryPair(entry.Pairs)
+	if primary == nil {
+		return nil
+	}
+	participants := dm.desiredSlots(entry)
+	if participants < 2 {
+		return nil
+	}
+	diff := int64(primary.TimeDiff)
+	if diff <= 0 {
+		return nil
+	}
+	diff = clampDelay(diff)
+	delays := make([]int64, participants)
+	delays[0] = diff
+	return delays
+}
+
+func selectPrimaryPair(pairs []*ddrd.MayUAFPair) *ddrd.MayUAFPair {
+	if len(pairs) == 0 {
+		return nil
+	}
+	filtered := make([]*ddrd.MayUAFPair, 0, len(pairs))
+	for _, pair := range pairs {
+		if pair == nil || pair.TimeDiff == 0 {
+			continue
+		}
+		filtered = append(filtered, pair)
+	}
+	if len(filtered) == 0 {
+		return nil
+	}
+	sort.Slice(filtered, func(i, j int) bool {
+		if filtered[i].TimeDiff == filtered[j].TimeDiff {
+			return filtered[i].Signal < filtered[j].Signal
+		}
+		return filtered[i].TimeDiff > filtered[j].TimeDiff
+	})
+	return filtered[0]
 }
 
 func (dm DelayManager) desiredSlots(entry *fuzzer.UAFCorpusEntry) int {

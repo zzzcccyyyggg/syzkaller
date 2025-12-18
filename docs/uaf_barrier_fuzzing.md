@@ -76,7 +76,8 @@ Extend existing manager⇄fuzzer sync payloads:
 - Manager shares refreshed stats (counts per subsystem, failure rates) back to fuzzer for scheduling hints.
 
 ## 5. Mutation Strategy
-- Start with existing syzkaller mutation pipeline (`Generate`, `Mutate`, `Triaged`, `Smash`) on the owning program.
+- Start with existing syzkaller mutation pipeline (`Generate`, `Mutate`, `Triaged`) on the owning program.
+- **Disabled in UAF mode**: `Smash`, `Hints`, and `FaultInjection` jobs are automatically skipped when `ModeUAF` is enabled. This avoids interfering with barrier synchronization and reduces unnecessary execution overhead that does not contribute to UAF detection.
 - Constraint: maintain call ordering that participated in the recorded pair (avoid deleting required calls).
 - Store `CallIdx` + dependencies: embed keep masks to ensure target call(s) survive mutation.
 - Future work: pair-guided mutation (e.g., nudge pointer lifetimes, reorder free/use pairs).
@@ -138,6 +139,7 @@ Extend existing manager⇄fuzzer sync payloads:
 - Manager side persists the authoritative corpus in `pkg/manager/uaf_store.go` using `uaf-corpus.db`, hydrates new fuzzer instances via `mgr.enqueueUAFCorpusSeeds`, and logs store growth during the main loop.
 - Fuzzer side exposes `PendingUAFCorpusEntries`/`EnqueueUAFCorpus` in `pkg/fuzzer/fuzzer.go`, restores persisted seeds through `uaf.restore`, and pushes them onto the dedicated queue with barrier metadata preserved.
 - Configuration gating lives under `experimental.uaf_mode`; enabling it wires the store initialization, DDRD exec flags, and barrier helpers without affecting non-UAF runs.
+- **Job Gating**: When `ModeUAF` is enabled, `pkg/fuzzer/job.go` skips `smashJob`, `hintsJob`, and `faultInjectionJob` creation in `triageJob.handleCall()`. This reduces execution overhead and prevents interference with barrier synchronization.
 - Persistence now captures program bodies, full barrier program groups, optional replay delay plans, barrier snapshots, hashed signals, and timestamps; extended traces remain TODO and are called out in the open questions section.
 
 ## 11. Validation Mode

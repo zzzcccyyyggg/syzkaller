@@ -62,10 +62,11 @@ bool access_context_check_data_race_validity(AccessContext* record_ctx, const Ac
 bool access_context_check_uaf_validity(AccessContext* record_ctx, const AccessRecord* use_access, const AccessRecord* free_op);
 
 typedef enum {
-    LOCK_NO_LOCKS = 0,              // 双方都无锁
-    LOCK_ONE_SIDED_LOCK = 1,        // 一方有锁，一方无锁
-    LOCK_UNSYNC_LOCKS = 2,          // 双方有锁，但无公共锁
-    LOCK_SYNC_WITH_COMMON_LOCK = 3  // 双方有锁，且有公共锁
+    LOCK_NO_LOCKS = 0,               // 双方都无锁
+    LOCK_FIRST_HAS_LOCKS = 1,        // Pair 的第一个访问持有锁
+    LOCK_SECOND_HAS_LOCKS = 2,       // Pair 的第二个访问持有锁
+    LOCK_SYNC_WITH_COMMON_LOCK = 3,  // 双方有锁，且有公共锁
+    LOCK_UNSYNC_LOCKS = 4            // 双方有锁，但无公共锁
 } LockStatus;
 LockStatus determine_lock_status(const AccessRecord* a, const AccessRecord* b);
 
