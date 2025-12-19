@@ -552,6 +552,7 @@ private:
 			req.ukc_use_access_delay_time = msg_->ukc_use_access_delay_time;
 			req.ukc_is_valid = true;
 		}
+		req.race_time_threshold_ns = msg_->race_time_threshold_ns;
 		exec_start_ = current_time_ms();
 		ChangeState(State::Executing);
 		if (write(req_pipe_, &req, sizeof(req)) != sizeof(req)) {
@@ -851,6 +852,13 @@ public:
 		else
 			race_detector_disable_history(&detector_);
 		race_detector_reset(&detector_);
+
+		// Set adaptive race detection threshold if provided
+		if (req && req->race_time_threshold_ns > 0) {
+			race_detector_set_threshold(&detector_, req->race_time_threshold_ns);
+			debug("ddrd: using adaptive race threshold: %llu ns\n",
+			      (unsigned long long)req->race_time_threshold_ns);
+		}
 	}
 
 	// Collect results after all barrier members complete

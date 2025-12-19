@@ -209,6 +209,9 @@ table ExecRequestRaw {
 	ukc_free_stack	:uint64;
 	ukc_use_access_delay_time	:int32;
 	ukc_is_valid	:bool;
+	// Race detection time threshold in nanoseconds (for adaptive threshold control).
+	// If 0, executor uses the default threshold.
+	race_time_threshold_ns	:uint64;
 }
 
 table SignalUpdateRaw {

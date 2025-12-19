@@ -24,12 +24,13 @@ type Executor interface {
 type ExecutorFactory func(ctx context.Context) (Executor, error)
 
 type ExecutionRequest struct {
-	Entry         *fuzzer.UAFCorpusEntry
-	Delays        []int64
-	TargetPair    *ddrd.MayUAFPair
-	RepeatTimes   int
-	DisableDdrd   bool
-	StopOnSuccess bool
+	Entry               *fuzzer.UAFCorpusEntry
+	Delays              []int64
+	TargetPair          *ddrd.MayUAFPair
+	RepeatTimes         int
+	DisableDdrd         bool
+	StopOnSuccess       bool
+	RaceTimeThresholdNs uint64 // Adaptive race detection threshold in nanoseconds
 }
 
 type ExecutionResult struct {
@@ -74,12 +75,27 @@ type StageManager struct {
 	varNameHBDB    *db.DB
 	varNameHBStore *VarNameHBStore
 
-	mu          sync.Mutex
-	pending     map[string]*validationTask
-	seenKeys    map[string]struct{} // tracks all keys that have been enqueued (including completed)
-	closed      bool
-	seq         uint64
-	tasksClosed bool
+	// Threshold controller for adaptive race detection
+	thresholdCtrl *ddrd.ThresholdController
+
+	// Corpus-level validation statistics
+	processedCorpus uint64 // Number of corpus entries that have completed validation (regardless of result)
+	recentProcessed uint64 // Recently processed corpus entries (for threshold calculation)
+	lastStatsUpdate time.Time
+
+	// Dirty flags for deferred flush (reduce IO frequency)
+	invalidDirty bool
+	validDirty   bool
+	lastFlush    time.Time
+
+	mu           sync.Mutex
+	pending      map[string]*validationTask
+	seenKeys     map[string]struct{} // tracks all keys that have been enqueued (including completed)
+	processedDB  *db.DB              // persists processed corpus keys (to avoid re-validation after restart)
+	processedSet map[string]struct{} // in-memory cache of processed keys
+	closed       bool
+	seq          uint64
+	tasksClosed  bool
 
 	closeOnce sync.Once
 }
@@ -111,14 +127,16 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		}
 	}
 	sm := &StageManager{
-		cfg:      cfg,
-		delay:    NewDelayManager(defaultMaxBarrierDelays, cfg.DelayRetryBudget),
-		factory:  factory,
-		tasks:    make(chan *validationTask, cfg.MaxConcurrent*2),
-		results:  make(chan *ValidationResult, cfg.MaxConcurrent*2),
-		pending:  make(map[string]*validationTask),
-		seenKeys: make(map[string]struct{}),
-		stable:   requiredStableCount(cfg.RepeatCount),
+		cfg:             cfg,
+		delay:           NewDelayManager(defaultMaxBarrierDelays, cfg.DelayRetryBudget),
+		factory:         factory,
+		tasks:           make(chan *validationTask, cfg.MaxConcurrent*2),
+		results:         make(chan *ValidationResult, cfg.MaxConcurrent*2),
+		pending:         make(map[string]*validationTask),
+		seenKeys:        make(map[string]struct{}),
+		processedSet:    make(map[string]struct{}),
+		stable:          requiredStableCount(cfg.RepeatCount),
+		lastStatsUpdate: time.Now(),
 	}
 
 	if cfg.Workdir != "" {
@@ -142,6 +160,21 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 			log.Logf(0, "uafvalidate: loaded %d validated pairs from db", len(vd.Records))
 		}
 
+		// Processed corpus DB - tracks all corpus entries that have been validated (regardless of result)
+		processedPath := filepath.Join(cfg.Workdir, "processed_corpus.db")
+		pdb, err := db.Open(processedPath, true)
+		if err != nil {
+			log.Logf(0, "uafvalidate: failed to open processed corpus db: %v", err)
+		} else {
+			sm.processedDB = pdb
+			// Load existing processed keys into memory
+			for key := range pdb.Records {
+				sm.processedSet[key] = struct{}{}
+			}
+			sm.processedCorpus = uint64(len(sm.processedSet))
+			log.Logf(0, "uafvalidate: loaded %d processed corpus entries from db", len(pdb.Records))
+		}
+
 		// Layer 2: VarNamePair HB statistics DB
 		hbPath := filepath.Join(cfg.Workdir, "varname_hb_stats.db")
 		hbDB, err := db.Open(hbPath, true)
@@ -150,6 +183,18 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		} else {
 			sm.varNameHBDB = hbDB
 			sm.varNameHBStore = NewVarNameHBStore(hbDB)
+		}
+
+		// Use shared threshold controller if provided, otherwise create a new one
+		if cfg.ThresholdCtrl != nil {
+			sm.thresholdCtrl = cfg.ThresholdCtrl
+			log.Logf(0, "uafvalidate: using shared threshold controller, current threshold: %d ns",
+				sm.thresholdCtrl.CurrentThreshold())
+		} else {
+			thresholdPath := filepath.Join(cfg.Workdir, "threshold_config.json")
+			sm.thresholdCtrl = ddrd.NewThresholdController(thresholdPath)
+			log.Logf(0, "uafvalidate: created new threshold controller, current threshold: %d ns",
+				sm.thresholdCtrl.CurrentThreshold())
 		}
 	}
 
@@ -262,7 +307,13 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		if err != nil {
 			result.Err = err
 		} else {
-			execRes, runErr := exec.Run(ctx, &ExecutionRequest{Entry: task.entry, Delays: delays})
+			// During stable pair collection phase (before verification),
+			// use maximum threshold to capture all potential UAF pairs
+			execRes, runErr := exec.Run(ctx, &ExecutionRequest{
+				Entry:               task.entry,
+				Delays:              delays,
+				RaceTimeThresholdNs: ddrd.MaxThresholdNs,
+			})
 			if closer, ok := exec.(interface{ Close() error }); ok {
 				if cerr := closer.Close(); cerr != nil {
 					log.Logf(0, "uafvalidate: executor close error key=%s err=%v", task.key, cerr)
@@ -304,7 +355,7 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		}
 		sm.updateIntersection(task, result)
 		if task.repeats+1 >= sm.cfg.RepeatCount {
-			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable)
+			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, task.entry.Pairs)
 			if len(result.StablePairs) > 0 {
 				sm.runVerificationPhase(ctx, task, result.StablePairs)
 			}
@@ -430,7 +481,11 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		sm.seq++
 		key = fmt.Sprintf("anon-%d", sm.seq)
 	}
-	// Skip if already seen (in pending or previously completed)
+	// Skip if already processed (validated in previous session)
+	if _, processed := sm.processedSet[key]; processed {
+		return nil
+	}
+	// Skip if already seen (in pending or previously completed in this session)
 	if _, exists := sm.seenKeys[key]; exists {
 		return nil
 	}
@@ -476,9 +531,28 @@ func (sm *StageManager) complete(task *validationTask) {
 	}
 	sm.mu.Lock()
 	delete(sm.pending, task.key)
-	log.Logf(0, "uafvalidate: complete key=%s pending=%d closed=%t tasksClosed=%t", task.key, len(sm.pending), sm.closed, sm.tasksClosed)
+	// Mark corpus as processed (regardless of validation result)
+	sm.markProcessedLocked(task.key)
+	// Flush databases when completing a task to ensure data is persisted
+	sm.maybeFlushLocked()
+	log.Logf(0, "uafvalidate: complete key=%s pending=%d closed=%t tasksClosed=%t processed=%d",
+		task.key, len(sm.pending), sm.closed, sm.tasksClosed, sm.processedCorpus)
 	sm.maybeCloseTasksLocked()
 	sm.mu.Unlock()
+}
+
+// markProcessedLocked marks a corpus key as processed and persists to DB.
+// Must be called with sm.mu held.
+func (sm *StageManager) markProcessedLocked(key string) {
+	if _, exists := sm.processedSet[key]; exists {
+		return
+	}
+	sm.processedSet[key] = struct{}{}
+	sm.processedCorpus++
+	sm.recentProcessed++
+	if sm.processedDB != nil {
+		sm.processedDB.Save(key, []byte{}, 0)
+	}
 }
 
 func (sm *StageManager) maybeCloseTasksLocked() {
@@ -528,19 +602,38 @@ func clonePairs(report *ddrd.Report) []ddrd.MayUAFPair {
 	return cloned
 }
 
-func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int) []ddrd.MayUAFPair {
+// collectStablePairs filters pairs that:
+// 1. Appeared at least minCount times in the repeated executions
+// 2. Also exist in the original entry's pairs (originalPairs)
+// This ensures we only verify pairs that were in the original corpus entry.
+// For each stable pair, the TimeDiff is set to max(original TimeDiff, stable run TimeDiff).
+func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair) []ddrd.MayUAFPair {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
 	}
 	if minCount <= 1 {
 		minCount = 1
 	}
+
+	// Build a map from key to original pair (to access original TimeDiff)
+	originalByKey := make(map[string]*ddrd.MayUAFPair, len(originalPairs))
+	for _, p := range originalPairs {
+		if p == nil {
+			continue
+		}
+		originalByKey[pairKey(*p)] = p
+	}
+
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
 		if count < minCount {
 			continue
 		}
 		if _, ok := latest[key]; !ok {
+			continue
+		}
+		// Only include pairs that exist in the original entry
+		if _, inOriginal := originalByKey[key]; !inOriginal {
 			continue
 		}
 		keys = append(keys, key)
@@ -551,7 +644,14 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 	sort.Strings(keys)
 	stable := make([]ddrd.MayUAFPair, 0, len(keys))
 	for _, key := range keys {
-		stable = append(stable, latest[key])
+		pair := latest[key]
+		// Use max TimeDiff between original and stable run
+		if origPair, ok := originalByKey[key]; ok && origPair != nil {
+			if origPair.TimeDiff > pair.TimeDiff {
+				pair.TimeDiff = origPair.TimeDiff
+			}
+		}
+		stable = append(stable, pair)
 	}
 	return stable
 }
@@ -637,12 +737,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		req := &ExecutionRequest{
-			Entry:         task.entry,
-			Delays:        sm.delay.BuildDelays(task.entry),
-			TargetPair:    &pairCopy,
-			RepeatTimes:   10,
-			DisableDdrd:   true,
-			StopOnSuccess: true,
+			Entry:               task.entry,
+			Delays:              sm.delay.BuildDelays(task.entry),
+			TargetPair:          &pairCopy,
+			RepeatTimes:         10,
+			DisableDdrd:         true,
+			StopOnSuccess:       true,
+			RaceTimeThresholdNs: sm.CurrentThreshold(),
 		}
 
 		execRes, runErr := exec.Run(ctx, req)
@@ -740,6 +841,9 @@ func (sm *StageManager) isInvalid(key string) bool {
 	return ok
 }
 
+// flushInterval is the minimum time between database flushes
+const flushInterval = 5 * time.Second
+
 func (sm *StageManager) markInvalid(key string) {
 	if sm.invalidDB == nil {
 		return
@@ -747,9 +851,8 @@ func (sm *StageManager) markInvalid(key string) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.invalidDB.Save(key, []byte{}, 0)
-	if err := sm.invalidDB.Flush(); err != nil {
-		log.Logf(0, "uafvalidate: failed to flush invalid db: %v", err)
-	}
+	sm.invalidDirty = true
+	sm.maybeFlushLocked()
 }
 
 func (sm *StageManager) isValidated(key string) bool {
@@ -769,8 +872,57 @@ func (sm *StageManager) markValidated(key string, data []byte) {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	sm.validDB.Save(key, data, 0)
-	if err := sm.validDB.Flush(); err != nil {
-		log.Logf(0, "uafvalidate: failed to flush validated db: %v", err)
+	sm.validDirty = true
+	sm.maybeFlushLocked()
+}
+
+// maybeFlushLocked flushes dirty databases if enough time has passed since last flush.
+// Must be called with sm.mu held.
+func (sm *StageManager) maybeFlushLocked() {
+	now := time.Now()
+	if now.Sub(sm.lastFlush) < flushInterval {
+		return
+	}
+	sm.lastFlush = now
+	if sm.invalidDirty && sm.invalidDB != nil {
+		if err := sm.invalidDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush invalid db: %v", err)
+		}
+		sm.invalidDirty = false
+	}
+	if sm.validDirty && sm.validDB != nil {
+		if err := sm.validDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush validated db: %v", err)
+		}
+		sm.validDirty = false
+	}
+	if sm.processedDB != nil {
+		if err := sm.processedDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush processed db: %v", err)
+		}
+	}
+}
+
+// FlushDBs forces a flush of all dirty databases.
+func (sm *StageManager) FlushDBs() {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.invalidDirty && sm.invalidDB != nil {
+		if err := sm.invalidDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush invalid db: %v", err)
+		}
+		sm.invalidDirty = false
+	}
+	if sm.validDirty && sm.validDB != nil {
+		if err := sm.validDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush validated db: %v", err)
+		}
+		sm.validDirty = false
+	}
+	if sm.processedDB != nil {
+		if err := sm.processedDB.Flush(); err != nil {
+			log.Logf(0, "uafvalidate: failed to flush processed db: %v", err)
+		}
 	}
 }
 
@@ -865,4 +1017,56 @@ func serializeValidatedEntry(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry)
 		result = result[:maxCrashReportSize*2]
 	}
 	return result
+}
+
+// UpdateThresholdStats updates the threshold controller with current corpus-level statistics.
+// Should be called periodically (e.g., every few minutes).
+// Parameters:
+//   - recentCollected: number of new corpus entries collected since last update (tracked, not used in adjustment)
+//   - totalCorpus: total number of corpus entries in the UAF store
+func (sm *StageManager) UpdateThresholdStats(recentCollected, totalCorpus uint64) {
+	if sm.thresholdCtrl == nil {
+		return
+	}
+
+	sm.mu.Lock()
+	// Get processed corpus count and recent processed since last update
+	verifiedCorpus := sm.processedCorpus
+	recentVerified := sm.recentProcessed
+	sm.recentProcessed = 0 // Reset for next interval
+	sm.mu.Unlock()
+
+	// Update threshold controller with corpus-level stats
+	sm.thresholdCtrl.UpdateStats(totalCorpus, verifiedCorpus, recentCollected, recentVerified)
+
+	log.Logf(3, "uafvalidate: threshold updated - corpus(total:%d,verified:%d) threshold:%d ns",
+		totalCorpus, verifiedCorpus, sm.thresholdCtrl.CurrentThreshold())
+}
+
+// CurrentThreshold returns the current race time threshold in nanoseconds.
+// Returns the default threshold if controller is not initialized.
+func (sm *StageManager) CurrentThreshold() uint64 {
+	if sm.thresholdCtrl == nil {
+		return ddrd.DefaultThresholdNs
+	}
+	return sm.thresholdCtrl.CurrentThreshold()
+}
+
+// GetVerificationStats returns the current verification statistics at corpus level.
+// Returns:
+//   - processedCorpus: total number of corpus entries that have been validated
+//   - invalidPairs: number of pairs marked as invalid (HB-ordered)
+//   - validPairs: number of pairs confirmed as triggerable
+func (sm *StageManager) GetVerificationStats() (processedCorpus, invalidPairs, validPairs uint64) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	processedCorpus = sm.processedCorpus
+	if sm.validDB != nil {
+		validPairs = uint64(len(sm.validDB.Records))
+	}
+	if sm.invalidDB != nil {
+		invalidPairs = uint64(len(sm.invalidDB.Records))
+	}
+	return
 }

@@ -280,6 +280,9 @@ type Experimental struct {
 	// Configure the UAF validation pipeline.
 	UAFValidate *UAFValidateConfig `json:"uaf_validate,omitempty"`
 
+	// Configure adaptive DDRD threshold control.
+	DDRDThreshold *DDRDThresholdConfig `json:"ddrd_threshold,omitempty"`
+
 	// Skip duplicate data race reports once they've been observed.
 	// When enabled, syz-manager keeps an in-memory cache of data race signatures
 	// and asks VM monitors to ignore matches in that cache so that fuzzing
@@ -288,6 +291,23 @@ type Experimental struct {
 	// Bounded size for the duplicate data race signature cache. Older entries
 	// are discarded once the limit is exceeded (default: 10000).
 	MaxDataRaceCombinations int `json:"max_data_race_combinations,omitempty"`
+}
+
+// DDRDThresholdConfig configures adaptive DDRD race detection threshold.
+type DDRDThresholdConfig struct {
+	// Enable adaptive threshold adjustment based on validation statistics.
+	// When enabled, the system automatically adjusts the race detection time threshold
+	// to balance collection and validation throughput.
+	Enabled bool `json:"enabled,omitempty"`
+	// Initial threshold in nanoseconds. If 0, uses default (427ms).
+	InitialThresholdNs uint64 `json:"initial_threshold_ns,omitempty"`
+	// Minimum threshold in nanoseconds. If 0, uses default (0.427ms).
+	MinThresholdNs uint64 `json:"min_threshold_ns,omitempty"`
+	// Maximum threshold in nanoseconds. If 0, uses default (427ms).
+	MaxThresholdNs uint64 `json:"max_threshold_ns,omitempty"`
+	// How often to update the threshold based on statistics (in minutes).
+	// If 0, uses default (30 minutes).
+	UpdateIntervalMinutes int `json:"update_interval_minutes,omitempty"`
 }
 
 type UAFValidateConfig struct {
@@ -306,6 +326,9 @@ type UAFValidateConfig struct {
 	// IdleReloadSeconds specifies how long to wait before reloading when no tasks are pending.
 	// Defaults to 30 seconds if unset or zero.
 	IdleReloadSeconds int `json:"idle_reload_seconds,omitempty"`
+	// ThresholdUpdateMinutes specifies how often to update the adaptive race detection threshold.
+	// Defaults to 5 minutes if unset or zero.
+	ThresholdUpdateMinutes int `json:"threshold_update_minutes,omitempty"`
 }
 
 type FocusArea struct {

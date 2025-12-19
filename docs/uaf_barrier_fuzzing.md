@@ -149,6 +149,25 @@ Extend existing manager⇄fuzzer sync payloads:
 - Results are persisted in `pkg/manager/uaf_validated_store.go`, tracking confirmation status, barrier metadata, and replay plans for each pair signature.
 - Fresh statistics (`uaf validated`, `uaf validation failures`) and logs surface progress through the existing HTTP/metrics pipeline.
 
+### 11.1 Adaptive Race Detection Threshold
+The system implements an adaptive threshold mechanism to balance pair collection (fuzz phase) with verification throughput (validate phase):
+
+- **Threshold Controller** (`pkg/ddrd/threshold.go`): Manages the race detection time window dynamically based on collection/verification statistics.
+- **Cross-Process Communication**: Fuzz and validate phases communicate via `threshold_config.json` in the workdir.
+- **Periodic Reload**: Fuzz phase reloads threshold from file every 30 seconds to pick up changes from validate phase.
+- **Algorithm**: Adjusts threshold based on `speedRatio` (collection vs verification rate) and `backlogRatio` (unverified pairs percentage).
+
+| Threshold | Value | Description |
+|-----------|-------|-------------|
+| Min | 0.427 ms | Tighter window, fewer pairs collected |
+| Default | 427 ms | Starting point |
+| Max | 427 ms | Looser window, more pairs collected |
+
+### 11.2 VarName HB Confidence Tracking
+- Tracks happens-before (HB) relationship confidence per VarName pair.
+- Pairs with high HB confidence (likely not real races) are probabilistically skipped during verification.
+- Statistics persisted in `varname_hb_stats.db`.
+
 ## 12. Summary
 The proposed framework augments syzkaller with a UAF-focused fuzzing loop that:
 - Executes programs under DDRD barrier control, guaranteeing clean tracing per cycle.

@@ -53,6 +53,7 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
 - `ContinuousMode`: Enable incremental corpus reloading instead of one-shot validation. When enabled, the validator runs indefinitely and periodically checks for new entries.
 - `IncrementalReloadMinutes`: How often to reload new corpus entries in continuous mode (default: 10 minutes).
 - `IdleReloadSeconds`: How long to wait before reloading when no tasks are pending (default: 30 seconds).
+- `ThresholdUpdateMinutes`: How often to update the adaptive race detection threshold (default: 5 minutes).
 - `Debug`: Surfaces additional logging when enabled.
 
 ### Example Configuration (Continuous Mode)
@@ -66,7 +67,8 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
       "repeat_count": 3,
       "continuous_mode": true,
       "incremental_reload_minutes": 10,
-      "idle_reload_seconds": 30
+      "idle_reload_seconds": 30,
+      "threshold_update_minutes": 5
     }
   }
 }
@@ -74,6 +76,7 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
 
 Additional runtime files:
 - `invalid_uaf.db`: Tracks DDRD pairs that failed dedicated verification so future runs can skip them early.
+- `threshold_config.json`: Stores adaptive race detection threshold state for cross-process communication.
 
 ## Logging & Diagnostics
 - **Per-Run Status**: Success, crash, or executor error is logged with repeat indices and pair counts.
@@ -86,6 +89,8 @@ Additional runtime files:
 - `uaf-corpus.db`: Source corpus entries (programs, barriers, replay plans, original DDRD metadata).
 - `uaf-validated.db`: Validation outcomes with attempts, notes, timestamps, last seen pairs, and stable intersections.
 - `invalid_uaf.db`: Cache of DDRD pairs that consistently fail verification, preventing repeat work.
+- `varname_hb_stats.db`: VarName-based HB (happens-before) statistics for probabilistic pair skipping.
+- `threshold_config.json`: Adaptive race detection threshold configuration shared between fuzz and validate phases.
 
 ## Error Handling
 - Executor errors and crashes trigger retries (bounded by the delay budget). Persistent failures mark the entry as `failed` with diagnostic notes.
@@ -101,3 +106,49 @@ Additional runtime files:
 - Symbolize stack hashes when resolver data becomes available.
 - Add regression tests around intersection logic and store persistence.
 - Extend dashboards to display confirmation results and stable pair digests.
+
+## Adaptive Race Detection Threshold
+
+The system implements an adaptive threshold mechanism to balance the rate of pair collection (fuzz phase) with verification throughput (validate phase).
+
+### Algorithm
+The threshold controller adjusts the race detection time window based on:
+- **Recent collection rate**: How many pairs were collected in the last period
+- **Recent verification rate**: How many pairs were verified in the last period  
+- **Backlog ratio**: Total unverified pairs as a percentage of total collected
+
+```
+speedRatio = max(1.0, recentCollected / max(1, recentVerified))
+backlogRatio = (totalCollected - totalVerified) / max(1, totalCollected)
+adjustFactor = clamp(1 / (speedRatio * (1 + backlogRatio)), 0.5, 1.2)
+newThreshold = clamp(currentThreshold * adjustFactor, MinThresholdNs, MaxThresholdNs)
+```
+
+### Threshold Range
+| Value | Time | Description |
+|-------|------|-------------|
+| `MinThresholdNs` | 427,000 ns (0.427 ms) | Tightest - fewer pairs collected |
+| `DefaultThresholdNs` | 427,000 ns (0.427 ms) | Starts conservative, grows as needed |
+| `MaxThresholdNs` | 427,000,000 ns (427 ms) | Loosest - more pairs collected |
+
+### Cross-Process Communication
+When running fuzz and validate phases as separate processes, they communicate via `threshold_config.json`:
+
+```
+┌─────────────────┐     threshold_config.json      ┌─────────────────┐
+│ VALIDATE Phase  │ ─────────────────────────────→ │ FUZZ Phase      │
+│ (Updates stats  │                                │ (Reads threshold│
+│  & threshold)   │                                │  every 30 sec)  │
+└─────────────────┘                                └─────────────────┘
+```
+
+### Usage Example
+```bash
+# Terminal 1: Fuzz phase (collects pairs)
+sudo ./bin/syz-manager --config=./config.cfg
+
+# Terminal 2: Validate phase (verifies pairs & adjusts threshold)
+sudo ./bin/syz-manager --config=./config-validate.cfg --mode uaf-validate
+```
+
+The validate phase periodically updates the threshold based on verification statistics. The fuzz phase reloads the threshold from file every 30 seconds, automatically adapting to the new value.

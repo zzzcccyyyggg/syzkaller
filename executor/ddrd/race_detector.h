@@ -30,6 +30,10 @@ void race_detector_cleanup(RaceDetector* detector);
 void race_detector_reset(RaceDetector* detector);
 bool race_detector_is_available(RaceDetector* detector);
 
+// Set race time threshold for detection (in nanoseconds)
+// If threshold is 0, the default threshold will be used
+void race_detector_set_threshold(RaceDetector* detector, uint64_t threshold_ns);
+
 ssize_t race_detector_read_trace_buffer(RaceDetector* detector, char* buffer, size_t buffer_size);
 int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, int max_frees);
 

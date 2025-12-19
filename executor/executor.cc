@@ -606,6 +606,7 @@ struct execute_req {
 	uint64_t ukc_free_stack;
 	int32_t ukc_use_access_delay_time;
 	bool ukc_is_valid;
+	uint64_t race_time_threshold_ns; // Adaptive race detection time threshold
 };
 
 struct execute_reply {

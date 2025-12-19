@@ -21,6 +21,11 @@ uint64_t hash_race_signal(const char* var1, const char* stack1,
                           const char* var2, const char* stack2);
 uint64_t hash_uaf_signal(const char* var1, const char* stack1,
                           const char* var2, const char* stack2);
+// New: hash signals from uint64_t values directly (not strings)
+uint64_t hash_uaf_signal_u64(uint64_t var1, uint64_t stack1,
+                              uint64_t var2, uint64_t stack2);
+uint64_t hash_race_signal_u64(uint64_t var1, uint64_t stack1,
+                               uint64_t var2, uint64_t stack2);
 
 #ifdef __cplusplus
 } // extern "C"

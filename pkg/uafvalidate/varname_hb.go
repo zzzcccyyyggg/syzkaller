@@ -145,7 +145,8 @@ func (s *VarNameHBStore) Get(key string) *VarNameHBStats {
 		return stats
 	}
 
-	// Return new empty statistics
+	// Return new empty statistics (read-only, not cached)
+	// Caller should use RecordFailure/RecordSuccess to persist new entries
 	return &VarNameHBStats{
 		Created: time.Now(),
 	}
@@ -158,15 +159,21 @@ func (s *VarNameHBStore) GetByPair(pair *ddrd.MayUAFPair) *VarNameHBStats {
 	}
 
 	key := VarNamePairKey(pair)
-	stats := s.Get(key)
 
-	// Fill in VarName info
-	if stats.FreeAccessName == 0 {
-		stats.FreeAccessName = pair.FreeAccessName
-		stats.UseAccessName = pair.UseAccessName
+	s.mu.RLock()
+	stats, ok := s.cache[key]
+	s.mu.RUnlock()
+
+	if ok {
+		return stats
 	}
 
-	return stats
+	// Return new empty statistics with VarName info (read-only, not cached)
+	return &VarNameHBStats{
+		FreeAccessName: pair.FreeAccessName,
+		UseAccessName:  pair.UseAccessName,
+		Created:        time.Now(),
+	}
 }
 
 // RecordFailure records verification failure

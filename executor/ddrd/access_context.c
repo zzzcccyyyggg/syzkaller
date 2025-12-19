@@ -110,8 +110,15 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
 {
-    const uint64_t TIME_THRESHOLD = 427000000;
-    const uint64_t FAST_THRESHOLD = 427000000;
+    // Use configurable threshold, fallback to default if 0
+    uint64_t time_threshold = record_ctx->race_time_threshold_ns;
+    if (time_threshold == 0) {
+        time_threshold = 42700ULL; // 
+    }else{
+        debug("Using custom race time threshold: %llu ns\n", time_threshold);
+    }
+    const uint64_t TIME_THRESHOLD = time_threshold;
+    const uint64_t FAST_THRESHOLD = time_threshold;
     int pair_count = 0;
 
     for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {

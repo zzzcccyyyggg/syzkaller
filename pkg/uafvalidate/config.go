@@ -1,6 +1,10 @@
 package uafvalidate
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/syzkaller/pkg/ddrd"
+)
 
 // Config captures high level knobs for the validation stage.
 type Config struct {
@@ -10,6 +14,9 @@ type Config struct {
 	Debug            bool
 	RepeatCount      int
 	Workdir          string
+	// ThresholdCtrl is an optional shared threshold controller.
+	// If nil, a new one will be created from Workdir.
+	ThresholdCtrl *ddrd.ThresholdController
 }
 
 func (cfg Config) withDefaults() Config {

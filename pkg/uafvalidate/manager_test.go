@@ -211,6 +211,8 @@ func TestStageManagerRepeat(t *testing.T) {
 			UseCallStack:   profile.UseCallStack,
 			Signal:         0xdeadbeef,
 		},
+		// Include the shared pair in the original entry so it can be selected as stable
+		Pairs: []*ddrd.MayUAFPair{&shared},
 	}
 
 	mgr.Enqueue(entry)

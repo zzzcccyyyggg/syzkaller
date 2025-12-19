@@ -6,6 +6,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/manager"
@@ -43,6 +44,7 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		Debug:            *flagDebug,
 		RepeatCount:      cfg.RepeatCount,
 		Workdir:          mgr.cfg.Workdir,
+		ThresholdCtrl:    mgr.thresholdCtrl, // Share threshold controller with fuzz phase
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -262,6 +264,7 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		Debug:            *flagDebug,
 		RepeatCount:      cfg.RepeatCount,
 		Workdir:          mgr.cfg.Workdir,
+		ThresholdCtrl:    mgr.thresholdCtrl, // Share threshold controller with fuzz phase
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -293,16 +296,21 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 
 	// Initial load
 	var lastSeq uint64 = 0
+	if err := mgr.uafStore.Reload(); err != nil {
+		log.Errorf("uaf validation: initial reload failed: %v", err)
+	}
 	entries, newSeq, err := mgr.uafStore.EntriesSince(0)
 	if err != nil {
 		log.Errorf("uaf validation: failed to load initial entries: %v", err)
 	} else {
 		lastSeq = newSeq
-		enqueued := 0
-		for _, entry := range entries {
-			stage.Enqueue(entry)
-			enqueued++
-		}
+		enqueued := len(entries)
+		// Enqueue in background to avoid blocking
+		go func(entriesToEnqueue []*fuzzer.UAFCorpusEntry) {
+			for _, entry := range entriesToEnqueue {
+				stage.Enqueue(entry)
+			}
+		}(entries)
 		log.Logf(0, "uaf validation: initial load enqueued %d entries (seq=%d)", enqueued, lastSeq)
 	}
 
@@ -314,7 +322,19 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	idleTicker := time.NewTicker(idleReloadInterval)
 	defer idleTicker.Stop()
 
-	log.Logf(0, "uaf validation: continuous mode started (reload=%v, idle_reload=%v)", reloadInterval, idleReloadInterval)
+	// Threshold update ticker
+	thresholdUpdateInterval := time.Duration(cfg.ThresholdUpdateMinutes) * time.Minute
+	if thresholdUpdateInterval <= 0 {
+		thresholdUpdateInterval = 5 * time.Minute
+	}
+	thresholdTicker := time.NewTicker(thresholdUpdateInterval)
+	defer thresholdTicker.Stop()
+
+	// Track recent collected pairs for threshold adjustment
+	var lastTotalCollected uint64 = uint64(mgr.uafStore.Count())
+
+	log.Logf(0, "uaf validation: continuous mode started (reload=%v, idle_reload=%v, threshold_update=%v)",
+		reloadInterval, idleReloadInterval, thresholdUpdateInterval)
 
 	for {
 		select {
@@ -327,7 +347,10 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			// Periodic incremental reload
+			// Periodic incremental reload - first refresh from disk
+			if err := mgr.uafStore.Reload(); err != nil {
+				log.Errorf("uaf validation: periodic db reload failed: %v", err)
+			}
 			newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
 			if err != nil {
 				log.Errorf("uaf validation: periodic reload failed: %v", err)
@@ -335,11 +358,13 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			}
 			if len(newEntries) > 0 {
 				lastSeq = newSeq
-				enqueued := 0
-				for _, entry := range newEntries {
-					stage.Enqueue(entry)
-					enqueued++
-				}
+				enqueued := len(newEntries)
+				// Enqueue in background to avoid blocking the main loop
+				go func(entries []*fuzzer.UAFCorpusEntry) {
+					for _, entry := range entries {
+						stage.Enqueue(entry)
+					}
+				}(newEntries)
 				log.Logf(0, "uaf validation: periodic reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
 					enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
 			}
@@ -347,6 +372,10 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		case <-idleTicker.C:
 			// Check if idle (no pending tasks)
 			if !stage.HasPending() {
+				// Reload database from disk to pick up fuzz phase writes
+				if err := mgr.uafStore.Reload(); err != nil {
+					log.Errorf("uaf validation: idle db reload failed: %v", err)
+				}
 				newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
 				if err != nil {
 					log.Errorf("uaf validation: idle reload failed: %v", err)
@@ -354,11 +383,13 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 				}
 				if len(newEntries) > 0 {
 					lastSeq = newSeq
-					enqueued := 0
-					for _, entry := range newEntries {
-						stage.Enqueue(entry)
-						enqueued++
-					}
+					enqueued := len(newEntries)
+					// Enqueue in background to avoid blocking the main loop
+					go func(entries []*fuzzer.UAFCorpusEntry) {
+						for _, entry := range entries {
+							stage.Enqueue(entry)
+						}
+					}(newEntries)
 					log.Logf(0, "uaf validation: idle reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
 						enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
 				} else {
@@ -366,6 +397,22 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 						lastSeq, stage.SeenCount())
 				}
 			}
+
+		case <-thresholdTicker.C:
+			// Update threshold statistics for adaptive race detection
+			// Reload to get accurate count from fuzz phase
+			if err := mgr.uafStore.Reload(); err != nil {
+				log.Errorf("uaf validation: threshold db reload failed: %v", err)
+			}
+			currentTotalCollected := uint64(mgr.uafStore.Count())
+			recentCollected := currentTotalCollected - lastTotalCollected
+			stage.UpdateThresholdStats(recentCollected, currentTotalCollected)
+			lastTotalCollected = currentTotalCollected
+
+			// Log threshold status (corpus-level stats)
+			processedCorpus, invalidPairs, validPairs := stage.GetVerificationStats()
+			log.Logf(0, "uaf validation: threshold update - corpus(total=%d, verified=%d) pairs(valid=%d, invalid=%d) threshold=%d ns",
+				currentTotalCollected, processedCorpus, validPairs, invalidPairs, stage.CurrentThreshold())
 		}
 	}
 }

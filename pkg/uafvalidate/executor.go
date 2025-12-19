@@ -167,11 +167,12 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	}
 
 	request := &queue.Request{
-		Prog:         baseProg,
-		ReturnOutput: true,
-		ReturnError:  true,
-		Important:    true,
-		DisableDdrd:  execReq.DisableDdrd,
+		Prog:                baseProg,
+		ReturnOutput:        true,
+		ReturnError:         true,
+		Important:           true,
+		DisableDdrd:         execReq.DisableDdrd,
+		RaceTimeThresholdNs: execReq.RaceTimeThresholdNs,
 	}
 	if execReq.RepeatTimes > 0 {
 		// For barrier mode, we can't easily use syz-execprog's -repeat flag because

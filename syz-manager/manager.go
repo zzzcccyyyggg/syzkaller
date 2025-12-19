@@ -25,6 +25,7 @@ import (
 	"github.com/google/syzkaller/pkg/asset"
 	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/db"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
@@ -114,6 +115,7 @@ type Manager struct {
 
 	uafStore          *manager.UAFCorpusStore
 	uafValidatedStore *manager.UAFValidatedStore
+	thresholdCtrl     *ddrd.ThresholdController
 
 	Stats
 }
@@ -331,6 +333,11 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 				log.Errorf("uaf corpus store close failed: %v", err)
 			}
 		}()
+
+		// Initialize shared threshold controller for both fuzz and validate phases
+		thresholdPath := filepath.Join(cfg.Workdir, "threshold_config.json")
+		mgr.thresholdCtrl = ddrd.NewThresholdController(thresholdPath)
+		log.Logf(0, "threshold controller initialized, current threshold: %d ns", mgr.thresholdCtrl.CurrentThreshold())
 	}
 	if cfg.Experimental.UAFValidate != nil {
 		validated, err := manager.NewUAFValidatedStore(cfg.Workdir)
@@ -1319,6 +1326,12 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			BarrierMode:   mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:   mgr.cfg.BarrierMask,
 		}, rnd, mgr.target)
+
+		// Set shared threshold controller for UAF mode
+		if mgr.thresholdCtrl != nil {
+			fuzzerObj.SetUAFThresholdController(mgr.thresholdCtrl)
+		}
+
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)
 		mgr.fuzzer.Store(fuzzerObj)

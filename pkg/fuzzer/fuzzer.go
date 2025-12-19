@@ -148,6 +148,14 @@ func (fuzzer *Fuzzer) CandidateTriageFinished() bool {
 	return fuzzer.CandidatesToTriage() == 0
 }
 
+// SetUAFThresholdController sets the threshold controller for adaptive race detection in UAF mode.
+// This allows the fuzzer to use a dynamically adjusted threshold based on validation feedback.
+func (fuzzer *Fuzzer) SetUAFThresholdController(ctrl *ddrd.ThresholdController) {
+	if fuzzer.uaf != nil {
+		fuzzer.uaf.SetThresholdController(ctrl)
+	}
+}
+
 func (fuzzer *Fuzzer) execute(executor queue.Executor, req *queue.Request) *queue.Result {
 	return fuzzer.executeWithFlags(executor, req, 0)
 }
@@ -408,6 +416,14 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)
+		return
+	}
+	// Apply adaptive race time threshold for barrier requests
+	if fuzzer.uaf != nil {
+		if threshold := fuzzer.uaf.CurrentThreshold(); threshold > 0 {
+			req.RaceTimeThresholdNs = threshold
+			fuzzer.Logf(2, "applyBarrier: set RaceTimeThresholdNs=%d ns", threshold)
+		}
 	}
 }
 

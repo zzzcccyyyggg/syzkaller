@@ -254,8 +254,8 @@ generate_go: format_cpp
 	$(GO) tool mockery --log-level="error"
 
 generate_rpc:
-	flatc -o pkg/flatrpc --warnings-as-errors --gen-object-api --filename-suffix "" --go --gen-onefile --go-namespace flatrpc pkg/flatrpc/flatrpc.fbs
-	flatc -o pkg/flatrpc --warnings-as-errors --gen-object-api --filename-suffix "" --cpp --scoped-enums pkg/flatrpc/flatrpc.fbs
+	/usr/local/bin/flatc -o pkg/flatrpc --gen-object-api --filename-suffix "" --go --gen-onefile --go-namespace flatrpc pkg/flatrpc/flatrpc.fbs
+	/usr/local/bin/flatc -o pkg/flatrpc --gen-object-api --filename-suffix "" --cpp --scoped-enums pkg/flatrpc/flatrpc.fbs
 	$(GO) fmt ./pkg/flatrpc/flatrpc.go
 
 generate_trace2syz:

@@ -260,6 +260,55 @@ executor shutdown (main path)* Invoked near the end of `execute_one`, before fil
 * Detector availability is cached; once `race_detector_is_available` reports false, no further DDRD work is attempted.
 * For barrier requests, if DDRD preparation fails, the group's `ddrd_active` flag remains false, and no results are collected.
 
+## Adaptive Race Time Threshold
+
+The DDRD executor flow supports adaptive race time threshold to optimize UAF pair detection based on real-time validation statistics.
+
+### Threshold Propagation Path
+
+The race time threshold flows from the manager to executor through the following path:
+
+```
+ThresholdController (pkg/ddrd)
+         ↓
+    StageManager/Manager
+         ↓
+    ExecutionRequest.RaceTimeThresholdNs
+         ↓
+    queue.Request.UAFRaceTimeThresholdNs
+         ↓
+    FlatBuffers ExecRequestRaw.race_time_threshold_ns
+         ↓
+    Executor ddrd_prepare_for_request() / runner DDRD setup
+```
+
+### Executor-Level Threshold Handling
+
+In regular requests, the executor reads `race_time_threshold_ns` from the FlatBuffer request and passes it to `race_detector_set_threshold()` during `ddrd_prepare_for_request()`.
+
+For barrier requests, the runner sets the threshold via the DDRD controller before dispatching the barrier group. This ensures all barrier members operate under the same threshold.
+
+### Threshold Algorithm (backlog-only)
+
+The ThresholdController now adjusts the threshold **only** based on corpus backlog:
+
+* **Backlog Ratio**: `(total_corpus - verified_corpus) / total_corpus` (clamped to [0,1])
+
+Adjustment formula:
+```
+adjustFactor = 1.0 + (0.5 - backlogRatio)
+newThreshold = currentThreshold * clamp(adjustFactor, 0.5, 1.2)
+```
+
+Threshold range: 427,000 ns (0.427ms) to 427,000,000 ns (427ms)
+
+### Cross-Phase Communication
+
+When fuzz and validate phases run as separate processes, they share threshold state via a JSON config file:
+
+* **Validate phase**: Updates total/verified corpus stats and writes to `threshold_config.json`
+* **Fuzz phase**: Periodically reloads the config file (every 30 seconds) to pick up threshold changes
+
 ## Key Design Points
 
 1. **Barrier Synchronization**: All barrier members execute under a single LOG phase started by the runner before dispatch.
@@ -271,5 +320,7 @@ executor shutdown (main path)* Invoked near the end of `execute_one`, before fil
 4. **Clean Separation**: Executor-side DDRD code remains unchanged for regular requests; barrier logic is isolated to runner.
 
 5. **Runner Injection**: The runner injects DDRD output into the executor's global state via `g_ddrd_runner_output` pointer, allowing `finish_output` to serialize it transparently.
+
+6. **Adaptive Threshold**: Race time threshold is dynamically adjusted based on validation statistics and propagated through the FlatBuffer request to the executor/runner.
 
 These hooks keep DDRD processing transparent to the rest of the executor pipeline while ensuring the kernel module is toggled at the right moments and results are collected efficiently for barrier executions.

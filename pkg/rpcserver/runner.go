@@ -712,6 +712,11 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		execReq.UkcUseAccessDelayTime = ukcDelayMicros(pair)
 		execReq.UkcIsValid = true
 	}
+	// Set adaptive race detection threshold if provided
+	if req.RaceTimeThresholdNs > 0 {
+		execReq.RaceTimeThresholdNs = req.RaceTimeThresholdNs
+		// log.Logf(0, "rpcserver: sending RaceTimeThresholdNs=%d to executor", req.RaceTimeThresholdNs)
+	}
 	msg := &flatrpc.HostMessage{
 		Msg: &flatrpc.HostMessages{
 			Type:  flatrpc.HostMessagesRawExecRequest,

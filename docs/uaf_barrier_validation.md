@@ -19,3 +19,10 @@
 
 ## Pending items
 - Consider trimming the validator timeout once repeated runs confirm stability, and continue monitoring for residual Bluetooth timeouts.
+
+## Adaptive Threshold Feature (Latest)
+- Implemented `ThresholdController` in `pkg/ddrd/threshold.go` that dynamically adjusts the DDRD race time threshold based on collection/verification statistics.
+- Threshold calculation uses speed ratio (`recentVerified / recentCollected`) and backlog ratio to adjust within range 427,000 ns to 427,000,000 ns.
+- Threshold propagation path: `ThresholdController` → `StageManager` → `ExecutionRequest` → `queue.Request` → FlatBuffers → Executor.
+- Fuzz and validate phases share threshold via JSON config file (`threshold_config.json`) with periodic reload (every 30 seconds in fuzz phase).
+- Key files modified: `pkg/ddrd/threshold.go`, `pkg/uafvalidate/manager.go`, `pkg/uafvalidate/executor.go`, `syz-manager/manager.go`, `syz-manager/uaf_validate.go`.

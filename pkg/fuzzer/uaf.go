@@ -28,12 +28,13 @@ const (
 )
 
 type uafMode struct {
-	fuzzer  *Fuzzer
-	queue   *queue.PlainQueue
-	mu      sync.Mutex
-	entries map[string]*barrierSeed
-	corpus  *uafCorpus
-	pairs   map[uint64]*ddrd.MayUAFPair
+	fuzzer        *Fuzzer
+	queue         *queue.PlainQueue
+	mu            sync.Mutex
+	entries       map[string]*barrierSeed
+	corpus        *uafCorpus
+	pairs         map[uint64]*ddrd.MayUAFPair
+	thresholdCtrl *ddrd.ThresholdController
 }
 
 type uafCorpus struct {
@@ -131,6 +132,28 @@ func newUAFMode(f *Fuzzer) *uafMode {
 	}
 }
 
+// SetThresholdController sets the threshold controller for adaptive race detection.
+// This should be called after the fuzzer is created, with a controller shared with
+// the validation phase.
+func (u *uafMode) SetThresholdController(ctrl *ddrd.ThresholdController) {
+	if u == nil {
+		return
+	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	u.thresholdCtrl = ctrl
+}
+
+// CurrentThreshold returns the current race time threshold in nanoseconds.
+func (u *uafMode) CurrentThreshold() uint64 {
+	if u == nil || u.thresholdCtrl == nil {
+		return ddrd.DefaultThresholdNs
+	}
+	threshold := u.thresholdCtrl.CurrentThreshold()
+	u.fuzzer.Logf(2, "uaf: CurrentThreshold() = %d ns", threshold)
+	return threshold
+}
+
 func newUAFCorpus() *uafCorpus {
 	uc := &uafCorpus{
 		seeds: make(map[string]*UAFCorpusEntry),
@@ -207,6 +230,9 @@ func (u *uafMode) setQueue(q *queue.PlainQueue) {
 	u.queue = q
 }
 
+// addPairLocked adds a new pair to the pairs map if it doesn't already exist.
+// Returns the cloned pair if it's new, or nil if it already exists.
+// This ensures only truly new pairs are added to the batch for corpus creation.
 func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
 	if u == nil || pair == nil {
 		return nil
@@ -215,8 +241,8 @@ func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
 	if id == 0 {
 		return nil
 	}
-	if existing, ok := u.pairs[id]; ok {
-		return existing
+	if _, ok := u.pairs[id]; ok {
+		return nil // Already exists, not a new discovery
 	}
 	clone := new(ddrd.MayUAFPair)
 	*clone = *pair
@@ -406,6 +432,11 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 			if err := req.SetBarrierStartDelays(plan.DelaysMicros); err != nil {
 				u.fuzzer.Logf(0, "uaf: failed to set barrier delays for seed: %v", err)
 			}
+		}
+		// Apply adaptive race time threshold
+		if threshold := u.CurrentThreshold(); threshold > 0 {
+			req.RaceTimeThresholdNs = threshold
+			u.fuzzer.Logf(0, "uaf: enqueueSeed set RaceTimeThresholdNs=%d ns", threshold)
 		}
 	}
 	u.queue.Submit(req)

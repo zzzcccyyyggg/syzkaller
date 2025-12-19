@@ -119,6 +119,7 @@ void race_detector_reset(RaceDetector* detector)
     detector->context.record_count = 0;
     detector->context.free_count = 0;
     detector->context.thread_count = 0;
+    // Preserve race_time_threshold_ns across resets
 
     if (detector->context.thread_histories) {
         for (int i = 0; i < detector->context.max_threads; i++) {
@@ -129,6 +130,15 @@ void race_detector_reset(RaceDetector* detector)
     }
 
     debug("Race detector reset completed\n");
+}
+
+void race_detector_set_threshold(RaceDetector* detector, uint64_t threshold_ns)
+{
+    if (!detector)
+        return;
+
+    detector->context.race_time_threshold_ns = threshold_ns;
+    debug("Race detector threshold set to %llu ns\n", (unsigned long long)threshold_ns);
 }
 
 bool race_detector_is_available(RaceDetector* detector)
@@ -331,10 +341,11 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector, may_uaf
         uaf_buffer[basic_count].use_tid = uaf_pair->use_access.tid;
         uaf_buffer[basic_count].lock_type = uaf_pair->lock_status;
         uaf_buffer[basic_count].use_access_type = uaf_pair->use_access.access_type;
-        uaf_buffer[basic_count].signal = hash_race_signal((char*)&uaf_pair->use_access.var_name,
-            (char*)&uaf_pair->use_access.call_stack_hash,
-            (char*)&uaf_pair->free_access.var_name,
-            (char*)&uaf_pair->free_access.call_stack_hash);
+        uaf_buffer[basic_count].signal = hash_uaf_signal_u64(
+            uaf_pair->use_access.var_name,
+            uaf_pair->use_access.call_stack_hash,
+            uaf_pair->free_access.var_name,
+            uaf_pair->free_access.call_stack_hash);
         uaf_buffer[basic_count].time_diff = uaf_pair->time_diff;
 
         // PairSyscallSharedData integration was removed; syscall metadata is no longer exported.
@@ -383,10 +394,11 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
         uaf_buffer[basic_count].use_tid = uaf_pair->use_access.tid;
         uaf_buffer[basic_count].lock_type = uaf_pair->lock_status;
         uaf_buffer[basic_count].use_access_type = uaf_pair->use_access.access_type;
-        uaf_buffer[basic_count].signal = hash_race_signal((char*)&uaf_pair->use_access.var_name,
-            (char*)&uaf_pair->use_access.call_stack_hash,
-            (char*)&uaf_pair->free_access.var_name,
-            (char*)&uaf_pair->free_access.call_stack_hash);
+        uaf_buffer[basic_count].signal = hash_uaf_signal_u64(
+            uaf_pair->use_access.var_name,
+            uaf_pair->use_access.call_stack_hash,
+            uaf_pair->free_access.var_name,
+            uaf_pair->free_access.call_stack_hash);
         uaf_buffer[basic_count].time_diff = uaf_pair->time_diff;
 
         if (fill_extended) {
@@ -462,11 +474,12 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
         uaf_buffer[basic_count].lock_type     = race_pair->lock_status;
         uaf_buffer[basic_count].use_access_type  = race_pair->first.access_type;
         uaf_buffer[basic_count].time_diff     = race_pair->access_time_diff;
-        uaf_buffer[basic_count].signal = hash_uaf_signal(
-            (char*)&race_pair->first.var_name,
-            (char*)&race_pair->first.call_stack_hash,
-            (char*)&race_pair->second.var_name,
-            (char*)&race_pair->second.call_stack_hash);
+        // Use hash_uaf_signal_u64 with uint64_t values directly (not as char* strings)
+        uaf_buffer[basic_count].signal = hash_uaf_signal_u64(
+            race_pair->first.var_name,
+            race_pair->first.call_stack_hash,
+            race_pair->second.var_name,
+            race_pair->second.call_stack_hash);
     }
 
     free(race_pairs);

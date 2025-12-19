@@ -45,6 +45,14 @@ void add_access_to_history(ThreadAccessHistory* history, const AccessRecord* acc
 
 
 #define MAX_THREADS 32
+
+// Default race time threshold (427ms in nanoseconds)
+#define DEFAULT_RACE_TIME_THRESHOLD_NS 427000000ULL
+// Minimum race time threshold (0.427ms in nanoseconds)
+#define MIN_RACE_TIME_THRESHOLD_NS 42700ULL
+// Maximum race time threshold (427ms in nanoseconds)
+#define MAX_RACE_TIME_THRESHOLD_NS 427000000ULL
+
 typedef struct {
     AccessRecord* records;      // 访问记录数组
     int record_count;           // 访问记录数量
@@ -54,6 +62,7 @@ typedef struct {
     int thread_count;           // 活跃线程数量
     int max_threads;            // 最大线程数量
     bool enable_history;        // 是否启用线程访问历史记录功能
+    uint64_t race_time_threshold_ns; // Race detection time threshold (nanoseconds), 0 means use default
 } AccessContext;
 int access_context_init_from_buffer(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees);
 ThreadAccessHistory* access_context_find_thread(AccessContext* ctx, int tid);

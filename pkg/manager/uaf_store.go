@@ -19,6 +19,7 @@ type UAFCorpusStore struct {
 	mu     sync.Mutex
 	db     *db.DB
 	target *prog.Target
+	dbPath string // Store the path for reloading
 }
 
 type storedUAFCorpusEntry struct {
@@ -54,7 +55,7 @@ func NewUAFCorpusStore(workdir string, target *prog.Target) (*UAFCorpusStore, er
 		}
 		log.Errorf("uaf corpus db: recovered with errors: %v", err)
 	}
-	return &UAFCorpusStore{db: corpusDB, target: target}, nil
+	return &UAFCorpusStore{db: corpusDB, target: target, dbPath: path}, nil
 }
 
 func (store *UAFCorpusStore) Close() error {
@@ -64,6 +65,26 @@ func (store *UAFCorpusStore) Close() error {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return store.db.Flush()
+}
+
+// Reload re-reads the database file from disk to pick up changes made by other processes.
+// This is necessary for cross-process synchronization (e.g., fuzz -> validate).
+func (store *UAFCorpusStore) Reload() error {
+	if store == nil || store.dbPath == "" {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	newDB, err := db.Open(store.dbPath, true)
+	if err != nil {
+		if newDB == nil {
+			return fmt.Errorf("failed to reload uaf corpus db: %w", err)
+		}
+		log.Errorf("uaf corpus db: reload recovered with errors: %v", err)
+	}
+	store.db = newDB
+	return nil
 }
 
 func (store *UAFCorpusStore) Count() int {

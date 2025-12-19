@@ -6,13 +6,6 @@
 
 #include "flatbuffers/flatbuffers.h"
 
-// Ensure the included flatbuffers.h is the same version as when this file was
-// generated, otherwise it may not be compatible.
-static_assert(FLATBUFFERS_VERSION_MAJOR == 2 &&
-              FLATBUFFERS_VERSION_MINOR == 0 &&
-              FLATBUFFERS_VERSION_REVISION == 8,
-             "Non-compatible flatbuffers version included");
-
 namespace rpc {
 
 struct ConnectHelloRaw;
@@ -295,26 +288,6 @@ template<> struct HostMessagesRawTraits<rpc::StateRequestRaw> {
   static const HostMessagesRaw enum_value = HostMessagesRaw::StateRequest;
 };
 
-template<typename T> struct HostMessagesRawUnionTraits {
-  static const HostMessagesRaw enum_value = HostMessagesRaw::NONE;
-};
-
-template<> struct HostMessagesRawUnionTraits<rpc::ExecRequestRawT> {
-  static const HostMessagesRaw enum_value = HostMessagesRaw::ExecRequest;
-};
-
-template<> struct HostMessagesRawUnionTraits<rpc::SignalUpdateRawT> {
-  static const HostMessagesRaw enum_value = HostMessagesRaw::SignalUpdate;
-};
-
-template<> struct HostMessagesRawUnionTraits<rpc::CorpusTriagedRawT> {
-  static const HostMessagesRaw enum_value = HostMessagesRaw::CorpusTriaged;
-};
-
-template<> struct HostMessagesRawUnionTraits<rpc::StateRequestRawT> {
-  static const HostMessagesRaw enum_value = HostMessagesRaw::StateRequest;
-};
-
 struct HostMessagesRawUnion {
   HostMessagesRaw type;
   void *value;
@@ -332,15 +305,17 @@ struct HostMessagesRawUnion {
 
   void Reset();
 
+#ifndef FLATBUFFERS_CPP98_STL
   template <typename T>
   void Set(T&& val) {
-    typedef typename std::remove_reference<T>::type RT;
+    using RT = typename std::remove_reference<T>::type;
     Reset();
-    type = HostMessagesRawUnionTraits<RT>::enum_value;
+    type = HostMessagesRawTraits<typename RT::TableType>::enum_value;
     if (type != HostMessagesRaw::NONE) {
       value = new RT(std::forward<T>(val));
     }
   }
+#endif  // FLATBUFFERS_CPP98_STL
 
   static void *UnPack(const void *obj, HostMessagesRaw type, const flatbuffers::resolver_function_t *resolver);
   flatbuffers::Offset<void> Pack(flatbuffers::FlatBufferBuilder &_fbb, const flatbuffers::rehasher_function_t *_rehasher = nullptr) const;
@@ -380,7 +355,7 @@ struct HostMessagesRawUnion {
 };
 
 bool VerifyHostMessagesRaw(flatbuffers::Verifier &verifier, const void *obj, HostMessagesRaw type);
-bool VerifyHostMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<HostMessagesRaw> *types);
+bool VerifyHostMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types);
 
 enum class ExecutorMessagesRaw : uint8_t {
   NONE = 0,
@@ -434,22 +409,6 @@ template<> struct ExecutorMessagesRawTraits<rpc::StateResultRaw> {
   static const ExecutorMessagesRaw enum_value = ExecutorMessagesRaw::State;
 };
 
-template<typename T> struct ExecutorMessagesRawUnionTraits {
-  static const ExecutorMessagesRaw enum_value = ExecutorMessagesRaw::NONE;
-};
-
-template<> struct ExecutorMessagesRawUnionTraits<rpc::ExecResultRawT> {
-  static const ExecutorMessagesRaw enum_value = ExecutorMessagesRaw::ExecResult;
-};
-
-template<> struct ExecutorMessagesRawUnionTraits<rpc::ExecutingMessageRawT> {
-  static const ExecutorMessagesRaw enum_value = ExecutorMessagesRaw::Executing;
-};
-
-template<> struct ExecutorMessagesRawUnionTraits<rpc::StateResultRawT> {
-  static const ExecutorMessagesRaw enum_value = ExecutorMessagesRaw::State;
-};
-
 struct ExecutorMessagesRawUnion {
   ExecutorMessagesRaw type;
   void *value;
@@ -467,15 +426,17 @@ struct ExecutorMessagesRawUnion {
 
   void Reset();
 
+#ifndef FLATBUFFERS_CPP98_STL
   template <typename T>
   void Set(T&& val) {
-    typedef typename std::remove_reference<T>::type RT;
+    using RT = typename std::remove_reference<T>::type;
     Reset();
-    type = ExecutorMessagesRawUnionTraits<RT>::enum_value;
+    type = ExecutorMessagesRawTraits<typename RT::TableType>::enum_value;
     if (type != ExecutorMessagesRaw::NONE) {
       value = new RT(std::forward<T>(val));
     }
   }
+#endif  // FLATBUFFERS_CPP98_STL
 
   static void *UnPack(const void *obj, ExecutorMessagesRaw type, const flatbuffers::resolver_function_t *resolver);
   flatbuffers::Offset<void> Pack(flatbuffers::FlatBufferBuilder &_fbb, const flatbuffers::rehasher_function_t *_rehasher = nullptr) const;
@@ -507,7 +468,7 @@ struct ExecutorMessagesRawUnion {
 };
 
 bool VerifyExecutorMessagesRaw(flatbuffers::Verifier &verifier, const void *obj, ExecutorMessagesRaw type);
-bool VerifyExecutorMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<ExecutorMessagesRaw> *types);
+bool VerifyExecutorMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types);
 
 enum class RequestType : uint64_t {
   Program = 0,
@@ -882,7 +843,7 @@ struct ConnectHelloRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_COOKIE, 8) &&
+           VerifyField<uint64_t>(verifier, VT_COOKIE) &&
            verifier.EndTable();
   }
   ConnectHelloRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -954,8 +915,8 @@ struct ConnectRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_COOKIE, 8) &&
-           VerifyField<int64_t>(verifier, VT_ID, 8) &&
+           VerifyField<uint64_t>(verifier, VT_COOKIE) &&
+           VerifyField<int64_t>(verifier, VT_ID) &&
            VerifyOffset(verifier, VT_ARCH) &&
            verifier.VerifyString(arch()) &&
            VerifyOffset(verifier, VT_GIT_REVISION) &&
@@ -1107,21 +1068,21 @@ struct ConnectReplyRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint8_t>(verifier, VT_DEBUG, 1) &&
-           VerifyField<uint8_t>(verifier, VT_COVER, 1) &&
-           VerifyField<uint8_t>(verifier, VT_COVER_EDGES, 1) &&
-           VerifyField<uint8_t>(verifier, VT_KERNEL_64_BIT, 1) &&
-           VerifyField<int32_t>(verifier, VT_PROCS, 4) &&
-           VerifyField<int32_t>(verifier, VT_SLOWDOWN, 4) &&
-           VerifyField<int32_t>(verifier, VT_SYSCALL_TIMEOUT_MS, 4) &&
-           VerifyField<int32_t>(verifier, VT_PROGRAM_TIMEOUT_MS, 4) &&
+           VerifyField<uint8_t>(verifier, VT_DEBUG) &&
+           VerifyField<uint8_t>(verifier, VT_COVER) &&
+           VerifyField<uint8_t>(verifier, VT_COVER_EDGES) &&
+           VerifyField<uint8_t>(verifier, VT_KERNEL_64_BIT) &&
+           VerifyField<int32_t>(verifier, VT_PROCS) &&
+           VerifyField<int32_t>(verifier, VT_SLOWDOWN) &&
+           VerifyField<int32_t>(verifier, VT_SYSCALL_TIMEOUT_MS) &&
+           VerifyField<int32_t>(verifier, VT_PROGRAM_TIMEOUT_MS) &&
            VerifyOffset(verifier, VT_LEAK_FRAMES) &&
            verifier.VerifyVector(leak_frames()) &&
            verifier.VerifyVectorOfStrings(leak_frames()) &&
            VerifyOffset(verifier, VT_RACE_FRAMES) &&
            verifier.VerifyVector(race_frames()) &&
            verifier.VerifyVectorOfStrings(race_frames()) &&
-           VerifyField<uint64_t>(verifier, VT_FEATURES, 8) &&
+           VerifyField<uint64_t>(verifier, VT_FEATURES) &&
            VerifyOffset(verifier, VT_FILES) &&
            verifier.VerifyVector(files()) &&
            verifier.VerifyVectorOfStrings(files()) &&
@@ -1253,10 +1214,6 @@ struct InfoRequestRawT : public flatbuffers::NativeTable {
   std::string error{};
   std::vector<std::unique_ptr<rpc::FeatureInfoRawT>> features{};
   std::vector<std::unique_ptr<rpc::FileInfoRawT>> files{};
-  InfoRequestRawT() = default;
-  InfoRequestRawT(const InfoRequestRawT &o);
-  InfoRequestRawT(InfoRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  InfoRequestRawT &operator=(InfoRequestRawT o) FLATBUFFERS_NOEXCEPT;
 };
 
 struct InfoRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -1471,13 +1428,13 @@ struct FileInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_NAME) &&
            verifier.VerifyString(name()) &&
-           VerifyField<uint8_t>(verifier, VT_EXISTS, 1) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_USE_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_USE_STACK, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_FREE_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_FREE_STACK, 8) &&
-           VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME, 4) &&
-           VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID, 1) &&
+           VerifyField<uint8_t>(verifier, VT_EXISTS) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_USE_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_USE_STACK) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_FREE_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_FREE_STACK) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME) &&
+           VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID) &&
            VerifyOffset(verifier, VT_ERROR) &&
            verifier.VerifyString(error()) &&
            VerifyOffset(verifier, VT_DATA) &&
@@ -1695,8 +1652,8 @@ struct FeatureInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_ID, 8) &&
-           VerifyField<uint8_t>(verifier, VT_NEED_SETUP, 1) &&
+           VerifyField<uint64_t>(verifier, VT_ID) &&
+           VerifyField<uint8_t>(verifier, VT_NEED_SETUP) &&
            VerifyOffset(verifier, VT_REASON) &&
            verifier.VerifyString(reason()) &&
            verifier.EndTable();
@@ -1790,7 +1747,7 @@ struct HostMessageRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint8_t>(verifier, VT_MSG_TYPE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_MSG_TYPE) &&
            VerifyOffset(verifier, VT_MSG) &&
            VerifyHostMessagesRaw(verifier, msg(), msg_type()) &&
            verifier.EndTable();
@@ -1879,7 +1836,7 @@ struct ExecutorMessageRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint8_t>(verifier, VT_MSG_TYPE, 1) &&
+           VerifyField<uint8_t>(verifier, VT_MSG_TYPE) &&
            VerifyOffset(verifier, VT_MSG) &&
            VerifyExecutorMessagesRaw(verifier, msg(), msg_type()) &&
            verifier.EndTable();
@@ -1954,10 +1911,7 @@ struct ExecRequestRawT : public flatbuffers::NativeTable {
   uint64_t ukc_free_stack = 0;
   int32_t ukc_use_access_delay_time = 0;
   bool ukc_is_valid = false;
-  ExecRequestRawT() = default;
-  ExecRequestRawT(const ExecRequestRawT &o);
-  ExecRequestRawT(ExecRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  ExecRequestRawT &operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT;
+  uint64_t race_time_threshold_ns = 0;
 };
 
 struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -1981,7 +1935,8 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_UKC_FREE_NAME = 32,
     VT_UKC_FREE_STACK = 34,
     VT_UKC_USE_ACCESS_DELAY_TIME = 36,
-    VT_UKC_IS_VALID = 38
+    VT_UKC_IS_VALID = 38,
+    VT_RACE_TIME_THRESHOLD_NS = 40
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -2037,29 +1992,33 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   bool ukc_is_valid() const {
     return GetField<uint8_t>(VT_UKC_IS_VALID, 0) != 0;
   }
+  uint64_t race_time_threshold_ns() const {
+    return GetField<uint64_t>(VT_RACE_TIME_THRESHOLD_NS, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<int64_t>(verifier, VT_ID, 8) &&
-           VerifyField<uint64_t>(verifier, VT_TYPE, 8) &&
-           VerifyField<uint64_t>(verifier, VT_AVOID, 8) &&
+           VerifyField<int64_t>(verifier, VT_ID) &&
+           VerifyField<uint64_t>(verifier, VT_TYPE) &&
+           VerifyField<uint64_t>(verifier, VT_AVOID) &&
            VerifyOffset(verifier, VT_DATA) &&
            verifier.VerifyVector(data()) &&
-           VerifyField<rpc::ExecOptsRaw>(verifier, VT_EXEC_OPTS, 8) &&
-           VerifyField<uint64_t>(verifier, VT_FLAGS, 8) &&
+           VerifyField<rpc::ExecOptsRaw>(verifier, VT_EXEC_OPTS) &&
+           VerifyField<uint64_t>(verifier, VT_FLAGS) &&
            VerifyOffset(verifier, VT_ALL_SIGNAL) &&
            verifier.VerifyVector(all_signal()) &&
-           VerifyField<uint64_t>(verifier, VT_BARRIER_PARTICIPANTS, 8) &&
-           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID, 8) &&
-           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX, 4) &&
-           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_BARRIER_PARTICIPANTS) &&
+           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE) &&
            VerifyOffset(verifier, VT_BARRIER_START_DELAY_US) &&
            verifier.VerifyVector(barrier_start_delay_us()) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_USE_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_USE_STACK, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_FREE_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_UKC_FREE_STACK, 8) &&
-           VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME, 4) &&
-           VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID, 1) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_USE_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_USE_STACK) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_FREE_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_UKC_FREE_STACK) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME) &&
+           VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID) &&
+           VerifyField<uint64_t>(verifier, VT_RACE_TIME_THRESHOLD_NS) &&
            verifier.EndTable();
   }
   ExecRequestRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2125,6 +2084,9 @@ struct ExecRequestRawBuilder {
   void add_ukc_is_valid(bool ukc_is_valid) {
     fbb_.AddElement<uint8_t>(ExecRequestRaw::VT_UKC_IS_VALID, static_cast<uint8_t>(ukc_is_valid), 0);
   }
+  void add_race_time_threshold_ns(uint64_t race_time_threshold_ns) {
+    fbb_.AddElement<uint64_t>(ExecRequestRaw::VT_RACE_TIME_THRESHOLD_NS, race_time_threshold_ns, 0);
+  }
   explicit ExecRequestRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2142,7 +2104,7 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     rpc::RequestType type = rpc::RequestType::Program,
     uint64_t avoid = 0,
     flatbuffers::Offset<flatbuffers::Vector<uint8_t>> data = 0,
-    const rpc::ExecOptsRaw *exec_opts = nullptr,
+    const rpc::ExecOptsRaw *exec_opts = 0,
     rpc::RequestFlag flags = static_cast<rpc::RequestFlag>(0),
     flatbuffers::Offset<flatbuffers::Vector<int32_t>> all_signal = 0,
     uint64_t barrier_participants = 0,
@@ -2155,8 +2117,10 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     uint64_t ukc_free_name = 0,
     uint64_t ukc_free_stack = 0,
     int32_t ukc_use_access_delay_time = 0,
-    bool ukc_is_valid = false) {
+    bool ukc_is_valid = false,
+    uint64_t race_time_threshold_ns = 0) {
   ExecRequestRawBuilder builder_(_fbb);
+  builder_.add_race_time_threshold_ns(race_time_threshold_ns);
   builder_.add_ukc_free_stack(ukc_free_stack);
   builder_.add_ukc_free_name(ukc_free_name);
   builder_.add_ukc_use_stack(ukc_use_stack);
@@ -2184,7 +2148,7 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     rpc::RequestType type = rpc::RequestType::Program,
     uint64_t avoid = 0,
     const std::vector<uint8_t> *data = nullptr,
-    const rpc::ExecOptsRaw *exec_opts = nullptr,
+    const rpc::ExecOptsRaw *exec_opts = 0,
     rpc::RequestFlag flags = static_cast<rpc::RequestFlag>(0),
     const std::vector<int32_t> *all_signal = nullptr,
     uint64_t barrier_participants = 0,
@@ -2197,7 +2161,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     uint64_t ukc_free_name = 0,
     uint64_t ukc_free_stack = 0,
     int32_t ukc_use_access_delay_time = 0,
-    bool ukc_is_valid = false) {
+    bool ukc_is_valid = false,
+    uint64_t race_time_threshold_ns = 0) {
   auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
   auto all_signal__ = all_signal ? _fbb.CreateVector<int32_t>(*all_signal) : 0;
   auto barrier_start_delay_us__ = barrier_start_delay_us ? _fbb.CreateVector<int64_t>(*barrier_start_delay_us) : 0;
@@ -2220,7 +2185,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
       ukc_free_name,
       ukc_free_stack,
       ukc_use_access_delay_time,
-      ukc_is_valid);
+      ukc_is_valid,
+      race_time_threshold_ns);
 }
 
 flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -2396,10 +2362,10 @@ struct ExecutingMessageRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table 
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<int64_t>(verifier, VT_ID, 8) &&
-           VerifyField<int32_t>(verifier, VT_PROC_ID, 4) &&
-           VerifyField<int32_t>(verifier, VT_TRY_, 4) &&
-           VerifyField<int64_t>(verifier, VT_WAIT_DURATION, 8) &&
+           VerifyField<int64_t>(verifier, VT_ID) &&
+           VerifyField<int32_t>(verifier, VT_PROC_ID) &&
+           VerifyField<int32_t>(verifier, VT_TRY_) &&
+           VerifyField<int64_t>(verifier, VT_WAIT_DURATION) &&
            verifier.EndTable();
   }
   ExecutingMessageRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2486,8 +2452,8 @@ struct CallInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint8_t>(verifier, VT_FLAGS, 1) &&
-           VerifyField<int32_t>(verifier, VT_ERROR, 4) &&
+           VerifyField<uint8_t>(verifier, VT_FLAGS) &&
+           VerifyField<int32_t>(verifier, VT_ERROR) &&
            VerifyOffset(verifier, VT_SIGNAL) &&
            verifier.VerifyVector(signal()) &&
            VerifyOffset(verifier, VT_COVER) &&
@@ -2576,10 +2542,6 @@ struct ProgInfoRawT : public flatbuffers::NativeTable {
   uint64_t elapsed = 0;
   uint64_t freshness = 0;
   std::unique_ptr<rpc::DdrdRawT> ddrd{};
-  ProgInfoRawT() = default;
-  ProgInfoRawT(const ProgInfoRawT &o);
-  ProgInfoRawT(ProgInfoRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  ProgInfoRawT &operator=(ProgInfoRawT o) FLATBUFFERS_NOEXCEPT;
 };
 
 struct ProgInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -2621,8 +2583,8 @@ struct ProgInfoRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            verifier.VerifyVectorOfTables(extra_raw()) &&
            VerifyOffset(verifier, VT_EXTRA) &&
            verifier.VerifyTable(extra()) &&
-           VerifyField<uint64_t>(verifier, VT_ELAPSED, 8) &&
-           VerifyField<uint64_t>(verifier, VT_FRESHNESS, 8) &&
+           VerifyField<uint64_t>(verifier, VT_ELAPSED) &&
+           VerifyField<uint64_t>(verifier, VT_FRESHNESS) &&
            VerifyOffset(verifier, VT_DDRD) &&
            verifier.VerifyTable(ddrd()) &&
            verifier.EndTable();
@@ -2709,10 +2671,6 @@ struct DdrdRawT : public flatbuffers::NativeTable {
   typedef DdrdRaw TableType;
   std::vector<std::unique_ptr<rpc::DdrdUafPairRawT>> uaf_pairs{};
   std::vector<std::unique_ptr<rpc::DdrdExtendedUafPairRawT>> extended_uaf{};
-  DdrdRawT() = default;
-  DdrdRawT(const DdrdRawT &o);
-  DdrdRawT(DdrdRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  DdrdRawT &operator=(DdrdRawT o) FLATBUFFERS_NOEXCEPT;
 };
 
 struct DdrdRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -2849,16 +2807,16 @@ struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_FREE_ACCESS_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_USE_ACCESS_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_FREE_CALL_STACK, 8) &&
-           VerifyField<uint64_t>(verifier, VT_USE_CALL_STACK, 8) &&
-           VerifyField<uint64_t>(verifier, VT_SIGNAL, 8) &&
-           VerifyField<uint64_t>(verifier, VT_TIME_DIFF, 8) &&
-           VerifyField<int32_t>(verifier, VT_FREE_SN, 4) &&
-           VerifyField<int32_t>(verifier, VT_USE_SN, 4) &&
-           VerifyField<uint32_t>(verifier, VT_LOCK_TYPE, 4) &&
-           VerifyField<uint32_t>(verifier, VT_USE_ACCESS_TYPE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_ACCESS_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_USE_ACCESS_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_CALL_STACK) &&
+           VerifyField<uint64_t>(verifier, VT_USE_CALL_STACK) &&
+           VerifyField<uint64_t>(verifier, VT_SIGNAL) &&
+           VerifyField<uint64_t>(verifier, VT_TIME_DIFF) &&
+           VerifyField<int32_t>(verifier, VT_FREE_SN) &&
+           VerifyField<int32_t>(verifier, VT_USE_SN) &&
+           VerifyField<uint32_t>(verifier, VT_LOCK_TYPE) &&
+           VerifyField<uint32_t>(verifier, VT_USE_ACCESS_TYPE) &&
            verifier.EndTable();
   }
   DdrdUafPairRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2975,11 +2933,11 @@ struct DdrdSerializedAccessRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Ta
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_VAR_NAME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_CALL_STACK_HASH, 8) &&
-           VerifyField<uint64_t>(verifier, VT_ACCESS_TIME, 8) &&
-           VerifyField<uint32_t>(verifier, VT_SN, 4) &&
-           VerifyField<uint32_t>(verifier, VT_ACCESS_TYPE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_VAR_NAME) &&
+           VerifyField<uint64_t>(verifier, VT_CALL_STACK_HASH) &&
+           VerifyField<uint64_t>(verifier, VT_ACCESS_TIME) &&
+           VerifyField<uint32_t>(verifier, VT_SN) &&
+           VerifyField<uint32_t>(verifier, VT_ACCESS_TYPE) &&
            verifier.EndTable();
   }
   DdrdSerializedAccessRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3045,10 +3003,6 @@ struct DdrdExtendedUafPairRawT : public flatbuffers::NativeTable {
   double path_distance_use = 0.0;
   double path_distance_free = 0.0;
   std::vector<std::unique_ptr<rpc::DdrdSerializedAccessRawT>> access_history{};
-  DdrdExtendedUafPairRawT() = default;
-  DdrdExtendedUafPairRawT(const DdrdExtendedUafPairRawT &o);
-  DdrdExtendedUafPairRawT(DdrdExtendedUafPairRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  DdrdExtendedUafPairRawT &operator=(DdrdExtendedUafPairRawT o) FLATBUFFERS_NOEXCEPT;
 };
 
 struct DdrdExtendedUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -3092,12 +3046,12 @@ struct DdrdExtendedUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Tab
     return VerifyTableStart(verifier) &&
            VerifyOffset(verifier, VT_BASIC) &&
            verifier.VerifyTable(basic()) &&
-           VerifyField<uint32_t>(verifier, VT_USE_THREAD_HISTORY_COUNT, 4) &&
-           VerifyField<uint32_t>(verifier, VT_FREE_THREAD_HISTORY_COUNT, 4) &&
-           VerifyField<uint64_t>(verifier, VT_USE_TARGET_TIME, 8) &&
-           VerifyField<uint64_t>(verifier, VT_FREE_TARGET_TIME, 8) &&
-           VerifyField<double>(verifier, VT_PATH_DISTANCE_USE, 8) &&
-           VerifyField<double>(verifier, VT_PATH_DISTANCE_FREE, 8) &&
+           VerifyField<uint32_t>(verifier, VT_USE_THREAD_HISTORY_COUNT) &&
+           VerifyField<uint32_t>(verifier, VT_FREE_THREAD_HISTORY_COUNT) &&
+           VerifyField<uint64_t>(verifier, VT_USE_TARGET_TIME) &&
+           VerifyField<uint64_t>(verifier, VT_FREE_TARGET_TIME) &&
+           VerifyField<double>(verifier, VT_PATH_DISTANCE_USE) &&
+           VerifyField<double>(verifier, VT_PATH_DISTANCE_FREE) &&
            VerifyOffset(verifier, VT_ACCESS_HISTORY) &&
            verifier.VerifyVector(access_history()) &&
            verifier.VerifyVectorOfTables(access_history()) &&
@@ -3206,10 +3160,6 @@ struct ExecResultRawT : public flatbuffers::NativeTable {
   int64_t barrier_group_id = 0;
   int32_t barrier_index = 0;
   int32_t barrier_group_size = 0;
-  ExecResultRawT() = default;
-  ExecResultRawT(const ExecResultRawT &o);
-  ExecResultRawT(ExecResultRawT&&) FLATBUFFERS_NOEXCEPT = default;
-  ExecResultRawT &operator=(ExecResultRawT o) FLATBUFFERS_NOEXCEPT;
 };
 
 struct ExecResultRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -3259,19 +3209,19 @@ struct ExecResultRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<int64_t>(verifier, VT_ID, 8) &&
-           VerifyField<int32_t>(verifier, VT_PROC, 4) &&
+           VerifyField<int64_t>(verifier, VT_ID) &&
+           VerifyField<int32_t>(verifier, VT_PROC) &&
            VerifyOffset(verifier, VT_OUTPUT) &&
            verifier.VerifyVector(output()) &&
-           VerifyField<uint8_t>(verifier, VT_HANGED, 1) &&
+           VerifyField<uint8_t>(verifier, VT_HANGED) &&
            VerifyOffset(verifier, VT_ERROR) &&
            verifier.VerifyString(error()) &&
            VerifyOffset(verifier, VT_INFO) &&
            verifier.VerifyTable(info()) &&
-           VerifyField<uint64_t>(verifier, VT_BARRIER_PROCS, 8) &&
-           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID, 8) &&
-           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX, 4) &&
-           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_BARRIER_PROCS) &&
+           VerifyField<int64_t>(verifier, VT_BARRIER_GROUP_ID) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_INDEX) &&
+           VerifyField<int32_t>(verifier, VT_BARRIER_GROUP_SIZE) &&
            verifier.EndTable();
   }
   ExecResultRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3468,9 +3418,9 @@ struct SnapshotHeader FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_STATE, 8) &&
-           VerifyField<uint32_t>(verifier, VT_OUTPUT_OFFSET, 4) &&
-           VerifyField<uint32_t>(verifier, VT_OUTPUT_SIZE, 4) &&
+           VerifyField<uint64_t>(verifier, VT_STATE) &&
+           VerifyField<uint32_t>(verifier, VT_OUTPUT_OFFSET) &&
+           VerifyField<uint32_t>(verifier, VT_OUTPUT_SIZE) &&
            verifier.EndTable();
   }
   SnapshotHeaderT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3567,14 +3517,14 @@ struct SnapshotHandshake FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint8_t>(verifier, VT_COVER_EDGES, 1) &&
-           VerifyField<uint8_t>(verifier, VT_KERNEL_64_BIT, 1) &&
-           VerifyField<int32_t>(verifier, VT_SLOWDOWN, 4) &&
-           VerifyField<int32_t>(verifier, VT_SYSCALL_TIMEOUT_MS, 4) &&
-           VerifyField<int32_t>(verifier, VT_PROGRAM_TIMEOUT_MS, 4) &&
-           VerifyField<uint64_t>(verifier, VT_FEATURES, 8) &&
-           VerifyField<uint64_t>(verifier, VT_ENV_FLAGS, 8) &&
-           VerifyField<int64_t>(verifier, VT_SANDBOX_ARG, 8) &&
+           VerifyField<uint8_t>(verifier, VT_COVER_EDGES) &&
+           VerifyField<uint8_t>(verifier, VT_KERNEL_64_BIT) &&
+           VerifyField<int32_t>(verifier, VT_SLOWDOWN) &&
+           VerifyField<int32_t>(verifier, VT_SYSCALL_TIMEOUT_MS) &&
+           VerifyField<int32_t>(verifier, VT_PROGRAM_TIMEOUT_MS) &&
+           VerifyField<uint64_t>(verifier, VT_FEATURES) &&
+           VerifyField<uint64_t>(verifier, VT_ENV_FLAGS) &&
+           VerifyField<int64_t>(verifier, VT_SANDBOX_ARG) &&
            verifier.EndTable();
   }
   SnapshotHandshakeT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -3681,10 +3631,10 @@ struct SnapshotRequest FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
-           VerifyField<uint64_t>(verifier, VT_EXEC_FLAGS, 8) &&
-           VerifyField<int32_t>(verifier, VT_NUM_CALLS, 4) &&
-           VerifyField<uint64_t>(verifier, VT_ALL_CALL_SIGNAL, 8) &&
-           VerifyField<uint8_t>(verifier, VT_ALL_EXTRA_SIGNAL, 1) &&
+           VerifyField<uint64_t>(verifier, VT_EXEC_FLAGS) &&
+           VerifyField<int32_t>(verifier, VT_NUM_CALLS) &&
+           VerifyField<uint64_t>(verifier, VT_ALL_CALL_SIGNAL) &&
+           VerifyField<uint8_t>(verifier, VT_ALL_EXTRA_SIGNAL) &&
            VerifyOffset(verifier, VT_PROG_DATA) &&
            verifier.VerifyVector(prog_data()) &&
            verifier.EndTable();
@@ -3880,21 +3830,6 @@ inline flatbuffers::Offset<ConnectReplyRaw> CreateConnectReplyRaw(flatbuffers::F
       _race_frames,
       _features,
       _files);
-}
-
-inline InfoRequestRawT::InfoRequestRawT(const InfoRequestRawT &o)
-      : error(o.error) {
-  features.reserve(o.features.size());
-  for (const auto &features_ : o.features) { features.emplace_back((features_) ? new rpc::FeatureInfoRawT(*features_) : nullptr); }
-  files.reserve(o.files.size());
-  for (const auto &files_ : o.files) { files.emplace_back((files_) ? new rpc::FileInfoRawT(*files_) : nullptr); }
-}
-
-inline InfoRequestRawT &InfoRequestRawT::operator=(InfoRequestRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(error, o.error);
-  std::swap(features, o.features);
-  std::swap(files, o.files);
-  return *this;
 }
 
 inline InfoRequestRawT *InfoRequestRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -4127,49 +4062,6 @@ inline flatbuffers::Offset<ExecutorMessageRaw> CreateExecutorMessageRaw(flatbuff
       _msg);
 }
 
-inline ExecRequestRawT::ExecRequestRawT(const ExecRequestRawT &o)
-      : id(o.id),
-        type(o.type),
-        avoid(o.avoid),
-        data(o.data),
-        exec_opts((o.exec_opts) ? new rpc::ExecOptsRaw(*o.exec_opts) : nullptr),
-        flags(o.flags),
-        all_signal(o.all_signal),
-        barrier_participants(o.barrier_participants),
-        barrier_group_id(o.barrier_group_id),
-        barrier_index(o.barrier_index),
-        barrier_group_size(o.barrier_group_size),
-        barrier_start_delay_us(o.barrier_start_delay_us),
-        ukc_use_name(o.ukc_use_name),
-        ukc_use_stack(o.ukc_use_stack),
-        ukc_free_name(o.ukc_free_name),
-        ukc_free_stack(o.ukc_free_stack),
-        ukc_use_access_delay_time(o.ukc_use_access_delay_time),
-        ukc_is_valid(o.ukc_is_valid) {
-}
-
-inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(id, o.id);
-  std::swap(type, o.type);
-  std::swap(avoid, o.avoid);
-  std::swap(data, o.data);
-  std::swap(exec_opts, o.exec_opts);
-  std::swap(flags, o.flags);
-  std::swap(all_signal, o.all_signal);
-  std::swap(barrier_participants, o.barrier_participants);
-  std::swap(barrier_group_id, o.barrier_group_id);
-  std::swap(barrier_index, o.barrier_index);
-  std::swap(barrier_group_size, o.barrier_group_size);
-  std::swap(barrier_start_delay_us, o.barrier_start_delay_us);
-  std::swap(ukc_use_name, o.ukc_use_name);
-  std::swap(ukc_use_stack, o.ukc_use_stack);
-  std::swap(ukc_free_name, o.ukc_free_name);
-  std::swap(ukc_free_stack, o.ukc_free_stack);
-  std::swap(ukc_use_access_delay_time, o.ukc_use_access_delay_time);
-  std::swap(ukc_is_valid, o.ukc_is_valid);
-  return *this;
-}
-
 inline ExecRequestRawT *ExecRequestRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<ExecRequestRawT>(new ExecRequestRawT());
   UnPackTo(_o.get(), _resolver);
@@ -4197,6 +4089,7 @@ inline void ExecRequestRaw::UnPackTo(ExecRequestRawT *_o, const flatbuffers::res
   { auto _e = ukc_free_stack(); _o->ukc_free_stack = _e; }
   { auto _e = ukc_use_access_delay_time(); _o->ukc_use_access_delay_time = _e; }
   { auto _e = ukc_is_valid(); _o->ukc_is_valid = _e; }
+  { auto _e = race_time_threshold_ns(); _o->race_time_threshold_ns = _e; }
 }
 
 inline flatbuffers::Offset<ExecRequestRaw> ExecRequestRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -4211,7 +4104,7 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _type = _o->type;
   auto _avoid = _o->avoid;
   auto _data = _o->data.size() ? _fbb.CreateVector(_o->data) : 0;
-  auto _exec_opts = _o->exec_opts ? _o->exec_opts.get() : nullptr;
+  auto _exec_opts = _o->exec_opts ? _o->exec_opts.get() : 0;
   auto _flags = _o->flags;
   auto _all_signal = _o->all_signal.size() ? _fbb.CreateVector(_o->all_signal) : 0;
   auto _barrier_participants = _o->barrier_participants;
@@ -4225,6 +4118,7 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _ukc_free_stack = _o->ukc_free_stack;
   auto _ukc_use_access_delay_time = _o->ukc_use_access_delay_time;
   auto _ukc_is_valid = _o->ukc_is_valid;
+  auto _race_time_threshold_ns = _o->race_time_threshold_ns;
   return rpc::CreateExecRequestRaw(
       _fbb,
       _id,
@@ -4244,7 +4138,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
       _ukc_free_name,
       _ukc_free_stack,
       _ukc_use_access_delay_time,
-      _ukc_is_valid);
+      _ukc_is_valid,
+      _race_time_threshold_ns);
 }
 
 inline SignalUpdateRawT *SignalUpdateRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -4392,27 +4287,6 @@ inline flatbuffers::Offset<CallInfoRaw> CreateCallInfoRaw(flatbuffers::FlatBuffe
       _comps);
 }
 
-inline ProgInfoRawT::ProgInfoRawT(const ProgInfoRawT &o)
-      : extra((o.extra) ? new rpc::CallInfoRawT(*o.extra) : nullptr),
-        elapsed(o.elapsed),
-        freshness(o.freshness),
-        ddrd((o.ddrd) ? new rpc::DdrdRawT(*o.ddrd) : nullptr) {
-  calls.reserve(o.calls.size());
-  for (const auto &calls_ : o.calls) { calls.emplace_back((calls_) ? new rpc::CallInfoRawT(*calls_) : nullptr); }
-  extra_raw.reserve(o.extra_raw.size());
-  for (const auto &extra_raw_ : o.extra_raw) { extra_raw.emplace_back((extra_raw_) ? new rpc::CallInfoRawT(*extra_raw_) : nullptr); }
-}
-
-inline ProgInfoRawT &ProgInfoRawT::operator=(ProgInfoRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(calls, o.calls);
-  std::swap(extra_raw, o.extra_raw);
-  std::swap(extra, o.extra);
-  std::swap(elapsed, o.elapsed);
-  std::swap(freshness, o.freshness);
-  std::swap(ddrd, o.ddrd);
-  return *this;
-}
-
 inline ProgInfoRawT *ProgInfoRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<ProgInfoRawT>(new ProgInfoRawT());
   UnPackTo(_o.get(), _resolver);
@@ -4452,19 +4326,6 @@ inline flatbuffers::Offset<ProgInfoRaw> CreateProgInfoRaw(flatbuffers::FlatBuffe
       _elapsed,
       _freshness,
       _ddrd);
-}
-
-inline DdrdRawT::DdrdRawT(const DdrdRawT &o) {
-  uaf_pairs.reserve(o.uaf_pairs.size());
-  for (const auto &uaf_pairs_ : o.uaf_pairs) { uaf_pairs.emplace_back((uaf_pairs_) ? new rpc::DdrdUafPairRawT(*uaf_pairs_) : nullptr); }
-  extended_uaf.reserve(o.extended_uaf.size());
-  for (const auto &extended_uaf_ : o.extended_uaf) { extended_uaf.emplace_back((extended_uaf_) ? new rpc::DdrdExtendedUafPairRawT(*extended_uaf_) : nullptr); }
-}
-
-inline DdrdRawT &DdrdRawT::operator=(DdrdRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(uaf_pairs, o.uaf_pairs);
-  std::swap(extended_uaf, o.extended_uaf);
-  return *this;
 }
 
 inline DdrdRawT *DdrdRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -4587,30 +4448,6 @@ inline flatbuffers::Offset<DdrdSerializedAccessRaw> CreateDdrdSerializedAccessRa
       _access_type);
 }
 
-inline DdrdExtendedUafPairRawT::DdrdExtendedUafPairRawT(const DdrdExtendedUafPairRawT &o)
-      : basic((o.basic) ? new rpc::DdrdUafPairRawT(*o.basic) : nullptr),
-        use_thread_history_count(o.use_thread_history_count),
-        free_thread_history_count(o.free_thread_history_count),
-        use_target_time(o.use_target_time),
-        free_target_time(o.free_target_time),
-        path_distance_use(o.path_distance_use),
-        path_distance_free(o.path_distance_free) {
-  access_history.reserve(o.access_history.size());
-  for (const auto &access_history_ : o.access_history) { access_history.emplace_back((access_history_) ? new rpc::DdrdSerializedAccessRawT(*access_history_) : nullptr); }
-}
-
-inline DdrdExtendedUafPairRawT &DdrdExtendedUafPairRawT::operator=(DdrdExtendedUafPairRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(basic, o.basic);
-  std::swap(use_thread_history_count, o.use_thread_history_count);
-  std::swap(free_thread_history_count, o.free_thread_history_count);
-  std::swap(use_target_time, o.use_target_time);
-  std::swap(free_target_time, o.free_target_time);
-  std::swap(path_distance_use, o.path_distance_use);
-  std::swap(path_distance_free, o.path_distance_free);
-  std::swap(access_history, o.access_history);
-  return *this;
-}
-
 inline DdrdExtendedUafPairRawT *DdrdExtendedUafPairRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
   auto _o = std::unique_ptr<DdrdExtendedUafPairRawT>(new DdrdExtendedUafPairRawT());
   UnPackTo(_o.get(), _resolver);
@@ -4656,33 +4493,6 @@ inline flatbuffers::Offset<DdrdExtendedUafPairRaw> CreateDdrdExtendedUafPairRaw(
       _path_distance_use,
       _path_distance_free,
       _access_history);
-}
-
-inline ExecResultRawT::ExecResultRawT(const ExecResultRawT &o)
-      : id(o.id),
-        proc(o.proc),
-        output(o.output),
-        hanged(o.hanged),
-        error(o.error),
-        info((o.info) ? new rpc::ProgInfoRawT(*o.info) : nullptr),
-        barrier_procs(o.barrier_procs),
-        barrier_group_id(o.barrier_group_id),
-        barrier_index(o.barrier_index),
-        barrier_group_size(o.barrier_group_size) {
-}
-
-inline ExecResultRawT &ExecResultRawT::operator=(ExecResultRawT o) FLATBUFFERS_NOEXCEPT {
-  std::swap(id, o.id);
-  std::swap(proc, o.proc);
-  std::swap(output, o.output);
-  std::swap(hanged, o.hanged);
-  std::swap(error, o.error);
-  std::swap(info, o.info);
-  std::swap(barrier_procs, o.barrier_procs);
-  std::swap(barrier_group_id, o.barrier_group_id);
-  std::swap(barrier_index, o.barrier_index);
-  std::swap(barrier_group_size, o.barrier_group_size);
-  return *this;
 }
 
 inline ExecResultRawT *ExecResultRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {
@@ -4906,7 +4716,7 @@ inline bool VerifyHostMessagesRaw(flatbuffers::Verifier &verifier, const void *o
   }
 }
 
-inline bool VerifyHostMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<HostMessagesRaw> *types) {
+inline bool VerifyHostMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types) {
   if (!values || !types) return !values && !types;
   if (values->size() != types->size()) return false;
   for (flatbuffers::uoffset_t i = 0; i < values->size(); ++i) {
@@ -4919,7 +4729,6 @@ inline bool VerifyHostMessagesRawVector(flatbuffers::Verifier &verifier, const f
 }
 
 inline void *HostMessagesRawUnion::UnPack(const void *obj, HostMessagesRaw type, const flatbuffers::resolver_function_t *resolver) {
-  (void)resolver;
   switch (type) {
     case HostMessagesRaw::ExecRequest: {
       auto ptr = reinterpret_cast<const rpc::ExecRequestRaw *>(obj);
@@ -4942,7 +4751,6 @@ inline void *HostMessagesRawUnion::UnPack(const void *obj, HostMessagesRaw type,
 }
 
 inline flatbuffers::Offset<void> HostMessagesRawUnion::Pack(flatbuffers::FlatBufferBuilder &_fbb, const flatbuffers::rehasher_function_t *_rehasher) const {
-  (void)_rehasher;
   switch (type) {
     case HostMessagesRaw::ExecRequest: {
       auto ptr = reinterpret_cast<const rpc::ExecRequestRawT *>(value);
@@ -4967,7 +4775,7 @@ inline flatbuffers::Offset<void> HostMessagesRawUnion::Pack(flatbuffers::FlatBuf
 inline HostMessagesRawUnion::HostMessagesRawUnion(const HostMessagesRawUnion &u) : type(u.type), value(nullptr) {
   switch (type) {
     case HostMessagesRaw::ExecRequest: {
-      value = new rpc::ExecRequestRawT(*reinterpret_cast<rpc::ExecRequestRawT *>(u.value));
+      FLATBUFFERS_ASSERT(false);  // rpc::ExecRequestRawT not copyable.
       break;
     }
     case HostMessagesRaw::SignalUpdate: {
@@ -5036,7 +4844,7 @@ inline bool VerifyExecutorMessagesRaw(flatbuffers::Verifier &verifier, const voi
   }
 }
 
-inline bool VerifyExecutorMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<ExecutorMessagesRaw> *types) {
+inline bool VerifyExecutorMessagesRawVector(flatbuffers::Verifier &verifier, const flatbuffers::Vector<flatbuffers::Offset<void>> *values, const flatbuffers::Vector<uint8_t> *types) {
   if (!values || !types) return !values && !types;
   if (values->size() != types->size()) return false;
   for (flatbuffers::uoffset_t i = 0; i < values->size(); ++i) {
@@ -5049,7 +4857,6 @@ inline bool VerifyExecutorMessagesRawVector(flatbuffers::Verifier &verifier, con
 }
 
 inline void *ExecutorMessagesRawUnion::UnPack(const void *obj, ExecutorMessagesRaw type, const flatbuffers::resolver_function_t *resolver) {
-  (void)resolver;
   switch (type) {
     case ExecutorMessagesRaw::ExecResult: {
       auto ptr = reinterpret_cast<const rpc::ExecResultRaw *>(obj);
@@ -5068,7 +4875,6 @@ inline void *ExecutorMessagesRawUnion::UnPack(const void *obj, ExecutorMessagesR
 }
 
 inline flatbuffers::Offset<void> ExecutorMessagesRawUnion::Pack(flatbuffers::FlatBufferBuilder &_fbb, const flatbuffers::rehasher_function_t *_rehasher) const {
-  (void)_rehasher;
   switch (type) {
     case ExecutorMessagesRaw::ExecResult: {
       auto ptr = reinterpret_cast<const rpc::ExecResultRawT *>(value);
@@ -5089,7 +4895,7 @@ inline flatbuffers::Offset<void> ExecutorMessagesRawUnion::Pack(flatbuffers::Fla
 inline ExecutorMessagesRawUnion::ExecutorMessagesRawUnion(const ExecutorMessagesRawUnion &u) : type(u.type), value(nullptr) {
   switch (type) {
     case ExecutorMessagesRaw::ExecResult: {
-      value = new rpc::ExecResultRawT(*reinterpret_cast<rpc::ExecResultRawT *>(u.value));
+      FLATBUFFERS_ASSERT(false);  // rpc::ExecResultRawT not copyable.
       break;
     }
     case ExecutorMessagesRaw::Executing: {

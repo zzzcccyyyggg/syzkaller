@@ -55,6 +55,10 @@ type Request struct {
 	// DisableDdrd prevents automatic DDRD collection even for barrier executions.
 	DisableDdrd bool
 
+	// RaceTimeThresholdNs is the adaptive race detection time threshold in nanoseconds.
+	// If 0, the executor uses the default threshold.
+	RaceTimeThresholdNs uint64
+
 	// This stat will be incremented on request completion.
 	Stat *stat.Val
 
