@@ -327,7 +327,10 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			return
 
 		case <-ticker.C:
-			// Periodic incremental reload
+			// Periodic incremental reload - first reload DB from disk to pick up changes from fuzzer process
+			if err := mgr.uafStore.Reload(); err != nil {
+				log.Errorf("uaf validation: periodic db reload failed: %v", err)
+			}
 			newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
 			if err != nil {
 				log.Errorf("uaf validation: periodic reload failed: %v", err)
@@ -347,6 +350,10 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		case <-idleTicker.C:
 			// Check if idle (no pending tasks)
 			if !stage.HasPending() {
+				// Reload DB from disk to pick up changes from fuzzer process
+				if err := mgr.uafStore.Reload(); err != nil {
+					log.Errorf("uaf validation: idle db reload failed: %v", err)
+				}
 				newEntries, newSeq, err := mgr.uafStore.EntriesSince(lastSeq)
 				if err != nil {
 					log.Errorf("uaf validation: idle reload failed: %v", err)

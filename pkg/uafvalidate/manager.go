@@ -30,6 +30,19 @@ type ExecutionRequest struct {
 	RepeatTimes   int
 	DisableDdrd   bool
 	StopOnSuccess bool
+
+	// Per-pair computed delays for verification phase
+	// StartDelayUs: min(original, runtime) - used for barrier start delay (nanosleep in executor)
+	// AccessDelayUs: max(original, runtime) - used for UAF access delay (udelay in kernel)
+	StartDelayUs  int64
+	AccessDelayUs int64
+}
+
+// StablePairWithDelays extends MayUAFPair with computed delay values for verification
+type StablePairWithDelays struct {
+	Pair          ddrd.MayUAFPair
+	StartDelayUs  int64 // min(original TimeDiff, runtime TimeDiff) in microseconds
+	AccessDelayUs int64 // max(original TimeDiff, runtime TimeDiff) in microseconds
 }
 
 type ExecutionResult struct {
@@ -94,13 +107,14 @@ const (
 )
 
 type validationTask struct {
-	entry      *fuzzer.UAFCorpusEntry
-	signature  fuzzer.UAFPairProfile
-	key        string
-	attempts   int
-	repeats    int
-	pairLatest map[string]ddrd.MayUAFPair
-	pairCounts map[string]int
+	entry           *fuzzer.UAFCorpusEntry
+	signature       fuzzer.UAFPairProfile
+	key             string
+	attempts        int
+	repeats         int
+	pairLatest      map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
+	pairCounts      map[string]int
+	pairOriginalTD  map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
 }
 
 func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
@@ -304,9 +318,21 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		}
 		sm.updateIntersection(task, result)
 		if task.repeats+1 >= sm.cfg.RepeatCount {
-			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable)
+			var originalPairs []*ddrd.MayUAFPair
+			if task.entry != nil {
+				originalPairs = task.entry.Pairs
+			}
+			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs)
 			if len(result.StablePairs) > 0 {
-				sm.runVerificationPhase(ctx, task, result.StablePairs)
+				// Compute stable pairs with per-pair delays (min/max of original vs runtime TimeDiff)
+				stablePairsWithDelays := collectStablePairsWithDelays(
+					task.pairLatest,
+					task.pairCounts,
+					task.pairOriginalTD,
+					sm.stable,
+					originalPairs,
+				)
+				sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
 			}
 		}
 		sm.results <- result
@@ -442,6 +468,17 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		signature: signature,
 		key:       key,
 	}
+	// Pre-compute original TimeDiff for each pair from entry.Pairs
+	if len(clone.Pairs) > 0 {
+		task.pairOriginalTD = make(map[string]uint64, len(clone.Pairs))
+		for _, pair := range clone.Pairs {
+			if pair == nil {
+				continue
+			}
+			k := pairKey(*pair)
+			task.pairOriginalTD[k] = pair.TimeDiff
+		}
+	}
 	sm.pending[key] = task
 	sm.seenKeys[key] = struct{}{}
 	return task
@@ -528,12 +565,20 @@ func clonePairs(report *ddrd.Report) []ddrd.MayUAFPair {
 	return cloned
 }
 
-func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int) []ddrd.MayUAFPair {
+func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair) []ddrd.MayUAFPair {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
 	}
 	if minCount <= 1 {
 		minCount = 1
+	}
+	// Build a set of original pair keys for fast lookup
+	originalKeys := make(map[string]struct{}, len(originalPairs))
+	for _, pair := range originalPairs {
+		if pair == nil {
+			continue
+		}
+		originalKeys[pairKey(*pair)] = struct{}{}
 	}
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
@@ -542,6 +587,12 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 		}
 		if _, ok := latest[key]; !ok {
 			continue
+		}
+		// Additional condition: pair must exist in original corpus pairs
+		if len(originalKeys) > 0 {
+			if _, inOriginal := originalKeys[key]; !inOriginal {
+				continue
+			}
 		}
 		keys = append(keys, key)
 	}
@@ -554,6 +605,82 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 		stable = append(stable, latest[key])
 	}
 	return stable
+}
+
+// collectStablePairsWithDelays returns stable pairs with computed delays:
+// - StartDelayUs: min(original TimeDiff, runtime TimeDiff) in microseconds
+// - AccessDelayUs: max(original TimeDiff, runtime TimeDiff) in microseconds
+func collectStablePairsWithDelays(
+	latest map[string]ddrd.MayUAFPair,
+	counts map[string]int,
+	originalTD map[string]uint64,
+	minCount int,
+	originalPairs []*ddrd.MayUAFPair,
+) []StablePairWithDelays {
+	if len(latest) == 0 || len(counts) == 0 {
+		return nil
+	}
+	if minCount <= 1 {
+		minCount = 1
+	}
+	// Build a set of original pair keys for fast lookup
+	originalKeys := make(map[string]struct{}, len(originalPairs))
+	for _, pair := range originalPairs {
+		if pair == nil {
+			continue
+		}
+		originalKeys[pairKey(*pair)] = struct{}{}
+	}
+	keys := make([]string, 0, len(counts))
+	for key, count := range counts {
+		if count < minCount {
+			continue
+		}
+		if _, ok := latest[key]; !ok {
+			continue
+		}
+		// Additional condition: pair must exist in original corpus pairs
+		if len(originalKeys) > 0 {
+			if _, inOriginal := originalKeys[key]; !inOriginal {
+				continue
+			}
+		}
+		keys = append(keys, key)
+	}
+	if len(keys) == 0 {
+		return nil
+	}
+	sort.Strings(keys)
+	result := make([]StablePairWithDelays, 0, len(keys))
+	for _, key := range keys {
+		pair := latest[key]
+		runtimeTD := pair.TimeDiff   // nanoseconds from runtime observation
+		origTD := originalTD[key]    // nanoseconds from original corpus entry
+		if origTD == 0 {
+			origTD = runtimeTD // fallback if not recorded
+		}
+
+		// Compute min and max
+		var minTD, maxTD uint64
+		if runtimeTD < origTD {
+			minTD = runtimeTD
+			maxTD = origTD
+		} else {
+			minTD = origTD
+			maxTD = runtimeTD
+		}
+
+		// Convert to microseconds (TimeDiff is in nanoseconds)
+		startDelayUs := int64(minTD / 1000)
+		accessDelayUs := int64(maxTD / 1000)
+
+		result = append(result, StablePairWithDelays{
+			Pair:          pair,
+			StartDelayUs:  startDelayUs,
+			AccessDelayUs: accessDelayUs,
+		})
+	}
+	return result
 }
 
 func pairKey(pair ddrd.MayUAFPair) string {
@@ -728,6 +855,179 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		total, highConf := sm.varNameHBStore.Stats()
 		log.Logf(0, "uafvalidate: verification phase complete, VarName HB stats: total=%d high_confidence=%d", total, highConf)
 	}
+}
+
+// runVerificationPhaseWithDelays runs verification using per-pair computed delays:
+// - StartDelayUs (min of original/runtime) for barrier start delay
+// - AccessDelayUs (max of original/runtime) for kernel UAF access delay
+func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
+	log.Logf(0, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
+
+	for i, spd := range stablePairs {
+		if ctx.Err() != nil {
+			return
+		}
+
+		pair := spd.Pair
+		fullKey := pairKey(pair)       // Full key (with CallStack)
+		vnKey := VarNamePairKey(&pair) // VarName key (without CallStack)
+
+		// ========== Layer 1: Exact match skip ==========
+		if sm.isInvalid(fullKey) {
+			log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+			continue
+		}
+
+		if sm.isValidated(fullKey) {
+			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+			continue
+		}
+
+		// ========== Layer 2: VarName probabilistic skip ==========
+		if sm.varNameHBStore != nil {
+			skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
+			if skip {
+				log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
+					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+				continue
+			}
+			if prob > 0 {
+				log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
+					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+			}
+		}
+
+		// ========== Execute verification ==========
+		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s start_delay=%dus access_delay=%dus",
+			i+1, len(stablePairs), task.key, spd.StartDelayUs, spd.AccessDelayUs)
+
+		// Create a copy of the pair with AccessDelayUs as TimeDiff (for kernel udelay)
+		pairCopy := pair
+		pairCopy.TimeDiff = uint64(spd.AccessDelayUs) * 1000 // Convert to nanoseconds for ukcDelayMicros
+
+		exec, err := sm.factory(ctx)
+		if err != nil {
+			log.Logf(0, "uafvalidate: failed to create executor for verification: %v", err)
+			continue
+		}
+
+		// Build start delays array using spd.StartDelayUs for the first participant
+		startDelays := buildStartDelaysFromPair(task.entry, spd.StartDelayUs)
+
+		req := &ExecutionRequest{
+			Entry:         task.entry,
+			Delays:        startDelays,
+			TargetPair:    &pairCopy,
+			RepeatTimes:   10,
+			DisableDdrd:   true,
+			StopOnSuccess: true,
+			StartDelayUs:  spd.StartDelayUs,
+			AccessDelayUs: spd.AccessDelayUs,
+		}
+
+		execRes, runErr := exec.Run(ctx, req)
+		if closer, ok := exec.(interface{ Close() error }); ok {
+			closer.Close()
+		}
+
+		// Extract crash info
+		crashInfo := ""
+		if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
+			crashInfo = fmt.Sprintf(" crash=%q", execRes.CrashTitle)
+		}
+
+		if runErr != nil {
+			// Log run error with any available crash info
+			if crashInfo != "" {
+				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
+			} else {
+				log.Logf(0, "uafvalidate: verification run failed: %v", runErr)
+			}
+			if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
+				log.Logf(0, "uafvalidate: crash detected during failed run: %s", execRes.CrashTitle)
+				if len(execRes.CrashReport) > 0 {
+					reportPreview := string(execRes.CrashReport)
+					if len(reportPreview) > 500 {
+						reportPreview = reportPreview[:500] + "..."
+					}
+					log.Logf(0, "uafvalidate: crash report preview:\n%s", reportPreview)
+				}
+			}
+			continue // Execution error, don't update statistics
+		}
+
+		// ========== Update statistics ==========
+		status := "Not Triggerable"
+		if execRes.TriggeredCount >= 2 {
+			status = "Stable"
+		} else if execRes.TriggeredCount > 0 {
+			status = "Not Stable"
+		}
+
+		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s",
+			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status)
+
+		if execRes.TriggeredCount > 0 {
+			// ========== Success: proves not HB relationship ==========
+			// Serialize the validated entry including triggering programs
+			reportData := serializeValidatedEntry(execRes, task.entry)
+			sm.markValidated(fullKey, reportData)
+
+			// Update VarName HB statistics (success)
+			if sm.varNameHBStore != nil {
+				sm.varNameHBStore.RecordSuccess(&pair)
+				stats := sm.varNameHBStore.GetByPair(&pair)
+				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f",
+					vnKey, stats.HBConfidence())
+			}
+
+			// Log a summary (not full data to avoid log flooding)
+			reportPreview := string(reportData)
+			if len(reportPreview) > 2000 {
+				reportPreview = reportPreview[:2000] + "...[truncated]"
+			}
+			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
+			continue
+		}
+
+		// ========== Failure: increase HB confidence ==========
+		// Layer 1: Mark this exact pair as invalid
+		sm.markInvalid(fullKey)
+
+		// Layer 2: Update VarName HB statistics (failure)
+		if sm.varNameHBStore != nil {
+			sm.varNameHBStore.RecordFailure(&pair)
+			stats := sm.varNameHBStore.GetByPair(&pair)
+			log.Logf(0, "uafvalidate: pair failed verification, HB conf updated: vnkey=%s new_conf=%.2f skip_prob=%.2f",
+				vnKey, stats.HBConfidence(), stats.SkipProbability())
+		}
+	}
+
+	// Output statistics summary
+	if sm.varNameHBStore != nil {
+		total, highConf := sm.varNameHBStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName HB stats: total=%d high_confidence=%d", total, highConf)
+	}
+}
+
+// buildStartDelaysFromPair builds barrier start delays array using the given start delay for proc 0
+func buildStartDelaysFromPair(entry *fuzzer.UAFCorpusEntry, startDelayUs int64) []int64 {
+	if entry == nil {
+		return nil
+	}
+	participants := len(entry.ReplayPlan.DelaysMicros)
+	if participants == 0 && entry.Barrier.GroupSize > 0 {
+		participants = entry.Barrier.GroupSize
+	}
+	if participants < 2 {
+		return nil
+	}
+	if participants > defaultMaxBarrierDelays {
+		participants = defaultMaxBarrierDelays
+	}
+	delays := make([]int64, participants)
+	delays[0] = startDelayUs
+	return delays
 }
 
 func (sm *StageManager) isInvalid(key string) bool {

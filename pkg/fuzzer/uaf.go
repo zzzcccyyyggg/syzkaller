@@ -215,8 +215,8 @@ func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
 	if id == 0 {
 		return nil
 	}
-	if existing, ok := u.pairs[id]; ok {
-		return existing
+	if _, ok := u.pairs[id]; ok {
+		return nil // Already exists, return nil to skip
 	}
 	clone := new(ddrd.MayUAFPair)
 	*clone = *pair
@@ -716,7 +716,9 @@ func coverageSeedKey(raw []uint64, barrier BarrierSnapshot, program *prog.Prog, 
 	if len(plan.DelaysMicros) != 0 {
 		delays = append([]int64(nil), plan.DelaysMicros...)
 	}
-	return "cov-" + hash.String("cov", raw, barrier.Participants, barrier.GroupID,
+	// Note: Do NOT include barrier.GroupID in the key - it's a runtime-assigned
+	// incrementing value that would prevent proper deduplication.
+	return "cov-" + hash.String("cov", raw, barrier.Participants,
 		int64(barrier.GroupSize), procList, serialized, groupData, delays)
 }
 

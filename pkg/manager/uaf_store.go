@@ -19,6 +19,7 @@ type UAFCorpusStore struct {
 	mu     sync.Mutex
 	db     *db.DB
 	target *prog.Target
+	path   string
 }
 
 type storedUAFCorpusEntry struct {
@@ -54,7 +55,27 @@ func NewUAFCorpusStore(workdir string, target *prog.Target) (*UAFCorpusStore, er
 		}
 		log.Errorf("uaf corpus db: recovered with errors: %v", err)
 	}
-	return &UAFCorpusStore{db: corpusDB, target: target}, nil
+	return &UAFCorpusStore{db: corpusDB, target: target, path: path}, nil
+}
+
+// Reload re-reads the database from disk to pick up changes made by other processes.
+// This is useful for validator mode which runs in a separate process from the fuzzer.
+func (store *UAFCorpusStore) Reload() error {
+	if store == nil || store.path == "" {
+		return nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+
+	newDB, err := db.Open(store.path, true)
+	if err != nil {
+		if newDB == nil {
+			return fmt.Errorf("failed to reload uaf corpus db: %w", err)
+		}
+		log.Errorf("uaf corpus db: reload recovered with errors: %v", err)
+	}
+	store.db = newDB
+	return nil
 }
 
 func (store *UAFCorpusStore) Close() error {
