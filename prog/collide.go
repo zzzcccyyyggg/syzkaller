@@ -59,6 +59,47 @@ func AssignRandomAsync(origProg *Prog, rand *rand.Rand) *Prog {
 	return prog
 }
 
+// AssignMaxAsync is like AssignRandomAsync but assigns async with 100% probability
+// (instead of 66%) to all eligible calls. This is useful for validation where we want
+// to maximize the chance of triggering races.
+func AssignMaxAsync(origProg *Prog) *Prog {
+	var unassigned map[*ResultArg]bool
+	leftAsync := maxAsyncPerProg
+	prog := origProg.Clone()
+	for i := len(prog.Calls) - 1; i >= 0 && leftAsync > 0; i-- {
+		call := prog.Calls[i]
+		producesUnassigned := false
+		consumes := make(map[*ResultArg]bool)
+		ForeachArg(call, func(arg Arg, ctx *ArgCtx) {
+			res, ok := arg.(*ResultArg)
+			if !ok {
+				return
+			}
+			if res.Dir() != DirIn && unassigned[res] {
+				// If this call is made async, at least one of the resources
+				// will be empty when it's needed.
+				producesUnassigned = true
+			}
+			if res.Dir() != DirOut {
+				consumes[res.Res] = true
+			}
+		})
+		// Always assign async if eligible (100% instead of 66%).
+		// Never make the last call async.
+		if !producesUnassigned && i+1 != len(prog.Calls) {
+			call.Props.Async = true
+			for res := range consumes {
+				unassigned[res] = true
+			}
+			leftAsync--
+		} else {
+			call.Props.Async = false
+			unassigned = consumes
+		}
+	}
+	return prog
+}
+
 var rerunSteps = []int{32, 64}
 
 func AssignRandomRerun(prog *Prog, rand *rand.Rand) {
@@ -96,6 +137,64 @@ func DoubleExecCollide(origProg *Prog, rand *rand.Rand) (*Prog, error) {
 	}
 	prog.Calls = append(prog.Calls, dupCalls...)
 	return prog, nil
+}
+
+// SplitAsyncCalls creates a pair of programs for concurrent execution:
+// - prog1: the original program (clone)
+// - prog2: a clone with async-capable calls marked async
+//
+// This allows barrier execution with two copies of the program running concurrently,
+// where prog2 has async calls that may execute in parallel within the same proc.
+// Returns (prog1, prog2). If the program has async-capable calls, prog2 will be
+// a clone with those calls marked async. Otherwise prog2 will be nil.
+func SplitAsyncCalls(origProg *Prog) (prog1, prog2 *Prog) {
+	if origProg == nil || len(origProg.Calls) < 2 {
+		return origProg.Clone(), nil
+	}
+
+	// Check if there are any calls that can be made async
+	hasAsyncCapable := false
+	var unassigned map[*ResultArg]bool
+	leftAsync := maxAsyncPerProg
+
+	for i := len(origProg.Calls) - 1; i >= 0 && leftAsync > 0; i-- {
+		call := origProg.Calls[i]
+		producesUnassigned := false
+		consumes := make(map[*ResultArg]bool)
+		ForeachArg(call, func(arg Arg, ctx *ArgCtx) {
+			res, ok := arg.(*ResultArg)
+			if !ok {
+				return
+			}
+			if res.Dir() != DirIn && unassigned[res] {
+				producesUnassigned = true
+			}
+			if res.Dir() != DirOut {
+				consumes[res.Res] = true
+			}
+		})
+		// Never make the last call async
+		if !producesUnassigned && i+1 != len(origProg.Calls) {
+			hasAsyncCapable = true
+			for res := range consumes {
+				unassigned[res] = true
+			}
+			leftAsync--
+		} else {
+			unassigned = consumes
+		}
+	}
+
+	// If no calls can be async, just return original
+	if !hasAsyncCapable {
+		return origProg.Clone(), nil
+	}
+
+	// Return original program and a clone with async calls applied
+	prog1 = origProg.Clone()
+	prog2 = AssignMaxAsync(origProg)
+
+	return prog1, prog2
 }
 
 // DupCallCollide duplicates some of the calls in the program and marks them async.

@@ -133,10 +133,6 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		return nil, fmt.Errorf("missing manager configuration for execprog instance")
 	}
 	cfgCopy := *mgrCfg
-	// RPC address will be set after we know the server port
-	if participants > cfgCopy.Procs {
-		cfgCopy.Procs = participants
-	}
 
 	executorBin := e.inst.ExecutorBinary()
 	if executorBin == "" {
@@ -161,10 +157,33 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	}
 	baseProg = baseProg.Clone()
 
-	programs := barrierPrograms(entry, mask)
-	if len(programs) != participants {
-		return nil, fmt.Errorf("incomplete barrier program set: have %d want %d", len(programs), participants)
+	// Use different program preparation based on phase:
+	// - Discovery phase (TargetPair == nil): use original programs
+	// - Verification phase (TargetPair != nil): split into sync/async parts for true concurrency
+	var programs []*prog.Prog
+	if execReq.TargetPair != nil {
+		// Verification phase: split programs to maximize race triggering
+		programs = barrierProgramsForVerify(entry, mask)
+		log.Logf(1, "uafvalidate: vm=%d verification phase, split programs: original=%d split=%d",
+			vmIndex, participants, len(programs))
+	} else {
+		// Discovery phase: use original programs
+		programs = barrierPrograms(entry, mask)
 	}
+
+	// Update participants count based on actual programs
+	participants = len(programs)
+	if participants < 2 {
+		return e.runSingle(parentCtx, execReq)
+	}
+
+	// RPC address will be set after we know the server port
+	if participants > cfgCopy.Procs {
+		cfgCopy.Procs = participants
+	}
+
+	// Update mask to match new participant count
+	mask = (uint64(1) << participants) - 1
 
 	request := &queue.Request{
 		Prog:         baseProg,
@@ -596,6 +615,65 @@ func barrierPrograms(entry *fuzzer.UAFCorpusEntry, mask uint64) []*prog.Prog {
 		}
 	}
 	return programs
+}
+
+// barrierProgramsForVerify creates barrier programs for verification phase.
+// It duplicates each program: one original, one with async calls marked.
+// For each original program that has async-capable calls, it creates two programs:
+// - prog1: the original program (sequential execution)
+// - prog2: a clone with async calls marked (parallel execution within proc)
+// This doubles the number of barrier participants to maximize race triggering.
+func barrierProgramsForVerify(entry *fuzzer.UAFCorpusEntry, mask uint64) []*prog.Prog {
+	if entry == nil {
+		return nil
+	}
+	count := bits.OnesCount64(mask)
+	if count == 0 {
+		return nil
+	}
+
+	// First, collect original programs
+	origPrograms := make([]*prog.Prog, count)
+	for i := 0; i < count; i++ {
+		if i < len(entry.Programs) && entry.Programs[i] != nil {
+			origPrograms[i] = entry.Programs[i].Clone()
+			continue
+		}
+		if entry.Prog != nil {
+			origPrograms[i] = entry.Prog.Clone()
+		}
+	}
+	for i := range origPrograms {
+		if origPrograms[i] == nil && entry.Prog != nil {
+			origPrograms[i] = entry.Prog.Clone()
+		}
+	}
+
+	// Split each program: original + async version
+	var result []*prog.Prog
+	for i, p := range origPrograms {
+		if p == nil {
+			continue
+		}
+		prog1, prog2 := prog.SplitAsyncCalls(p)
+		if prog1 != nil {
+			result = append(result, prog1)
+		}
+		if prog2 != nil {
+			result = append(result, prog2)
+			log.Logf(0, "uafvalidate: prog[%d] duplicated with async: %d calls", i, len(prog2.Calls))
+		}
+	}
+
+	// If no programs after split, fallback to original
+	if len(result) == 0 {
+		return origPrograms
+	}
+
+	log.Logf(0, "uafvalidate: verification split result: %d original -> %d total (doubled with async)",
+		count, len(result))
+
+	return result
 }
 
 func barrierDelays(requestDelays, storedDelays []int64, participants int) []int64 {

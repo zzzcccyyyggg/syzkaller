@@ -8,7 +8,6 @@ import (
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/log"
-	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/uafvalidate"
 )
 
@@ -37,12 +36,13 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:    cfg.MaxConcurrent,
-		DelayRetryBudget: cfg.DelayRetryBudget,
-		ExecutionTimeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:            *flagDebug,
-		RepeatCount:      cfg.RepeatCount,
-		Workdir:          mgr.cfg.Workdir,
+		MaxConcurrent:     cfg.MaxConcurrent,
+		DelayRetryBudget:  cfg.DelayRetryBudget,
+		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:             *flagDebug,
+		RepeatCount:       cfg.RepeatCount,
+		Workdir:           mgr.cfg.Workdir,
+		TargetVarNamePair: cfg.TargetVarNamePair,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -169,14 +169,12 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 		}
 		return
 	}
-	var outcome manager.UAFValidationOutcome = manager.OutcomeFailed
-	note := res.CrashTitle
+
+	confirmed := false
 	if res.Err != nil {
-		note = res.Err.Error()
 		log.Errorf("uaf validation: executor error: %v", res.Err)
 	} else if res.Success {
-		outcome = manager.OutcomeConfirmed
-		note = ""
+		confirmed = true
 		log.Logf(0, "uaf validation: confirmed pair %s", signatureKey)
 		log.Logf(0, "uaf validation: stable intersection for %s count=%d", signatureKey, len(res.StablePairs))
 		for idx, pair := range res.StablePairs {
@@ -199,37 +197,11 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 		log.Logf(0, "uaf validation: pair %s crashed (%s)", signatureKey, res.CrashTitle)
 	}
 
-	if outcome == manager.OutcomeConfirmed {
+	if confirmed {
 		mgr.statUAFValidated.Add(1)
 	} else {
 		mgr.statUAFFailed.Add(1)
 	}
-
-	if mgr.uafValidatedStore == nil || uafvalidate.IsZeroSignature(res.Signature) || res.Entry == nil {
-		return
-	}
-	entry := &manager.UAFValidationEntry{
-		Profile:     res.Signature,
-		Barrier:     res.Entry.Barrier,
-		ReplayPlan:  res.Entry.ReplayPlan,
-		Outcome:     outcome,
-		Attempts:    normalizeAttempts(res.Attempt),
-		LastAttempt: time.Now(),
-		Notes:       note,
-		RepeatCount: repeatTotal,
-		StablePairs: cloneMayPairs(res.StablePairs),
-		LastPairs:   cloneMayPairs(res.Pairs),
-	}
-	if err := mgr.uafValidatedStore.Upsert(entry); err != nil {
-		log.Errorf("uaf validation: failed to persist result: %v", err)
-	}
-}
-
-func normalizeAttempts(attempt int) int {
-	if attempt <= 0 {
-		return 1
-	}
-	return attempt
 }
 
 func cloneMayPairs(pairs []ddrd.MayUAFPair) []ddrd.MayUAFPair {
@@ -256,12 +228,13 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:    cfg.MaxConcurrent,
-		DelayRetryBudget: cfg.DelayRetryBudget,
-		ExecutionTimeout: time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:            *flagDebug,
-		RepeatCount:      cfg.RepeatCount,
-		Workdir:          mgr.cfg.Workdir,
+		MaxConcurrent:     cfg.MaxConcurrent,
+		DelayRetryBudget:  cfg.DelayRetryBudget,
+		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:             *flagDebug,
+		RepeatCount:       cfg.RepeatCount,
+		Workdir:           mgr.cfg.Workdir,
+		TargetVarNamePair: cfg.TargetVarNamePair,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()

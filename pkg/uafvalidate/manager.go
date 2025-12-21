@@ -107,14 +107,14 @@ const (
 )
 
 type validationTask struct {
-	entry           *fuzzer.UAFCorpusEntry
-	signature       fuzzer.UAFPairProfile
-	key             string
-	attempts        int
-	repeats         int
-	pairLatest      map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
-	pairCounts      map[string]int
-	pairOriginalTD  map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
+	entry          *fuzzer.UAFCorpusEntry
+	signature      fuzzer.UAFPairProfile
+	key            string
+	attempts       int
+	repeats        int
+	pairLatest     map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
+	pairCounts     map[string]int
+	pairOriginalTD map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
 }
 
 func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
@@ -389,6 +389,7 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 
 	// Check each pair's skip status
 	skippedCount := 0
+	verifiedCount := 0
 	totalProb := 0.0
 	validPairCount := 0
 
@@ -407,7 +408,16 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 			continue
 		}
 
-		// Layer 2: VarName HB probability check
+		// Layer 2: Check if VarName pair is already verified (success)
+		// Once a VarName pair is verified, ALL entries with that VarName should be skipped
+		if sm.varNameHBStore.IsVerified(pair) {
+			skippedCount++
+			verifiedCount++
+			totalProb += 1.0
+			continue
+		}
+
+		// Layer 3: VarName HB probability check (for high-failure pairs)
 		stats := sm.varNameHBStore.GetByPair(pair)
 		prob := stats.SkipProbability()
 		totalProb += prob
@@ -421,6 +431,9 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 	// If all pairs would be skipped, skip the entire entry
 	if skippedCount == validPairCount && validPairCount > 0 {
 		avgProb := totalProb / float64(validPairCount)
+		if verifiedCount > 0 {
+			return true, fmt.Sprintf("all %d pairs skipped (%d verified, avg_prob=%.2f)", validPairCount, verifiedCount, avgProb)
+		}
 		return true, fmt.Sprintf("all %d pairs high HB (avg_prob=%.2f)", validPairCount, avgProb)
 	}
 
@@ -433,10 +446,21 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		return nil
 	}
 
+	// If TargetVarNamePair is set, only process entries containing that pair
+	if sm.cfg.TargetVarNamePair != "" {
+		if !entryContainsTargetVarName(clone, sm.cfg.TargetVarNamePair) {
+			return nil
+		}
+		log.Logf(0, "uafvalidate: [debug mode] entry matches target VarName pair %s", sm.cfg.TargetVarNamePair)
+	}
+
 	// Pre-check: if all pairs have high HB confidence, skip entire entry
-	if skip, reason := sm.shouldSkipEntry(clone); skip {
-		log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
-		return nil
+	// Skip this check in debug mode (TargetVarNamePair is set)
+	if sm.cfg.TargetVarNamePair == "" {
+		if skip, reason := sm.shouldSkipEntry(clone); skip {
+			log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
+			return nil
+		}
 	}
 
 	signature := clone.Profile
@@ -654,8 +678,8 @@ func collectStablePairsWithDelays(
 	result := make([]StablePairWithDelays, 0, len(keys))
 	for _, key := range keys {
 		pair := latest[key]
-		runtimeTD := pair.TimeDiff   // nanoseconds from runtime observation
-		origTD := originalTD[key]    // nanoseconds from original corpus entry
+		runtimeTD := pair.TimeDiff // nanoseconds from runtime observation
+		origTD := originalTD[key]  // nanoseconds from original corpus entry
 		if origTD == 0 {
 			origTD = runtimeTD // fallback if not recorded
 		}
@@ -690,6 +714,32 @@ func pairKey(pair ddrd.MayUAFPair) string {
 		pair.FreeCallStack,
 		pair.UseCallStack,
 	)
+}
+
+// entryContainsTargetVarName checks if any pair in the entry matches the target VarName pair.
+// targetVarNamePair format: "freeAccessName-useAccessName" (hex without 0x prefix)
+func entryContainsTargetVarName(entry *fuzzer.UAFCorpusEntry, targetVarNamePair string) bool {
+	if entry == nil || targetVarNamePair == "" {
+		return false
+	}
+	for _, pair := range entry.Pairs {
+		if pair == nil {
+			continue
+		}
+		vnKey := VarNamePairKey(pair)
+		if vnKey == targetVarNamePair {
+			return true
+		}
+	}
+	return false
+}
+
+// pairMatchesTargetVarName checks if a pair matches the target VarName pair.
+func pairMatchesTargetVarName(pair *ddrd.MayUAFPair, targetVarNamePair string) bool {
+	if pair == nil || targetVarNamePair == "" {
+		return false
+	}
+	return VarNamePairKey(pair) == targetVarNamePair
 }
 
 func (sm *StageManager) shouldRetry(task *validationTask, res *ValidationResult) bool {
@@ -820,12 +870,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			reportData := serializeValidatedEntry(execRes, task.entry)
 			sm.markValidated(fullKey, reportData)
 
-			// Update VarName HB statistics (success)
+			// Update VarName HB statistics (success) and mark as verified
+			// This will cause ALL future entries with the same VarName pair to be skipped
 			if sm.varNameHBStore != nil {
-				sm.varNameHBStore.RecordSuccess(&pairCopy)
+				sm.varNameHBStore.RecordSuccessWithKey(&pairCopy, task.key)
 				stats := sm.varNameHBStore.GetByPair(&pairCopy)
-				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f",
-					vnKey, stats.HBConfidence())
+				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
+					vnKey, stats.HBConfidence(), stats.IsVerified())
 			}
 
 			// Log a summary (not full data to avoid log flooding)
@@ -852,8 +903,8 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 	// Output statistics summary
 	if sm.varNameHBStore != nil {
-		total, highConf := sm.varNameHBStore.Stats()
-		log.Logf(0, "uafvalidate: verification phase complete, VarName HB stats: total=%d high_confidence=%d", total, highConf)
+		total, highConf, verified := sm.varNameHBStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase complete, VarName HB stats: total=%d high_confidence=%d verified=%d", total, highConf, verified)
 	}
 }
 
@@ -861,7 +912,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 // - StartDelayUs (min of original/runtime) for barrier start delay
 // - AccessDelayUs (max of original/runtime) for kernel UAF access delay
 func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
-	log.Logf(0, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
+	debugMode := sm.cfg.TargetVarNamePair != ""
+	if debugMode {
+		log.Logf(0, "uafvalidate: [debug mode] starting verification phase for key=%s pairs=%d target=%s",
+			task.key, len(stablePairs), sm.cfg.TargetVarNamePair)
+	} else {
+		log.Logf(0, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
+	}
 
 	for i, spd := range stablePairs {
 		if ctx.Err() != nil {
@@ -872,28 +929,39 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		fullKey := pairKey(pair)       // Full key (with CallStack)
 		vnKey := VarNamePairKey(&pair) // VarName key (without CallStack)
 
-		// ========== Layer 1: Exact match skip ==========
-		if sm.isInvalid(fullKey) {
-			log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
-			continue
-		}
-
-		if sm.isValidated(fullKey) {
-			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
-			continue
-		}
-
-		// ========== Layer 2: VarName probabilistic skip ==========
-		if sm.varNameHBStore != nil {
-			skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
-			if skip {
-				log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
-					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+		// In debug mode, only verify pairs matching the target VarName
+		if debugMode {
+			if !pairMatchesTargetVarName(&pair, sm.cfg.TargetVarNamePair) {
+				log.Logf(1, "uafvalidate: [debug mode] skipping non-target pair %d/%d vnkey=%s", i+1, len(stablePairs), vnKey)
 				continue
 			}
-			if prob > 0 {
-				log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
-					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+			log.Logf(0, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
+				i+1, len(stablePairs), vnKey, fullKey)
+		} else {
+			// ========== Normal mode: Layer 1 & 2 skip checks ==========
+			// ========== Layer 1: Exact match skip ==========
+			if sm.isInvalid(fullKey) {
+				log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+				continue
+			}
+
+			if sm.isValidated(fullKey) {
+				log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+				continue
+			}
+
+			// ========== Layer 2: VarName probabilistic skip ==========
+			if sm.varNameHBStore != nil {
+				skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
+				if skip {
+					log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
+						i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+					continue
+				}
+				if prob > 0 {
+					log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
+						i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+				}
 			}
 		}
 
@@ -971,14 +1039,28 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			// ========== Success: proves not HB relationship ==========
 			// Serialize the validated entry including triggering programs
 			reportData := serializeValidatedEntry(execRes, task.entry)
+
+			// In debug mode, only log but don't update databases
+			if debugMode {
+				log.Logf(0, "uafvalidate: [debug mode] SUCCESS vnkey=%s triggered=%d/%d (not updating databases)",
+					vnKey, execRes.TriggeredCount, req.RepeatTimes)
+				reportPreview := string(reportData)
+				if len(reportPreview) > 2000 {
+					reportPreview = reportPreview[:2000] + "...[truncated]"
+				}
+				log.Logf(0, "uafvalidate: [debug mode] report:\n%s", reportPreview)
+				continue
+			}
+
 			sm.markValidated(fullKey, reportData)
 
-			// Update VarName HB statistics (success)
+			// Update VarName HB statistics (success) and mark as verified
+			// This will cause ALL future entries with the same VarName pair to be skipped
 			if sm.varNameHBStore != nil {
-				sm.varNameHBStore.RecordSuccess(&pair)
+				sm.varNameHBStore.RecordSuccessWithKey(&pair, task.key)
 				stats := sm.varNameHBStore.GetByPair(&pair)
-				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f",
-					vnKey, stats.HBConfidence())
+				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
+					vnKey, stats.HBConfidence(), stats.IsVerified())
 			}
 
 			// Log a summary (not full data to avoid log flooding)
@@ -991,6 +1073,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		// ========== Failure: increase HB confidence ==========
+		// In debug mode, only log but don't update databases
+		if debugMode {
+			log.Logf(0, "uafvalidate: [debug mode] FAILED vnkey=%s triggered=0/%d (not updating databases)",
+				vnKey, req.RepeatTimes)
+			continue
+		}
+
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
 
@@ -1005,8 +1094,8 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 	// Output statistics summary
 	if sm.varNameHBStore != nil {
-		total, highConf := sm.varNameHBStore.Stats()
-		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName HB stats: total=%d high_confidence=%d", total, highConf)
+		total, highConf, verified := sm.varNameHBStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName HB stats: total=%d high_confidence=%d verified=%d", total, highConf, verified)
 	}
 }
 

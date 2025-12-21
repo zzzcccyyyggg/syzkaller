@@ -306,6 +306,11 @@ type UAFValidateConfig struct {
 	// IdleReloadSeconds specifies how long to wait before reloading when no tasks are pending.
 	// Defaults to 30 seconds if unset or zero.
 	IdleReloadSeconds int `json:"idle_reload_seconds,omitempty"`
+	// TargetVarNamePair specifies a specific VarName pair to debug.
+	// Format: "freeAccessName-useAccessName" (hex without 0x prefix, e.g. "610067002c7c8254-235d4d37a0583ad1")
+	// When set, only entries containing this VarName pair are validated,
+	// and all skip logic (invalid/validated/HB) is bypassed for debugging purposes.
+	TargetVarNamePair string `json:"target_varname_pair,omitempty"`
 }
 
 type FocusArea struct {

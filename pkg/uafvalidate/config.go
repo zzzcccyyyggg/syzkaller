@@ -10,6 +10,11 @@ type Config struct {
 	Debug            bool
 	RepeatCount      int
 	Workdir          string
+	// TargetVarNamePair specifies a specific VarName pair to debug.
+	// Format: "freeAccessName-useAccessName" (hex, e.g. "610067002c7c8254-235d4d37a0583ad1")
+	// When set, only entries containing this VarName pair are validated,
+	// and all skip logic (invalid/validated/HB) is bypassed.
+	TargetVarNamePair string
 }
 
 func (cfg Config) withDefaults() Config {

@@ -33,6 +33,7 @@ var (
 	flagJSON     = flag.Bool("json", false, "output in JSON format")
 	flagLimit    = flag.Int("limit", 0, "limit number of entries to show (0 = all)")
 	flagSortTime = flag.Bool("sort-time", false, "sort entries by timestamp (newest first)")
+	flagVarNames = flag.Bool("varnames", false, "show distinct VarName pairs with counts")
 )
 
 type storedUAFCorpusEntry struct {
@@ -78,6 +79,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg\n\n")
 		fmt.Fprintf(os.Stderr, "  # Show summary only\n")
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -summary\n\n")
+		fmt.Fprintf(os.Stderr, "  # Show distinct VarName pairs\n")
+		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -varnames\n\n")
 		fmt.Fprintf(os.Stderr, "  # Show specific entry by key\n")
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -key=abc123\n\n")
 		fmt.Fprintf(os.Stderr, "  # Export to JSON\n")
@@ -157,12 +160,82 @@ func main() {
 		return
 	}
 
+	if *flagVarNames {
+		printVarNames(entries, dbPath)
+		return
+	}
+
 	if *flagSummary {
 		printSummary(entries, dbPath)
 		return
 	}
 
 	printEntries(entries, target)
+}
+
+func printVarNames(entries []entryInfo, dbPath string) {
+	// VarNamePair represents a unique FreeAccessName-UseAccessName combination
+	type VarNamePair struct {
+		FreeAccessName uint64
+		UseAccessName  uint64
+	}
+
+	// Count occurrences of each VarName pair
+	pairCounts := make(map[VarNamePair]int)
+	for _, e := range entries {
+		stored := e.Entry
+
+		// Count the main pair
+		if stored.Pair.FreeAccessName != 0 || stored.Pair.UseAccessName != 0 {
+			key := VarNamePair{
+				FreeAccessName: stored.Pair.FreeAccessName,
+				UseAccessName:  stored.Pair.UseAccessName,
+			}
+			pairCounts[key]++
+		}
+
+		// Count pairs from the Pairs slice
+		for _, p := range stored.Pairs {
+			if p.FreeAccessName != 0 || p.UseAccessName != 0 {
+				key := VarNamePair{
+					FreeAccessName: p.FreeAccessName,
+					UseAccessName:  p.UseAccessName,
+				}
+				pairCounts[key]++
+			}
+		}
+	}
+
+	// Convert to slice for sorting
+	type pairWithCount struct {
+		Pair  VarNamePair
+		Count int
+	}
+	var sortedPairs []pairWithCount
+	for pair, count := range pairCounts {
+		sortedPairs = append(sortedPairs, pairWithCount{Pair: pair, Count: count})
+	}
+
+	// Sort by count (descending)
+	sort.Slice(sortedPairs, func(i, j int) bool {
+		return sortedPairs[i].Count > sortedPairs[j].Count
+	})
+
+	fmt.Printf("UAF Corpus Database: %s\n", dbPath)
+	fmt.Printf("================================================================================\n\n")
+	fmt.Printf("Distinct VarName Pairs: %d\n\n", len(pairCounts))
+
+	fmt.Printf("%-18s  %-18s  %s\n", "FreeAccessName", "UseAccessName", "Count")
+	fmt.Printf("%-18s  %-18s  %s\n", strings.Repeat("-", 18), strings.Repeat("-", 18), "-----")
+
+	for _, pc := range sortedPairs {
+		fmt.Printf("%016x  %016x  %d\n",
+			pc.Pair.FreeAccessName,
+			pc.Pair.UseAccessName,
+			pc.Count)
+	}
+
+	fmt.Printf("\nTotal entries: %d\n", len(entries))
 }
 
 func printSummary(entries []entryInfo, dbPath string) {

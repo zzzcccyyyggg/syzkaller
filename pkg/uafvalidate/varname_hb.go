@@ -42,6 +42,11 @@ type VarNameHBStats struct {
 	LastAttempt    time.Time `json:"last_attempt"`   // Last verification time
 	LastSuccess    time.Time `json:"last_success,omitempty"`
 	Created        time.Time `json:"created"`
+
+	// Verified indicates this VarName pair has been successfully validated
+	// Once verified, all other entries with the same VarName pair can be skipped
+	Verified    bool   `json:"verified"`
+	VerifiedKey string `json:"verified_key,omitempty"` // The entry key that was successfully verified
 }
 
 // HBConfidence calculates Happens-Before confidence (0.0 - 1.0)
@@ -103,6 +108,18 @@ func (s *VarNameHBStats) RecordSuccess() {
 	now := time.Now()
 	s.LastAttempt = now
 	s.LastSuccess = now
+}
+
+// MarkVerified marks this VarName pair as successfully verified
+// Once verified, all other entries with the same VarName pair should be skipped
+func (s *VarNameHBStats) MarkVerified(entryKey string) {
+	s.Verified = true
+	s.VerifiedKey = entryKey
+}
+
+// IsVerified returns true if this VarName pair has been verified
+func (s *VarNameHBStats) IsVerified() bool {
+	return s.Verified
 }
 
 // VarNameHBStore manages VarNamePair HB statistics storage
@@ -199,6 +216,12 @@ func (s *VarNameHBStore) RecordFailure(pair *ddrd.MayUAFPair) {
 
 // RecordSuccess records verification success
 func (s *VarNameHBStore) RecordSuccess(pair *ddrd.MayUAFPair) {
+	s.RecordSuccessWithKey(pair, "")
+}
+
+// RecordSuccessWithKey records verification success and marks the VarName pair as verified
+// entryKey is the key of the entry that was successfully verified, used for tracking
+func (s *VarNameHBStore) RecordSuccessWithKey(pair *ddrd.MayUAFPair, entryKey string) {
 	if pair == nil {
 		return
 	}
@@ -219,10 +242,31 @@ func (s *VarNameHBStore) RecordSuccess(pair *ddrd.MayUAFPair) {
 	}
 
 	stats.RecordSuccess()
+	// Mark as verified - all future entries with same VarName pair will be skipped
+	if !stats.Verified {
+		stats.MarkVerified(entryKey)
+		log.Logf(0, "varname_hb: VarName pair VERIFIED key=%s entry=%s (future entries will be skipped)",
+			key, entryKey)
+	}
 	s.saveLocked(key, stats)
 
-	log.Logf(1, "varname_hb: recorded success key=%s failures=%d successes=%d conf=%.2f",
-		key, stats.Failures, stats.Successes, stats.HBConfidence())
+	log.Logf(1, "varname_hb: recorded success key=%s failures=%d successes=%d conf=%.2f verified=%t",
+		key, stats.Failures, stats.Successes, stats.HBConfidence(), stats.Verified)
+}
+
+// IsVerified checks if a VarName pair has already been successfully verified
+func (s *VarNameHBStore) IsVerified(pair *ddrd.MayUAFPair) bool {
+	if pair == nil {
+		return false
+	}
+
+	key := VarNamePairKey(pair)
+
+	s.mu.RLock()
+	stats, ok := s.cache[key]
+	s.mu.RUnlock()
+
+	return ok && stats.Verified
 }
 
 // ShouldSkip determines whether verification should be skipped
@@ -242,6 +286,11 @@ func (s *VarNameHBStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() floa
 		return false, 0, &VarNameHBStats{Created: time.Now()}
 	}
 
+	// If already verified, always skip
+	if cachedStats.Verified {
+		return true, 1.0, cachedStats
+	}
+
 	prob = cachedStats.SkipProbability()
 	if prob <= 0 {
 		return false, 0, cachedStats
@@ -256,12 +305,15 @@ func (s *VarNameHBStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() floa
 }
 
 // Stats returns statistics summary
-func (s *VarNameHBStore) Stats() (total, highConfidence int) {
+func (s *VarNameHBStore) Stats() (total, highConfidence, verified int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
 	total = len(s.cache)
 	for _, stats := range s.cache {
+		if stats.Verified {
+			verified++
+		}
 		if stats.HBConfidence() >= 0.8 {
 			highConfidence++
 		}

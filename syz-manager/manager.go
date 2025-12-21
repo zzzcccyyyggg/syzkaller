@@ -112,8 +112,7 @@ type Manager struct {
 
 	reproLoop *manager.ReproLoop
 
-	uafStore          *manager.UAFCorpusStore
-	uafValidatedStore *manager.UAFValidatedStore
+	uafStore *manager.UAFCorpusStore
 
 	Stats
 }
@@ -329,18 +328,6 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		defer func() {
 			if err := store.Close(); err != nil {
 				log.Errorf("uaf corpus store close failed: %v", err)
-			}
-		}()
-	}
-	if cfg.Experimental.UAFValidate != nil {
-		validated, err := manager.NewUAFValidatedStore(cfg.Workdir)
-		if err != nil {
-			log.Fatalf("failed to initialize uaf validated store: %v", err)
-		}
-		mgr.uafValidatedStore = validated
-		defer func() {
-			if err := validated.Close(); err != nil {
-				log.Errorf("uaf validated store close failed: %v", err)
 			}
 		}()
 	}

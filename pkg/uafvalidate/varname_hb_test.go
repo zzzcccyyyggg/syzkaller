@@ -263,11 +263,71 @@ func TestStoreStats(t *testing.T) {
 		store.RecordFailure(highConfPair)
 	}
 
-	total, highConf := store.Stats()
+	total, highConf, verified := store.Stats()
 	if total != 2 {
 		t.Errorf("Total should be 2, got %d", total)
 	}
 	if highConf != 1 {
 		t.Errorf("High confidence count should be 1, got %d", highConf)
+	}
+	if verified != 0 {
+		t.Errorf("Verified count should be 0, got %d", verified)
+	}
+}
+
+func TestVarNameVerified(t *testing.T) {
+	store := NewVarNameHBStore(nil)
+
+	pair := &ddrd.MayUAFPair{
+		FreeAccessName: 0xAAAA,
+		UseAccessName:  0xBBBB,
+	}
+
+	// Initially not verified
+	if store.IsVerified(pair) {
+		t.Error("Should not be verified initially")
+	}
+
+	// Record success with key
+	store.RecordSuccessWithKey(pair, "test-entry-key")
+
+	// Now should be verified
+	if !store.IsVerified(pair) {
+		t.Error("Should be verified after success")
+	}
+
+	// ShouldSkip should return true with prob=1.0 for verified pair
+	skip, prob, stats := store.ShouldSkip(pair, func() float64 { return 0.0 })
+	if !skip {
+		t.Error("Should skip verified pair")
+	}
+	if prob != 1.0 {
+		t.Errorf("Skip probability should be 1.0 for verified pair, got %.3f", prob)
+	}
+	if stats.VerifiedKey != "test-entry-key" {
+		t.Errorf("VerifiedKey should be 'test-entry-key', got '%s'", stats.VerifiedKey)
+	}
+
+	// Another pair with same VarName but different CallStack should also be skipped
+	pair2 := &ddrd.MayUAFPair{
+		FreeAccessName: 0xAAAA,
+		UseAccessName:  0xBBBB,
+		FreeCallStack:  0xDDDD, // Different CallStack
+		UseCallStack:   0xEEEE,
+	}
+
+	if !store.IsVerified(pair2) {
+		t.Error("Pair with same VarName but different CallStack should also be verified")
+	}
+
+	skip2, _, _ := store.ShouldSkip(pair2, func() float64 { return 0.0 })
+	if !skip2 {
+		t.Error("Pair with same VarName but different CallStack should also be skipped")
+	}
+
+	// Stats should show 1 verified
+	_, _, verified := store.Stats()
+	if verified != 1 {
+		t.Errorf("Verified count should be 1, got %d", verified)
 	}
 }
