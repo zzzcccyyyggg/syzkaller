@@ -78,6 +78,10 @@ type Config struct {
 	Snapshot bool `json:"snapshot"`
 	// Magic key used to dongle macOS to the device.
 	AppleSmcOsk string `json:"apple_smc_osk"`
+	// Base SSH port for VMs (optional).
+	// If specified, VM instances will use ports starting from this value (ssh_port + index).
+	// If not specified (0), random available ports will be used.
+	SSHPort int `json:"ssh_port"`
 }
 
 type Pool struct {
@@ -369,6 +373,11 @@ func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl
 }
 
 func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, error) {
+	// Determine SSH port: use configured port if specified, otherwise use random
+	sshPort := vmimpl.UnusedTCPPort()
+	if pool.cfg.SSHPort > 0 {
+		sshPort = pool.cfg.SSHPort + index
+	}
 	inst := &instance{
 		index:      index,
 		cfg:        pool.cfg,
@@ -382,7 +391,7 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, e
 		workdir:    workdir,
 		SSHOptions: vmimpl.SSHOptions{
 			Addr: "localhost",
-			Port: vmimpl.UnusedTCPPort(),
+			Port: sshPort,
 			Key:  sshkey,
 			User: sshuser,
 		},

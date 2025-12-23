@@ -273,6 +273,26 @@ variables `$GOPATH`, `$KERNEL` and `$IMAGE` with their actual values.
 }
 ```
 
+### Optional: Fixed SSH ports
+
+By default, syzkaller assigns random available ports for SSH connections to each VM.
+If you need predictable SSH ports (e.g., for external scripts or debugging), you can
+specify a base `ssh_port`. VMs will use sequential ports starting from this value:
+
+``` json
+{
+	"vm": {
+		"count": 4,
+		"ssh_port": 10022,
+		"kernel": "$KERNEL/arch/x86/boot/bzImage",
+		"cpu": 2,
+		"mem": 2048
+	}
+}
+```
+
+With the configuration above, VMs will use ports 10022, 10023, 10024, and 10025.
+
 Run syzkaller manager:
 
 ``` bash

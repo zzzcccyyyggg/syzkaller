@@ -21,3 +21,34 @@ first line contains the word `WARNING`. This prevents benign warning splats
 from being treated as crashes and keeps fuzzing progress uninterrupted. For
 fine grained filtering, continue to use the existing `suppressions` and
 `ignores` arrays.
+
+## QEMU VM options
+
+The following options can be specified in the `vm` section when using the QEMU VM type:
+
+### `ssh_port`
+
+Set `ssh_port` to specify a base SSH port for VM instances. When specified, VM instances
+will use sequential ports starting from this value (`ssh_port + index`). For example,
+if `ssh_port` is set to 10022 with 4 VMs, the VMs will use ports 10022, 10023, 10024,
+and 10025 respectively.
+
+If not specified (0), random available ports will be automatically selected for each VM.
+
+This option is useful when you need:
+- Predictable SSH ports for external scripts or debugging
+- To avoid port conflicts with other services
+- To configure firewall rules in advance
+
+Example configuration:
+```json
+{
+    "vm": {
+        "count": 4,
+        "ssh_port": 10022,
+        "kernel": "/path/to/bzImage",
+        "cpu": 2,
+        "mem": 2048
+    }
+}
+```
