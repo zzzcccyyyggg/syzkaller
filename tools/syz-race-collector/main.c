@@ -80,6 +80,9 @@ static void print_usage(const char* prog) {
         "  --no-dedup                Disable race signal deduplication\n"
         "  --include-locked          Include pairs protected by common locks\n"
         "  --no-uaf                  Disable UAF pair collection\n"
+        "  --no-signals              Disable detailed signals output\n"
+        "  --signals <file>          Output signals to specified file (default: auto)\n"
+        "  --lru-size <n>            LRU cache size for signals dedup (default: 50000)\n"
         "\n"
         "Other:\n"
         "  -h, --help                Show this help message\n"
@@ -136,6 +139,9 @@ static struct option long_options[] = {
     {"no-dedup",        no_argument,       0, 1007},
     {"include-locked",  no_argument,       0, 1008},
     {"no-uaf",          no_argument,       0, 1009},
+    {"no-signals",      no_argument,       0, 1011},
+    {"signals",         required_argument, 0, 1012},
+    {"lru-size",        required_argument, 0, 1013},
     
     // 其他
     {"help",            no_argument,       0, 'h'},
@@ -216,6 +222,19 @@ static int parse_args(int argc, char* argv[], CollectorConfig* config) {
                 break;
             case 1009:  // --no-uaf
                 config->collect_uaf = false;
+                break;
+            case 1011:  // --no-signals
+                config->output_signals = false;
+                break;
+            case 1012:  // --signals
+                config->signals_file = optarg;
+                break;
+            case 1013:  // --lru-size
+                config->lru_cache_size = atoi(optarg);
+                if (config->lru_cache_size <= 0) {
+                    fprintf(stderr, "Invalid LRU cache size: %s\n", optarg);
+                    return -1;
+                }
                 break;
             
             // 其他
@@ -307,11 +326,48 @@ int main(int argc, char* argv[]) {
         return 1;
     }
     
+    // 打开 signals 输出文件
+    FILE* signals_fp = NULL;
+    char signals_path[512] = {0};
+    
+    if (config.output_signals) {
+        if (config.signals_file) {
+            // 使用指定的文件名
+            strncpy(signals_path, config.signals_file, sizeof(signals_path) - 1);
+        } else if (config.output_file) {
+            // 自动生成: 把 races.csv 变成 signals.csv
+            strncpy(signals_path, config.output_file, sizeof(signals_path) - 1);
+            char* ext = strrchr(signals_path, '.');
+            if (ext) {
+                *ext = '\0';
+            }
+            strncat(signals_path, "_signals.csv", sizeof(signals_path) - strlen(signals_path) - 1);
+        } else {
+            // 默认文件名
+            strncpy(signals_path, "/tmp/race_signals.csv", sizeof(signals_path) - 1);
+        }
+        
+        signals_fp = fopen(signals_path, "a");  // 追加模式
+        if (signals_fp) {
+            // 如果文件为空，写入 CSV header
+            fseek(signals_fp, 0, SEEK_END);
+            if (ftell(signals_fp) == 0) {
+                fprintf(signals_fp, "signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type\n");
+            }
+            analyzer_set_signals_file(analyzer, signals_fp);
+            if (config.verbose) {
+                fprintf(stderr, "  Signals output:        %s\n", signals_path);
+            }
+        } else {
+            fprintf(stderr, "Warning: Failed to open signals file: %s\n", signals_path);
+        }
+    }
+    
     // 初始化报告器
     Reporter reporter;
     reporter_init(&reporter, &config);
     
-    // 切换到 LOG 模式
+    // 启动时进入 LOG 模式并保持
     if (collector_enable_log_mode(&collector) != 0) {
         fprintf(stderr, "Error: Failed to enable LOG mode\n");
         analyzer_destroy(analyzer);
@@ -335,6 +391,7 @@ int main(int argc, char* argv[]) {
         } else {
             fprintf(stderr, "║  Press Ctrl+C to stop and generate report                 ║\n");
         }
+        fprintf(stderr, "║  Mode: Continuous LOG with pause-on-analyze               ║\n");
         fprintf(stderr, "╚════════════════════════════════════════════════════════════╝\n\n");
     }
     
@@ -343,6 +400,7 @@ int main(int argc, char* argv[]) {
     
     // ========================================
     // 主循环
+    // 流程：LOG模式采集 → 关闭LOG → 读取分析 → 清空 → 重开LOG
     // ========================================
     while (g_running) {
         iteration++;
@@ -358,10 +416,16 @@ int main(int argc, char* argv[]) {
             }
         }
         
-        // 1. 读取 trace buffer
+        // 1. 等待采样周期（在 LOG 模式下持续采集数据）
+        usleep(config.interval_ms * 1000);
+        
+        // 2. 关闭 LOG 模式（暂停采集，准备分析）
+        collector_disable_log_mode(&collector);
+        
+        // 3. 读取 trace buffer
         ssize_t bytes = collector_read_trace(&collector);
         
-        // 2. 分析
+        // 4. 分析
         SampleResult sample = {0};
         sample.timestamp = time(NULL);
         sample.iteration = iteration;
@@ -371,25 +435,48 @@ int main(int argc, char* argv[]) {
                            collector_get_data_size(&collector), &sample);
         }
         
-        // 3. 记录统计
+        // 5. 记录统计
         reporter_add_sample(&reporter, &sample);
         
-        // 4. 清空 trace buffer
+        // 6. 清空 trace buffer（防止重复分析）
         collector_clear_trace(&collector);
         
-        // 5. 等待下一个周期
-        usleep(config.interval_ms * 1000);
+        // 7. 重新开启 LOG 模式（继续采集）
+        if (g_running) {
+            collector_enable_log_mode(&collector);
+        }
     }
     
     // ========================================
     // 清理
     // ========================================
     
-    // 切回 MONITOR 模式
+    // 确保退出 LOG 模式
     collector_disable_log_mode(&collector);
     
     // 生成最终报告
     reporter_generate_summary(&reporter);
+    
+    // 输出 LRU 统计
+    if (config.output_signals && !config.quiet) {
+        uint64_t lru_hits, lru_misses;
+        analyzer_get_lru_stats(analyzer, &lru_hits, &lru_misses);
+        fprintf(stderr, "\nSignals LRU cache stats:\n");
+        fprintf(stderr, "  Hits (duplicates filtered): %lu\n", (unsigned long)lru_hits);
+        fprintf(stderr, "  Misses (signals output):    %lu\n", (unsigned long)lru_misses);
+        if (lru_hits + lru_misses > 0) {
+            fprintf(stderr, "  Hit rate:                   %.1f%%\n", 
+                    100.0 * lru_hits / (lru_hits + lru_misses));
+        }
+        if (signals_fp) {
+            fprintf(stderr, "  Signals file:               %s\n", signals_path);
+        }
+    }
+    
+    // 关闭 signals 文件
+    if (signals_fp) {
+        fclose(signals_fp);
+    }
     
     // 清理资源
     reporter_cleanup(&reporter);

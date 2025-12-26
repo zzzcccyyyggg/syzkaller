@@ -292,6 +292,8 @@ static bool flag_nic_vf;
 static bool flag_vhci_injection;
 static bool flag_wifi;
 static bool flag_delay_kcov_mmap;
+static bool flag_ddrd_monitor;
+static bool flag_ddrd_monitor_initialized;
 
 static bool flag_collect_cover;
 static bool flag_collect_signal;
@@ -1020,6 +1022,16 @@ void parse_handshake(const handshake_req& req)
 	flag_wifi = (bool)(req.flags & rpc::ExecEnv::EnableWifi);
 	flag_delay_kcov_mmap = (bool)(req.flags & rpc::ExecEnv::DelayKcovMmap);
 	flag_nic_vf = (bool)(req.flags & rpc::ExecEnv::EnableNicVF);
+	flag_ddrd_monitor = (bool)(req.flags & rpc::ExecEnv::EnableDdrdMonitor);
+
+	// Initialize DDRD monitor mode once if enabled
+	if (flag_ddrd_monitor && !flag_ddrd_monitor_initialized) {
+#if GOOS_linux
+		ukc_enter_monitor_mode();
+		flag_ddrd_monitor_initialized = true;
+		debug("ddrd: monitor mode initialized\n");
+#endif
+	}
 }
 
 void receive_execute()

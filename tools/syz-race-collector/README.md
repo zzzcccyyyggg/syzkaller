@@ -10,6 +10,8 @@
 - 与原始 `executor/ddrd/` 分析逻辑完全一致
 - 支持可配置的检测阈值
 - 支持 CSV/JSON 格式输出
+- **支持详细 signals 输出，用于主机端精确去重（适合大规模收集）**
+- **内置 LRU 缓存，减少 50-70% 的重复 signal 输出**
 - 零侵入性，可监控任意程序
 
 ## 编译
@@ -57,15 +59,21 @@ kill %1
   --max-pairs <n>           每次采样最大 race pair 数，默认 8192
 
 输出选项:
-  -o, --output <file>       输出文件路径
+  -o, --output <file>       输出文件路径（统计信息）
   -f, --format <fmt>        输出格式: csv 或 json，默认 csv
   -v, --verbose             详细输出
   -q, --quiet               静默模式（只显示最终统计）
   --no-realtime             禁用实时输出
 
+Signals 输出选项（大规模收集）:
+  --signals <file>          输出详细 signals 到指定文件（默认: 自动生成）
+  --no-signals              禁用详细 signals 输出
+  --lru-size <n>            LRU 缓存大小，用于减少重复输出（默认: 50000）
+
 分析选项:
   --no-dedup                禁用 race signal 去重
   --include-locked          包含有公共锁保护的 pair（默认排除，与原始 ddrd 一致）
+  --no-uaf                  禁用 UAF pair 收集
 
 其他:
   -h, --help                显示帮助信息
@@ -158,6 +166,29 @@ timestamp,elapsed_sec,iteration,access_count,free_count,race_pairs,unique_races_
 - `unique_races_interval`: 本次采样新发现的唯一 race 数
 - `total_unique_races`: 累计唯一 race 总数
 
+### Signals 格式（用于大规模收集）
+
+当启用 signals 输出时（默认启用），会生成单独的 signals.csv 文件：
+
+```csv
+signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type
+12345678901234567,9876543210,1122334455,6677889900,1234567890,0xffff888012345678,0xffff888087654321,1234567,R
+...
+```
+
+字段说明：
+- `signal_hash`: 唯一的 race signal 哈希值（用于去重）
+- `var1`, `var2`: 两个访问的变量名哈希
+- `stack1`, `stack2`: 两个访问的调用栈哈希
+- `addr1`, `addr2`: 两个访问的内存地址
+- `delta_ns`: 两次访问的时间差（纳秒）
+- `type`: 类型标识，R=Race Pair, U=UAF Pair
+
+**LRU 缓存机制：**
+- 默认使用 50000 个 entry 的 LRU 缓存（约 400KB 内存）
+- 可减少 50-70% 的重复 signal 输出
+- 使用 `--lru-size` 调整缓存大小
+
 ### JSON 格式
 
 ```json
@@ -202,4 +233,122 @@ timestamp,elapsed_sec,iteration,access_count,free_count,race_pairs,unique_races_
 
 1. **采样间隔选择**：间隔过短（<100ms）可能导致 CPU 占用过高；间隔过长（>5s）可能导致 trace buffer 溢出
 2. **trace buffer 大小**：根据系统负载调整，高负载时建议增大到 32768KB 或更多
-3. **UAF 检测**：当前版本暂时禁用 UAF 检测，仅收集 race pair
+3. **UAF 检测**：使用 `--no-uaf` 禁用 UAF 检测（默认已禁用），仅收集 race pair
+4. **大规模收集**：推荐使用 signals 输出模式，配合 `run-with-collector.sh` 脚本和 `dedup_races.py` 进行主机端去重
+
+## 大规模收集（百万级 signals）
+
+对于需要收集百万级别 race signals 的场景，推荐使用以下架构：
+
+### 架构说明
+
+```
+┌─────────────────────────────────────────────────────────────────┐
+│  VM 内部                                                        │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ syz-race-collector                                        │ │
+│  │  ├── LRU 缓存 (50K entries, ~400KB)                       │ │
+│  │  │   └── 过滤 50-70% 重复 signals                         │ │
+│  │  └── signals.csv (增量输出)                               │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+                              │
+                              │ SCP (周期性传输)
+                              ▼
+┌─────────────────────────────────────────────────────────────────┐
+│  主机                                                           │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ run-with-collector.sh                                     │ │
+│  │  ├── 收集 VM signals.csv                                  │ │
+│  │  ├── 合并多次收集的 signals                               │ │
+│  │  └── 调用 dedup_races.py 精确去重                         │ │
+│  └───────────────────────────────────────────────────────────┘ │
+│                              │                                  │
+│                              ▼                                  │
+│  ┌───────────────────────────────────────────────────────────┐ │
+│  │ all_signals_merged.csv (最终结果)                         │ │
+│  │  └── 精确去重后的唯一 race signals                        │ │
+│  └───────────────────────────────────────────────────────────┘ │
+└─────────────────────────────────────────────────────────────────┘
+```
+
+### 使用方法
+
+```bash
+# 使用 run-with-collector.sh 自动管理收集过程
+sudo ./tools/syz-race-collector/run-with-collector.sh \
+    -c ./test/DDRD/xfs.cfg \
+    -d 86400 \
+    -i 20 \
+    -v
+
+# 数据会自动收集到:
+# - workdir/race-collector-data/all_signals_unique.csv (去重后的 signals)
+# - workdir/race-collector-data/race_timeseries.csv (时间序列数据，用于绘图)
+```
+
+### 绘制时间序列图
+
+收集完成后，使用 `plot_races.py` 绘制论文级别的图表：
+
+```bash
+cd workdir/race-collector-data
+
+# 基本用法（生成 PNG）
+python3 ../../tools/syz-race-collector/plot_races.py race_timeseries.csv
+
+# 生成 PDF（适合论文）
+python3 ../../tools/syz-race-collector/plot_races.py race_timeseries.csv \
+    -o figure.pdf --format pdf --style paper
+
+# 对比多个实验
+python3 plot_races.py exp1/race_timeseries.csv exp2/race_timeseries.csv \
+    --labels "DDRD-syzkaller" "Vanilla syzkaller" \
+    -o comparison.pdf --format pdf --style paper
+
+# 无 matplotlib 时使用 ASCII 图表
+python3 plot_races.py race_timeseries.csv --ascii
+```
+
+### 时间序列数据格式
+
+`race_timeseries.csv` 格式：
+
+```csv
+timestamp,elapsed_sec,elapsed_min,unique_races
+2025-12-25T21:00:00+00:00,0,0.00,0
+2025-12-25T21:01:00+00:00,60,1.00,245
+2025-12-25T21:02:00+00:00,120,2.00,512
+...
+```
+
+### 手动去重
+
+如果需要手动合并和去重多个 signals 文件：
+
+```bash
+# 合并多个 signals.csv 文件
+cat signals_*.csv | head -1 > all_signals.csv
+cat signals_*.csv | grep -v "^signal_hash" >> all_signals.csv
+
+# 使用 dedup_races.py 去重
+python3 tools/syz-race-collector/dedup_races.py \
+    --input all_signals.csv \
+    --output unique_signals.csv \
+    --format signals
+```
+
+### 调整 LRU 缓存大小
+
+根据内存限制调整 LRU 缓存大小：
+
+```bash
+# 小内存环境 (200KB)
+sudo ./syz-race-collector --lru-size=25000 ...
+
+# 大内存环境 (800KB)  
+sudo ./syz-race-collector --lru-size=100000 ...
+
+# 禁用 LRU 缓存（输出所有 signals，最大去重精度）
+sudo ./syz-race-collector --lru-size=1 ...
+```

@@ -1,4 +1,5 @@
 # syzkaller/sys/linux/kccwf_fs.txt
+# 专门针对 OverlayFS copy-up 机制的测试
 
 include <uapi/linux/fcntl.h>
 

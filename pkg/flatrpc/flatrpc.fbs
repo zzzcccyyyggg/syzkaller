@@ -159,6 +159,7 @@ enum ExecEnv : uint64 (bit_flags) {
 	EnableWifi,		// setup and use mac80211_hwsim for wifi emulation
 	DelayKcovMmap,		// manage kcov memory in an optimized way
 	EnableNicVF,		// setup NIC VF device
+	EnableDdrdMonitor,	// enable DDRD monitor mode for background race detection
 }
 
 enum ExecFlag : uint64 (bit_flags) {

@@ -333,6 +333,7 @@ const (
 	ExecEnvEnableWifi          ExecEnv = 65536
 	ExecEnvDelayKcovMmap       ExecEnv = 131072
 	ExecEnvEnableNicVF         ExecEnv = 262144
+	ExecEnvEnableDdrdMonitor   ExecEnv = 524288
 )
 
 var EnumNamesExecEnv = map[ExecEnv]string{
@@ -355,6 +356,7 @@ var EnumNamesExecEnv = map[ExecEnv]string{
 	ExecEnvEnableWifi:          "EnableWifi",
 	ExecEnvDelayKcovMmap:       "DelayKcovMmap",
 	ExecEnvEnableNicVF:         "EnableNicVF",
+	ExecEnvEnableDdrdMonitor:   "EnableDdrdMonitor",
 }
 
 var EnumValuesExecEnv = map[string]ExecEnv{
@@ -377,6 +379,7 @@ var EnumValuesExecEnv = map[string]ExecEnv{
 	"EnableWifi":          ExecEnvEnableWifi,
 	"DelayKcovMmap":       ExecEnvDelayKcovMmap,
 	"EnableNicVF":         ExecEnvEnableNicVF,
+	"EnableDdrdMonitor":   ExecEnvEnableDdrdMonitor,
 }
 
 func (v ExecEnv) String() string {

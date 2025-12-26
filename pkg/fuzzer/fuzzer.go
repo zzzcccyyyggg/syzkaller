@@ -634,6 +634,9 @@ func DefaultExecOpts(cfg *mgrconfig.Config, features flatrpc.Feature, debug bool
 	if cfg.Experimental.ResetAccState {
 		env |= flatrpc.ExecEnvResetState
 	}
+	if cfg.Experimental.DdrdMonitor {
+		env |= flatrpc.ExecEnvEnableDdrdMonitor
+	}
 	if cfg.Cover {
 		env |= flatrpc.ExecEnvSignal
 	}

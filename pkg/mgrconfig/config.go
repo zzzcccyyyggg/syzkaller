@@ -288,6 +288,12 @@ type Experimental struct {
 	// Bounded size for the duplicate data race signature cache. Older entries
 	// are discarded once the limit is exceeded (default: 10000).
 	MaxDataRaceCombinations int `json:"max_data_race_combinations,omitempty"`
+
+	// Enable DDRD monitor mode for background race detection.
+	// When enabled, the executor initializes UKC in monitor mode once at startup
+	// and keeps it running throughout fuzzing. This allows passive race detection
+	// without switching modes between tests.
+	DdrdMonitor bool `json:"ddrd_monitor,omitempty"`
 }
 
 type UAFValidateConfig struct {

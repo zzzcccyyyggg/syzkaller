@@ -1,6 +1,8 @@
 // Copyright 2025 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
+#define _DEFAULT_SOURCE  // for usleep
+
 #include "collector.h"
 
 #include <errno.h>
@@ -176,24 +178,31 @@ int collector_disable_log_mode(TraceCollector* c) {
     }
     
     c->log_mode_enabled = false;
+    
+    // 短暂延迟确保所有 pending 的事件写入完成
+    usleep(1000);  // 1ms
+    
     debug_print("Switched to MONITOR mode\n");
     return 0;
 }
 
 ssize_t collector_read_trace(TraceCollector* c) {
-    if (!c || c->trace_fd < 0 || !c->buffer)
+    if (!c || !c->buffer)
         return -1;
     
-    // 重置文件位置
-    if (lseek(c->trace_fd, 0, SEEK_SET) == (off_t)-1) {
-        // 有些伪文件不支持 lseek，忽略错误
-        debug_print("lseek failed, continuing anyway\n");
+    // 重新打开 trace 文件以获取最新内容
+    // /sys/kernel/debug/tracing/trace 是特殊的伪文件，
+    // 每次打开会重新生成内容，lseek 不一定有效
+    int fd = open(TRACE_PATH, O_RDONLY);
+    if (fd < 0) {
+        debug_print("Failed to open trace file: %s\n", strerror(errno));
+        return -1;
     }
     
     // 读取全部内容
     size_t total = 0;
     while (total < c->buffer_size - 1) {
-        ssize_t n = read(c->trace_fd, c->buffer + total, c->buffer_size - total - 1);
+        ssize_t n = read(fd, c->buffer + total, c->buffer_size - total - 1);
         if (n > 0) {
             total += (size_t)n;
             continue;
@@ -205,6 +214,8 @@ ssize_t collector_read_trace(TraceCollector* c) {
         debug_print("read error: %s\n", strerror(errno));
         break;
     }
+    
+    close(fd);
     
     c->buffer[total] = '\0';
     c->data_size = total;

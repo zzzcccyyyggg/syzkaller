@@ -6,6 +6,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stdio.h>
 
 #include "config.h"
 #include "reporter.h"
@@ -25,6 +26,9 @@ RaceAnalyzer* analyzer_create(const CollectorConfig* config);
 // 销毁分析器
 void analyzer_destroy(RaceAnalyzer* a);
 
+// 设置 signals 输出文件（用于输出详细 race pair 信息）
+void analyzer_set_signals_file(RaceAnalyzer* a, FILE* fp);
+
 // 分析 trace buffer 内容
 // 返回检测到的 race pair 总数
 int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleResult* result);
@@ -37,5 +41,8 @@ void analyzer_reset_all(RaceAnalyzer* a);
 
 // 获取当前配置
 const CollectorConfig* analyzer_get_config(RaceAnalyzer* a);
+
+// 获取 LRU 命中统计
+void analyzer_get_lru_stats(RaceAnalyzer* a, uint64_t* hits, uint64_t* misses);
 
 #endif // RACE_COLLECTOR_ANALYZER_H

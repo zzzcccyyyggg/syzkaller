@@ -62,6 +62,15 @@ typedef struct {
     int capacity;
 } SignalSet;
 
+// LRU 缓存，用于减少重复 signal 输出
+typedef struct {
+    uint64_t* entries;      // 环形缓冲区
+    int capacity;           // 容量
+    int write_index;        // 下一个写入位置
+    uint64_t hits;          // 命中次数
+    uint64_t misses;        // 未命中次数
+} SignalLRU;
+
 struct RaceAnalyzer {
     const CollectorConfig* config;
     
@@ -71,10 +80,37 @@ struct RaceAnalyzer {
     RacePair* race_pairs;
     UAFPair* uaf_pairs;
     
-    // 去重集合
+    // 去重集合（用于统计唯一数量）
     SignalSet race_signals;
     SignalSet uaf_signals;
+    
+    // LRU 缓存（用于减少输出重复）
+    SignalLRU signal_lru;
+    
+    // signals 输出文件
+    FILE* signals_fp;
 };
+
+// ============================================
+// 信号哈希计算（针对 uint64_t 类型）
+// ============================================
+
+static uint64_t hash_race_pair_signal(uint64_t var1, uint64_t stack1,
+                                       uint64_t var2, uint64_t stack2)
+{
+    // 组合两个访问的信息
+    uint64_t pair1 = var1 ^ (stack1 << 1);
+    uint64_t pair2 = var2 ^ (stack2 << 1);
+
+    // 排序以确保 (A,B) 和 (B,A) 生成相同的哈希
+    if (pair1 > pair2) {
+        uint64_t tmp = pair1;
+        pair1 = pair2;
+        pair2 = tmp;
+    }
+
+    return pair1 * 1315423911ULL ^ pair2;
+}
 
 // ============================================
 // SignalSet 操作
@@ -116,6 +152,50 @@ static bool signalset_add(SignalSet* s, uint64_t signal) {
 
 static void signalset_clear(SignalSet* s) {
     s->count = 0;
+}
+
+// ============================================
+// LRU 缓存操作（用于减少重复 signal 输出）
+// ============================================
+
+static void signal_lru_init(SignalLRU* lru, int capacity) {
+    lru->entries = (uint64_t*)calloc(capacity, sizeof(uint64_t));
+    lru->capacity = capacity;
+    lru->write_index = 0;
+    lru->hits = 0;
+    lru->misses = 0;
+}
+
+static void signal_lru_destroy(SignalLRU* lru) {
+    if (lru->entries) {
+        free(lru->entries);
+        lru->entries = NULL;
+    }
+    lru->capacity = 0;
+}
+
+// 检查 signal 是否在 LRU 中，如果不在则添加
+// 返回 true 表示是新 signal（应该输出），false 表示重复
+static bool signal_lru_check_and_add(SignalLRU* lru, uint64_t signal) {
+    // 线性搜索（对于 50K entries，仍然可接受）
+    // 可以用哈希表优化，但目前足够
+    for (int i = 0; i < lru->capacity; i++) {
+        if (lru->entries[i] == signal) {
+            lru->hits++;
+            return false;  // 已存在，重复
+        }
+    }
+    
+    // 不存在，添加到 LRU
+    lru->entries[lru->write_index] = signal;
+    lru->write_index = (lru->write_index + 1) % lru->capacity;
+    lru->misses++;
+    return true;  // 新 signal
+}
+
+static void signal_lru_clear(SignalLRU* lru) {
+    memset(lru->entries, 0, lru->capacity * sizeof(uint64_t));
+    lru->write_index = 0;
 }
 
 // ============================================
@@ -268,6 +348,7 @@ RaceAnalyzer* analyzer_create(const CollectorConfig* config) {
     if (!a) return NULL;
     
     a->config = config;
+    a->signals_fp = NULL;
     
     // 分配存储空间
     a->records = (AccessRecord*)malloc(sizeof(AccessRecord) * config->max_records);
@@ -284,6 +365,10 @@ RaceAnalyzer* analyzer_create(const CollectorConfig* config) {
     signalset_init(&a->race_signals, SIGNAL_HASHSET_SIZE);
     signalset_init(&a->uaf_signals, SIGNAL_HASHSET_SIZE);
     
+    // 初始化 LRU 缓存 (使用配置的大小，如果有的话)
+    int lru_size = (config && config->lru_cache_size > 0) ? config->lru_cache_size : SIGNAL_LRU_SIZE;
+    signal_lru_init(&a->signal_lru, lru_size);
+    
     return a;
 }
 
@@ -297,8 +382,24 @@ void analyzer_destroy(RaceAnalyzer* a) {
     
     signalset_destroy(&a->race_signals);
     signalset_destroy(&a->uaf_signals);
+    signal_lru_destroy(&a->signal_lru);
+    
+    // 注意：不关闭 signals_fp，由调用者负责
     
     free(a);
+}
+
+void analyzer_set_signals_file(RaceAnalyzer* a, FILE* fp) {
+    if (a) {
+        a->signals_fp = fp;
+    }
+}
+
+void analyzer_get_lru_stats(RaceAnalyzer* a, uint64_t* hits, uint64_t* misses) {
+    if (a) {
+        if (hits) *hits = a->signal_lru.hits;
+        if (misses) *misses = a->signal_lru.misses;
+    }
 }
 
 int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleResult* result) {
@@ -382,24 +483,50 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
                                                      a->config);
     result->race_pair_count = race_count;
     
-    // 统计唯一 race
+    // 统计唯一 race 并输出 signals
     int unique_this_interval = 0;
-    if (a->config->dedup_signals) {
-        for (int i = 0; i < race_count; i++) {
-            uint64_t signal = hash_uaf_signal(
-                (char*)&a->race_pairs[i].first.var_name,
-                (char*)&a->race_pairs[i].first.call_stack_hash,
-                (char*)&a->race_pairs[i].second.var_name,
-                (char*)&a->race_pairs[i].second.call_stack_hash
-            );
-            
+    int signals_output = 0;
+    
+    for (int i = 0; i < race_count; i++) {
+        uint64_t signal = hash_race_pair_signal(
+            a->race_pairs[i].first.var_name,
+            a->race_pairs[i].first.call_stack_hash,
+            a->race_pairs[i].second.var_name,
+            a->race_pairs[i].second.call_stack_hash
+        );
+        
+        // 统计去重（用于计数）
+        if (a->config->dedup_signals) {
             if (signalset_add(&a->race_signals, signal)) {
                 unique_this_interval++;
             }
+        } else {
+            unique_this_interval++;
         }
-    } else {
-        unique_this_interval = race_count;
+        
+        // 输出 signal 到文件（使用 LRU 减少重复）
+        if (a->signals_fp && a->config->output_signals) {
+            if (signal_lru_check_and_add(&a->signal_lru, signal)) {
+                // 输出格式: signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type
+                fprintf(a->signals_fp, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,R\n",
+                        (unsigned long)signal,
+                        (unsigned long)a->race_pairs[i].first.var_name,
+                        (unsigned long)a->race_pairs[i].first.call_stack_hash,
+                        (unsigned long)a->race_pairs[i].second.var_name,
+                        (unsigned long)a->race_pairs[i].second.call_stack_hash,
+                        (unsigned long)a->race_pairs[i].first.address,
+                        (unsigned long)a->race_pairs[i].second.address,
+                        (long)a->race_pairs[i].access_time_diff);
+                signals_output++;
+            }
+        }
     }
+    
+    // 刷新 signals 文件
+    if (a->signals_fp && signals_output > 0) {
+        fflush(a->signals_fp);
+    }
+    
     result->unique_race_count = unique_this_interval;
     result->total_unique_races = a->race_signals.count;
     
@@ -410,24 +537,47 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
                                                        a->config);
         result->uaf_pair_count = uaf_count;
         
-        // 统计唯一 UAF
+        // 统计唯一 UAF 并输出 signals
         int unique_uaf_this_interval = 0;
-        if (a->config->dedup_signals) {
-            for (int i = 0; i < uaf_count; i++) {
-                uint64_t signal = hash_uaf_signal(
-                    (char*)&a->uaf_pairs[i].use_access.var_name,
-                    (char*)&a->uaf_pairs[i].use_access.call_stack_hash,
-                    (char*)&a->uaf_pairs[i].free_access.var_name,
-                    (char*)&a->uaf_pairs[i].free_access.call_stack_hash
-                );
-                
+        int uaf_signals_output = 0;
+        
+        for (int i = 0; i < uaf_count; i++) {
+            uint64_t signal = hash_race_pair_signal(
+                a->uaf_pairs[i].use_access.var_name,
+                a->uaf_pairs[i].use_access.call_stack_hash,
+                a->uaf_pairs[i].free_access.var_name,
+                a->uaf_pairs[i].free_access.call_stack_hash
+            );
+            
+            if (a->config->dedup_signals) {
                 if (signalset_add(&a->uaf_signals, signal)) {
                     unique_uaf_this_interval++;
                 }
+            } else {
+                unique_uaf_this_interval++;
             }
-        } else {
-            unique_uaf_this_interval = uaf_count;
+            
+            // 输出 UAF signal 到文件
+            if (a->signals_fp && a->config->output_signals) {
+                if (signal_lru_check_and_add(&a->signal_lru, signal)) {
+                    fprintf(a->signals_fp, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,U\n",
+                            (unsigned long)signal,
+                            (unsigned long)a->uaf_pairs[i].use_access.var_name,
+                            (unsigned long)a->uaf_pairs[i].use_access.call_stack_hash,
+                            (unsigned long)a->uaf_pairs[i].free_access.var_name,
+                            (unsigned long)a->uaf_pairs[i].free_access.call_stack_hash,
+                            (unsigned long)a->uaf_pairs[i].use_access.address,
+                            (unsigned long)a->uaf_pairs[i].free_access.address,
+                            (long)a->uaf_pairs[i].time_diff);
+                    uaf_signals_output++;
+                }
+            }
         }
+        
+        if (a->signals_fp && uaf_signals_output > 0) {
+            fflush(a->signals_fp);
+        }
+        
         result->unique_uaf_count = unique_uaf_this_interval;
         result->total_unique_uaf = a->uaf_signals.count;
     }

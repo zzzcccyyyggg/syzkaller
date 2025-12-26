@@ -71,12 +71,16 @@ static inline void ukc_turn_off()
 	if (fd < 0)
 		return;
 
-	if (ioctl(fd, kUkcTurnOff) == 0) {
-		ukc_print("ukc: switched to TURN OFF mode\n");
-	} else {
+	if (ioctl(fd, kUkcTurnOff) != 0)
 		ukc_print("ukc: failed to switch to TURN OFF mode (errno=%d)\n", errno);
-	}
+
 	close(fd);
+}
+
+// Enter disable mode - the safe/idle mode for UKC
+static inline void ukc_enter_disable_mode()
+{
+	ukc_turn_off();
 }
 
 static inline void ukc_enter_log_mode()

@@ -780,7 +780,7 @@ public:
 	{
 		if (initialized_)
 			race_detector_cleanup(&detector_);
-		ukc_enter_monitor_mode();
+		ukc_enter_disable_mode();
 	}
 
 	// Prepare DDRD for a barrier group execution
@@ -811,7 +811,7 @@ public:
 		}
 
 		if (set_pair) {
-			ukc_enter_monitor_mode();
+			ukc_enter_disable_mode();
 			ukc_set_may_uaf_pair(&pair);
 		} else if (collect_uaf) {
 			ukc_clear_may_uaf_pair();
@@ -832,7 +832,7 @@ public:
 		}
 
 		if (!available_) {
-			ukc_enter_monitor_mode();
+			ukc_enter_disable_mode();
 			return;
 		}
 
@@ -860,13 +860,13 @@ public:
 			return;
 
 		if (!available_) {
-			ukc_enter_monitor_mode();
+			ukc_enter_disable_mode();
 			active_for_group_ = false;
 			return;
 		}
 
-		// Switch back to MONITOR mode
-		ukc_enter_monitor_mode();
+		// Switch back to DISABLE mode after collecting
+		ukc_enter_disable_mode();
 		debug("ddrd: collecting results\n");
 
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
@@ -950,7 +950,7 @@ public:
 	{
 		ClearOutput();
 		active_for_group_ = false;
-		ukc_enter_monitor_mode();
+		ukc_enter_disable_mode();
 	}
 
 private:
