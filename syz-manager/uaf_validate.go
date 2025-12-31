@@ -41,8 +41,10 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
 		Debug:             *flagDebug,
 		RepeatCount:       cfg.RepeatCount,
+		VerifyRepeatTimes: cfg.VerifyRepeatTimes,
 		Workdir:           mgr.cfg.Workdir,
 		TargetVarNamePair: cfg.TargetVarNamePair,
+		DisableAsyncSplit: cfg.DisableAsyncSplit,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -233,8 +235,10 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
 		Debug:             *flagDebug,
 		RepeatCount:       cfg.RepeatCount,
+		VerifyRepeatTimes: cfg.VerifyRepeatTimes,
 		Workdir:           mgr.cfg.Workdir,
 		TargetVarNamePair: cfg.TargetVarNamePair,
+		DisableAsyncSplit: cfg.DisableAsyncSplit,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()

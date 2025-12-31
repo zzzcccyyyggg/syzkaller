@@ -93,16 +93,15 @@ When DDRD (race/UAF detection) is enabled for a barrier group, the runner coordi
      * Resets detector state to prepare for the new barrier group.
    - Marks `BarrierGroupState::ddrd_active = true` and records the execution in `active_barriers_`.
 
-2. **Executor-Side Early Exit** — During barrier member execution:
-   - Each executor process calls `ddrd_prepare_for_request()` as usual.
-   - For barrier requests (`flag_barrier == true`), this function **returns early** without initializing any DDRD state, since all management happens at the runner level.
+2. **Executor-Side Execution** — During barrier member execution:
+   - DDRD management is handled entirely at the runner level for barrier requests.
    - The executor proceeds with normal program execution; trace data is collected by the kernel module in LOG mode.
 
 3. **Post-Completion Collection** — After all barrier members finish:
    - `Runner::CheckBarrierCompletions()` (called from the main loop) detects group completion.
    - If `ddrd_active` is true, calls `RunnerDdrdController::CollectResults()`:
-     * Switches UKC device back to MONITOR mode.
-     * Analyzes trace data via `race_detector_analyze_and_generate_uaf_infos()`.
+     * Switches UKC device to DISABLE mode via `ukc_enter_disable_mode()`.
+     * Analyzes trace data via `race_detector_analyze_and_generate_race_infos()`.
      * Materializes extended thread histories if requested.
      * Stores results in the controller's internal `DdrdOutputState`.
 
@@ -119,7 +118,7 @@ When DDRD (race/UAF detection) is enabled for a barrier group, the runner coordi
 5. **Cleanup** — After all results are sent:
    - Calls `RunnerDdrdController::ResetAfterGroup()`:
      * Clears internal output state.
-     * Ensures UKC device is in MONITOR mode.
+     * Ensures UKC device is in DISABLE mode via `ukc_enter_disable_mode()`.
      * Prepares for the next barrier group.
    - Removes the active barrier record from `active_barriers_`.
 

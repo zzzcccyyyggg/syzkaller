@@ -301,6 +301,9 @@ type UAFValidateConfig struct {
 	DelayRetryBudget              int `json:"delay_retry_budget"`
 	TimeoutSeconds                int `json:"timeout_seconds"`
 	RepeatCount                   int `json:"repeat_count"`
+	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
+	// Defaults to 10 if unset or zero.
+	VerifyRepeatTimes             int `json:"verify_repeat_times,omitempty"`
 	ExecutorProgramTimeoutSeconds int `json:"executor_program_timeout_seconds,omitempty"`
 	ExecutorSyscallTimeoutMillis  int `json:"executor_syscall_timeout_millis,omitempty"`
 	// ContinuousMode enables incremental corpus reloading instead of one-shot validation.
@@ -317,6 +320,11 @@ type UAFValidateConfig struct {
 	// When set, only entries containing this VarName pair are validated,
 	// and all skip logic (invalid/validated/HB) is bypassed for debugging purposes.
 	TargetVarNamePair string `json:"target_varname_pair,omitempty"`
+	// DisableAsyncSplit disables the async call splitting during verification phase.
+	// By default (false), each program pair (2 programs) is expanded to 4 programs
+	// by duplicating each with async calls marked, maximizing race triggering.
+	// When enabled (true), programs are used as-is without async splitting.
+	DisableAsyncSplit bool `json:"disable_async_split,omitempty"`
 }
 
 type FocusArea struct {

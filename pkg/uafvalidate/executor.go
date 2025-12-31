@@ -160,15 +160,20 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	// Use different program preparation based on phase:
 	// - Discovery phase (TargetPair == nil): use original programs
 	// - Verification phase (TargetPair != nil): split into sync/async parts for true concurrency
+	//   (unless DisableAsyncSplit is set)
 	var programs []*prog.Prog
-	if execReq.TargetPair != nil {
+	if execReq.TargetPair != nil && !e.cfg.DisableAsyncSplit {
 		// Verification phase: split programs to maximize race triggering
 		programs = barrierProgramsForVerify(entry, mask)
 		log.Logf(1, "uafvalidate: vm=%d verification phase, split programs: original=%d split=%d",
 			vmIndex, participants, len(programs))
 	} else {
-		// Discovery phase: use original programs
+		// Discovery phase or async split disabled: use original programs
 		programs = barrierPrograms(entry, mask)
+		if execReq.TargetPair != nil && e.cfg.DisableAsyncSplit {
+			log.Logf(1, "uafvalidate: vm=%d verification phase, async split disabled, using %d programs",
+				vmIndex, len(programs))
+		}
 	}
 
 	// Update participants count based on actual programs

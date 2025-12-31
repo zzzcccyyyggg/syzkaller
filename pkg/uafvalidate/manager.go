@@ -32,7 +32,7 @@ type ExecutionRequest struct {
 	StopOnSuccess bool
 
 	// Per-pair computed delays for verification phase
-	// StartDelayUs: min(original, runtime) - used for barrier start delay (nanosleep in executor)
+	// StartDelayUs: original delay - used for barrier start delay (nanosleep in executor), same as discovery phase
 	// AccessDelayUs: max(original, runtime) - used for UAF access delay (udelay in kernel)
 	StartDelayUs  int64
 	AccessDelayUs int64
@@ -41,7 +41,7 @@ type ExecutionRequest struct {
 // StablePairWithDelays extends MayUAFPair with computed delay values for verification
 type StablePairWithDelays struct {
 	Pair          ddrd.MayUAFPair
-	StartDelayUs  int64 // min(original TimeDiff, runtime TimeDiff) in microseconds
+	StartDelayUs  int64 // original TimeDiff in microseconds (same as discovery phase)
 	AccessDelayUs int64 // max(original TimeDiff, runtime TimeDiff) in microseconds
 }
 
@@ -632,7 +632,7 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 }
 
 // collectStablePairsWithDelays returns stable pairs with computed delays:
-// - StartDelayUs: min(original TimeDiff, runtime TimeDiff) in microseconds
+// - StartDelayUs: original TimeDiff in microseconds (same as discovery phase)
 // - AccessDelayUs: max(original TimeDiff, runtime TimeDiff) in microseconds
 func collectStablePairsWithDelays(
 	latest map[string]ddrd.MayUAFPair,
@@ -684,18 +684,18 @@ func collectStablePairsWithDelays(
 			origTD = runtimeTD // fallback if not recorded
 		}
 
-		// Compute min and max
-		var minTD, maxTD uint64
-		if runtimeTD < origTD {
-			minTD = runtimeTD
-			maxTD = origTD
-		} else {
-			minTD = origTD
+		// Compute max for access delay
+		var maxTD uint64
+		if runtimeTD > origTD {
 			maxTD = runtimeTD
+		} else {
+			maxTD = origTD
 		}
 
 		// Convert to microseconds (TimeDiff is in nanoseconds)
-		startDelayUs := int64(minTD / 1000)
+		// StartDelayUs: use original delay (same as discovery phase)
+		// AccessDelayUs: use max(original, runtime) for kernel udelay
+		startDelayUs := int64(origTD / 1000)
 		accessDelayUs := int64(maxTD / 1000)
 
 		result = append(result, StablePairWithDelays{
@@ -817,7 +817,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			Entry:         task.entry,
 			Delays:        sm.delay.BuildDelays(task.entry),
 			TargetPair:    &pairCopy,
-			RepeatTimes:   10,
+			RepeatTimes:   sm.cfg.VerifyRepeatTimes,
 			DisableDdrd:   true,
 			StopOnSuccess: true,
 		}
@@ -909,7 +909,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 }
 
 // runVerificationPhaseWithDelays runs verification using per-pair computed delays:
-// - StartDelayUs (min of original/runtime) for barrier start delay
+// - StartDelayUs (original delay, same as discovery) for barrier start delay
 // - AccessDelayUs (max of original/runtime) for kernel UAF access delay
 func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
 	debugMode := sm.cfg.TargetVarNamePair != ""
@@ -986,7 +986,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			Entry:         task.entry,
 			Delays:        startDelays,
 			TargetPair:    &pairCopy,
-			RepeatTimes:   10,
+			RepeatTimes:   sm.cfg.VerifyRepeatTimes,
 			DisableDdrd:   true,
 			StopOnSuccess: true,
 			StartDelayUs:  spd.StartDelayUs,

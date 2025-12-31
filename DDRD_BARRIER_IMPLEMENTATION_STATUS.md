@@ -6,7 +6,7 @@
 - **RunnerDdrdController** 类实现完整
   - `PrepareForGroup()`: 在派发前初始化 DDRD (LOG 模式、清空 trace、reset detector)
   - `CollectResults()`: 收集所有 barrier 成员完成后的 UAF pairs
-  - `ResetAfterGroup()`: 清理状态，恢复 MONITOR 模式
+  - `ResetAfterGroup()`: 清理状态，恢复 DISABLE 模式
   - 支持扩展历史收集
 
 ### 2. Barrier 派发集成 ✅
@@ -21,7 +21,7 @@
 - `CheckBarrierCompletions()` 检测整组完成后统一收集 DDRD 并 Flush 全部暂存结果（仅 master 注入 DDRD）
 
 ### 4. Executor 侧修改 ✅
-- `ddrd_prepare_for_request()` 在 barrier 请求时早退
+- Barrier 请求的 DDRD 管理完全由 Runner 层处理
 - `g_ddrd_runner_output` 指针机制用于 runner 注入
 - `ddrd_build_output()` 优先使用 runner 注入的输出
 - 条件编译防护避免类型重复定义
@@ -133,5 +133,4 @@ ddrd: pair[0] free_access=0x... use_access=0x...
 - **Runner DDRD 控制器与暂存逻辑**: `executor/executor_runner.h` (查找 `RunnerDdrdController`, `StagedBarrierResult`, `FlushPendingResult`)
 - **Barrier 派发**: `executor/executor_runner.h::TryDispatchBarrier()` (~line 1200)
 - **完成跟踪**: `executor/executor_runner.h::CheckBarrierCompletions()` (~line 1160)
-- **Executor 早退**: `executor/executor.cc::ddrd_prepare_for_request()` (~line 410)
-- **结果注入机制**: `executor/executor.cc::ddrd_build_output()` (~line 530)
+- **结果注入机制**: `executor/executor.cc::ddrd_build_output()` (~line 380)

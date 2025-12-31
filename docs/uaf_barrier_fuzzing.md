@@ -107,7 +107,7 @@ Extend existing manager⇄fuzzer sync payloads:
 
 ### 7.4 Executor
 - Ensure `trace_manager_clear` uses `clear_trace` fast path (fall back to `O_TRUNC` if unavailable).
-- Maintain master-only LOG transitions; continue to reset controller state in parent (`ukc_enter_monitor_mode`).
+- Maintain master-only LOG transitions; continue to reset controller state in parent (`ukc_enter_disable_mode`).
 - Serialize DDRD output via `rpc::DdrdRaw`; update `finish_output` to include new offset only when data present (already implemented in modified tree).
 
 ### 7.5 Build & Config

@@ -39,6 +39,15 @@ For other OS kernels check:
 - [Tech talks and articles](docs/talks.md)
 - [Research work based on syzkaller](docs/research.md)
 
+### DDRD Extension (UAF/Race Detection)
+
+This fork includes DDRD (Data Race / UAF Detector) extensions for barrier-synchronized fuzzing:
+
+- [**DDRD Documentation Index**](docs/DDRD_DOCUMENTATION_INDEX.md) - Start here for all DDRD docs
+- [DDRD Implementation Status](DDRD_BARRIER_IMPLEMENTATION_STATUS.md) - Current progress
+- [UAF Barrier Fuzzing Design](docs/uaf_barrier_fuzzing.md) - High-level architecture
+- [DDRD Tools Usage Guide](docs/ddrd_tools_usage.md) - Operational guide
+
 ## Disclaimer
 
 This is not an official Google product.
