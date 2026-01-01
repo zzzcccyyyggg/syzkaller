@@ -90,6 +90,28 @@ func SetupExecProg(vmInst *vm.Instance, mgrCfg *mgrconfig.Config, reporter *repo
 	return ret, nil
 }
 
+// SetupExecProgWithBinaries creates an ExecProgInstance using pre-existing binary paths.
+// This is useful for snapshot restore scenarios where the binaries are already in the VM
+// and we don't need to copy them again, which saves significant time (avoids SCP).
+func SetupExecProgWithBinaries(vmInst *vm.Instance, mgrCfg *mgrconfig.Config, reporter *report.Reporter,
+	execprogBin, executorBin string, opt *OptionalConfig) (*ExecProgInstance, error) {
+	ret := &ExecProgInstance{
+		execprogBin: execprogBin,
+		executorBin: executorBin,
+		reporter:    reporter,
+		mgrCfg:      mgrCfg,
+		VMInstance:  vmInst,
+	}
+	if opt != nil {
+		ret.OptionalConfig = *opt
+		// For snapshot restore, we assume strace is already in the VM if it was used before
+	}
+	if ret.Logf == nil {
+		ret.Logf = func(int, string, ...interface{}) {}
+	}
+	return ret, nil
+}
+
 func CreateExecProgInstance(vmPool *vm.Pool, vmIndex int, mgrCfg *mgrconfig.Config,
 	reporter *report.Reporter, opt *OptionalConfig) (*ExecProgInstance, error) {
 	vmInst, err := vmPool.Create(context.Background(), vmIndex)
@@ -127,6 +149,20 @@ func (inst *ExecProgInstance) ExecutorBinary() string {
 		return ""
 	}
 	return inst.executorBin
+}
+
+// ExecprogBin returns the path to the execprog binary within the VM.
+func (inst *ExecProgInstance) ExecprogBin() string {
+	if inst == nil {
+		return ""
+	}
+	return inst.execprogBin
+}
+
+// ExecutorBin returns the path to the executor binary within the VM.
+// This is an alias for ExecutorBinary() for consistency.
+func (inst *ExecProgInstance) ExecutorBin() string {
+	return inst.ExecutorBinary()
 }
 
 // Reporter returns the reporter used by the execprog instance.

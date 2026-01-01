@@ -575,6 +575,17 @@ func (e *ExecutorAdapter) Close() error {
 	return e.inst.VMInstance.Close()
 }
 
+// CloseExecutorOnly is a no-op that keeps the VM running.
+// This is used for snapshot mode where we want to reuse the VM.
+// The actual cleanup (RPC connections etc) happens when the next Run() is called
+// which will re-establish connections as needed.
+func (e *ExecutorAdapter) CloseExecutorOnly() error {
+	// No-op: we intentionally don't close anything here.
+	// The VM stays running, and new SSH/executor connections will be
+	// established when the snapshot is restored and SetupExecProg is called.
+	return nil
+}
+
 func barrierMask(entry *fuzzer.UAFCorpusEntry) uint64 {
 	if entry == nil {
 		return 0

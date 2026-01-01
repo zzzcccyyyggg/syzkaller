@@ -93,28 +93,30 @@ type Pool struct {
 }
 
 type instance struct {
-	index      int
-	cfg        *Config
-	target     *targets.Target
-	archConfig *archConfig
-	version    string
-	args       []string
-	image      string
-	debug      bool
-	os         string
-	workdir    string
+	index       int
+	cfg         *Config
+	target      *targets.Target
+	archConfig  *archConfig
+	version     string
+	args        []string
+	image       string
+	debug       bool
+	os          string
+	workdir     string
+	baseWorkdir string // Fixed base workdir for persistent files like disk overlays
 	vmimpl.SSHOptions
-	timeouts    targets.Timeouts
-	monport     int
-	forwardPort int
-	mon         net.Conn
-	monEnc      *json.Encoder
-	monDec      *json.Decoder
-	rpipe       io.ReadCloser
-	wpipe       io.WriteCloser
-	qemu        *exec.Cmd
-	merger      *vmimpl.OutputMerger
-	files       map[string]string
+	timeouts           targets.Timeouts
+	monport            int
+	forwardPort        int
+	mon                net.Conn
+	monEnc             *json.Encoder
+	monDec             *json.Decoder
+	rpipe              io.ReadCloser
+	wpipe              io.WriteCloser
+	qemu               *exec.Cmd
+	merger             *vmimpl.OutputMerger
+	files              map[string]string
+	loadSnapshotOnBoot string // If set, QEMU will load this snapshot on startup
 	*snapshot
 }
 
@@ -372,6 +374,261 @@ func (pool *Pool) Create(ctx context.Context, workdir string, index int) (vmimpl
 	}
 }
 
+// CreateWithImage creates a new VM instance using a custom image path.
+func (pool *Pool) CreateWithImage(ctx context.Context, workdir string, index int, imagePath string) (vmimpl.Instance, error) {
+	log.Logf(0, "qemu: vm %d creating with custom image '%s'", index, imagePath)
+	sshkey := pool.env.SSHKey
+	sshuser := pool.env.SSHUser
+
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inst, err := pool.ctorWithImage(workdir, sshkey, sshuser, index, imagePath)
+		if err == nil {
+			return inst, nil
+		}
+		if errors.Is(err, vmimpl.ErrCantSSH) {
+			return nil, err
+		}
+		if i < 1000 && strings.Contains(err.Error(), "ould not set up host forwarding rule") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Device or resource busy") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Address already in use") {
+			continue
+		}
+		return nil, err
+	}
+}
+
+// CreateWithSnapshotAndImage creates a new VM with a custom image that loads a snapshot on boot.
+func (pool *Pool) CreateWithSnapshotAndImage(ctx context.Context, workdir string, index int, snapshotName, imagePath string) (vmimpl.Instance, error) {
+	log.Logf(0, "qemu: vm %d creating with snapshot '%s' and custom image '%s'", index, snapshotName, imagePath)
+	sshkey := pool.env.SSHKey
+	sshuser := pool.env.SSHUser
+
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inst, err := pool.ctorWithSnapshotAndImage(workdir, sshkey, sshuser, index, snapshotName, imagePath)
+		if err == nil {
+			return inst, nil
+		}
+		if errors.Is(err, vmimpl.ErrCantSSH) {
+			return nil, err
+		}
+		if i < 1000 && strings.Contains(err.Error(), "ould not set up host forwarding rule") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Device or resource busy") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Address already in use") {
+			continue
+		}
+		return nil, err
+	}
+}
+
+// CreateWithSnapshot creates a new VM instance that loads a snapshot on boot.
+// This is much faster than booting from scratch and then calling LoadVMSnapshot.
+func (pool *Pool) CreateWithSnapshot(ctx context.Context, workdir string, index int, snapshotName string) (vmimpl.Instance, error) {
+	log.Logf(0, "qemu: vm %d creating with snapshot '%s' (-loadvm)", index, snapshotName)
+	sshkey := pool.env.SSHKey
+	sshuser := pool.env.SSHUser
+
+	for i := 0; ; i++ {
+		if err := ctx.Err(); err != nil {
+			return nil, err
+		}
+		inst, err := pool.ctorWithSnapshot(workdir, sshkey, sshuser, index, snapshotName)
+		if err == nil {
+			return inst, nil
+		}
+		if errors.Is(err, vmimpl.ErrCantSSH) {
+			return nil, err
+		}
+		if i < 1000 && strings.Contains(err.Error(), "ould not set up host forwarding rule") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Device or resource busy") {
+			continue
+		}
+		if i < 1000 && strings.Contains(err.Error(), "Address already in use") {
+			continue
+		}
+		return nil, err
+	}
+}
+
+// ctorWithSnapshot is similar to ctor but sets loadSnapshotOnBoot to load a snapshot on startup.
+// Snapshot mode is disabled to allow savevm/loadvm to work correctly.
+func (pool *Pool) ctorWithSnapshot(workdir, sshkey, sshuser string, index int, snapshotName string) (*instance, error) {
+	sshPort := vmimpl.UnusedTCPPort()
+	if pool.cfg.SSHPort > 0 {
+		sshPort = pool.cfg.SSHPort + index
+	}
+	// Create a copy of cfg with Snapshot disabled for savevm support
+	cfgCopy := *pool.cfg
+	cfgCopy.Snapshot = false
+	inst := &instance{
+		index:              index,
+		cfg:                &cfgCopy,
+		target:             pool.target,
+		archConfig:         pool.archConfig,
+		version:            pool.version,
+		image:              pool.env.Image,
+		debug:              pool.env.Debug,
+		os:                 pool.env.OS,
+		timeouts:           pool.env.Timeouts,
+		workdir:            workdir,
+		baseWorkdir:        pool.env.Workdir,
+		loadSnapshotOnBoot: snapshotName,
+		SSHOptions: vmimpl.SSHOptions{
+			Addr: "localhost",
+			Port: sshPort,
+			Key:  sshkey,
+			User: sshuser,
+		},
+	}
+	if st, err := os.Stat(inst.image); err == nil && st.Size() == 0 {
+		inst.image = ""
+	}
+	closeInst := inst
+	defer func() {
+		if closeInst != nil {
+			closeInst.Close()
+		}
+	}()
+
+	var err error
+	inst.rpipe, inst.wpipe, err = osutil.LongPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := inst.boot(); err != nil {
+		return nil, err
+	}
+
+	log.Logf(0, "qemu: vm %d snapshot '%s' loaded successfully via -loadvm, SSH ready", inst.index, snapshotName)
+	closeInst = nil
+	return inst, nil
+}
+
+// ctorWithImage is similar to ctor but uses a custom image path.
+// Snapshot mode is disabled to allow savevm/loadvm to work correctly.
+func (pool *Pool) ctorWithImage(workdir, sshkey, sshuser string, index int, imagePath string) (*instance, error) {
+	sshPort := vmimpl.UnusedTCPPort()
+	if pool.cfg.SSHPort > 0 {
+		sshPort = pool.cfg.SSHPort + index
+	}
+	// Create a copy of cfg with Snapshot disabled for savevm support
+	cfgCopy := *pool.cfg
+	cfgCopy.Snapshot = false
+	inst := &instance{
+		index:       index,
+		cfg:         &cfgCopy,
+		target:      pool.target,
+		archConfig:  pool.archConfig,
+		version:     pool.version,
+		image:       imagePath, // Use custom image path
+		debug:       pool.env.Debug,
+		os:          pool.env.OS,
+		timeouts:    pool.env.Timeouts,
+		workdir:     workdir,
+		baseWorkdir: pool.env.Workdir,
+		SSHOptions: vmimpl.SSHOptions{
+			Addr: "localhost",
+			Port: sshPort,
+			Key:  sshkey,
+			User: sshuser,
+		},
+	}
+	if st, err := os.Stat(inst.image); err == nil && st.Size() == 0 {
+		inst.image = ""
+	}
+	closeInst := inst
+	defer func() {
+		if closeInst != nil {
+			closeInst.Close()
+		}
+	}()
+
+	var err error
+	inst.rpipe, inst.wpipe, err = osutil.LongPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := inst.boot(); err != nil {
+		return nil, err
+	}
+
+	log.Logf(0, "qemu: vm %d booted with custom image '%s', SSH ready", inst.index, imagePath)
+	closeInst = nil
+	return inst, nil
+}
+
+// ctorWithSnapshotAndImage creates a VM with custom image that loads a snapshot on boot.
+// Snapshot mode is disabled to allow savevm/loadvm to work correctly.
+func (pool *Pool) ctorWithSnapshotAndImage(workdir, sshkey, sshuser string, index int, snapshotName, imagePath string) (*instance, error) {
+	sshPort := vmimpl.UnusedTCPPort()
+	if pool.cfg.SSHPort > 0 {
+		sshPort = pool.cfg.SSHPort + index
+	}
+	// Create a copy of cfg with Snapshot disabled for savevm support
+	cfgCopy := *pool.cfg
+	cfgCopy.Snapshot = false
+	inst := &instance{
+		index:              index,
+		cfg:                &cfgCopy,
+		target:             pool.target,
+		archConfig:         pool.archConfig,
+		version:            pool.version,
+		image:              imagePath, // Use custom image path
+		debug:              pool.env.Debug,
+		os:                 pool.env.OS,
+		timeouts:           pool.env.Timeouts,
+		workdir:            workdir,
+		baseWorkdir:        pool.env.Workdir,
+		loadSnapshotOnBoot: snapshotName, // Load snapshot on boot
+		SSHOptions: vmimpl.SSHOptions{
+			Addr: "localhost",
+			Port: sshPort,
+			Key:  sshkey,
+			User: sshuser,
+		},
+	}
+	if st, err := os.Stat(inst.image); err == nil && st.Size() == 0 {
+		inst.image = ""
+	}
+	closeInst := inst
+	defer func() {
+		if closeInst != nil {
+			closeInst.Close()
+		}
+	}()
+
+	var err error
+	inst.rpipe, inst.wpipe, err = osutil.LongPipe()
+	if err != nil {
+		return nil, err
+	}
+
+	if err := inst.boot(); err != nil {
+		return nil, err
+	}
+
+	log.Logf(0, "qemu: vm %d snapshot '%s' loaded from image '%s', SSH ready", inst.index, snapshotName, imagePath)
+	closeInst = nil
+	return inst, nil
+}
+
 func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, error) {
 	// Determine SSH port: use configured port if specified, otherwise use random
 	sshPort := vmimpl.UnusedTCPPort()
@@ -379,16 +636,17 @@ func (pool *Pool) ctor(workdir, sshkey, sshuser string, index int) (*instance, e
 		sshPort = pool.cfg.SSHPort + index
 	}
 	inst := &instance{
-		index:      index,
-		cfg:        pool.cfg,
-		target:     pool.target,
-		archConfig: pool.archConfig,
-		version:    pool.version,
-		image:      pool.env.Image,
-		debug:      pool.env.Debug,
-		os:         pool.env.OS,
-		timeouts:   pool.env.Timeouts,
-		workdir:    workdir,
+		index:       index,
+		cfg:         pool.cfg,
+		target:      pool.target,
+		archConfig:  pool.archConfig,
+		version:     pool.version,
+		image:       pool.env.Image,
+		debug:       pool.env.Debug,
+		os:          pool.env.OS,
+		timeouts:    pool.env.Timeouts,
+		workdir:     workdir,
+		baseWorkdir: pool.env.Workdir,
 		SSHOptions: vmimpl.SSHOptions{
 			Addr: "localhost",
 			Port: sshPort,
@@ -450,15 +708,37 @@ func (inst *instance) Close() error {
 }
 
 func (inst *instance) boot() error {
+	bootStart := time.Now()
 	inst.monport = vmimpl.UnusedTCPPort()
+	log.Logf(1, "qemu: vm %d boot: allocating QMP port took %v", inst.index, time.Since(bootStart))
+
+	argsStart := time.Now()
 	args, err := inst.buildQemuArgs()
 	if err != nil {
 		return err
+	}
+	log.Logf(1, "qemu: vm %d boot: building args took %v", inst.index, time.Since(argsStart))
+	// Always log disk-related args for debugging snapshot issues
+	var diskArgs []string
+	for i := 0; i < len(args); i++ {
+		if args[i] == "-hda" || args[i] == "-hdb" || args[i] == "-hdc" || args[i] == "-hdd" {
+			if i+1 < len(args) {
+				diskArgs = append(diskArgs, args[i]+" "+args[i+1])
+			}
+		}
+		if strings.HasPrefix(args[i], "-drive") {
+			diskArgs = append(diskArgs, args[i])
+		}
+	}
+	log.Logf(1, "qemu: vm %d boot disk args: %v", inst.index, diskArgs)
+	if inst.loadSnapshotOnBoot != "" {
+		log.Logf(1, "qemu: vm %d will load snapshot '%s' on boot", inst.index, inst.loadSnapshotOnBoot)
 	}
 	if inst.debug {
 		log.Logf(0, "running command: %v %#v", inst.cfg.Qemu, args)
 	}
 	inst.args = args
+	qemuStartTime := time.Now()
 	qemu := osutil.Command(inst.cfg.Qemu, args...)
 	qemu.Stdout = inst.wpipe
 	qemu.Stderr = inst.wpipe
@@ -468,6 +748,7 @@ func (inst *instance) boot() error {
 	inst.wpipe.Close()
 	inst.wpipe = nil
 	inst.qemu = qemu
+	log.Logf(1, "qemu: vm %d boot: QEMU process started in %v", inst.index, time.Since(qemuStartTime))
 	// Qemu has started.
 
 	// Start output merger.
@@ -499,13 +780,30 @@ func (inst *instance) boot() error {
 		}
 	}
 
-	if err := vmimpl.WaitForSSH(10*time.Minute*inst.timeouts.Scale, inst.SSHOptions,
-		inst.os, inst.merger.Err, false, inst.debug); err != nil {
+	// For snapshot restore, SSH should be available immediately
+	// Use fast polling instead of slow 5-second intervals
+	sshStart := time.Now()
+	var sshErr error
+	if inst.loadSnapshotOnBoot != "" {
+		// Fast path: snapshot restore, SSH should be ready very quickly
+		log.Logf(1, "qemu: vm %d boot: waiting for SSH (fast mode for snapshot restore)", inst.index)
+		sshErr = vmimpl.WaitForSSHFast(30*time.Second*inst.timeouts.Scale, inst.SSHOptions,
+			inst.os, inst.merger.Err, false, inst.debug)
+	} else {
+		// Normal boot, use standard SSH waiting
+		log.Logf(1, "qemu: vm %d boot: waiting for SSH (normal mode)", inst.index)
+		sshErr = vmimpl.WaitForSSH(10*time.Minute*inst.timeouts.Scale, inst.SSHOptions,
+			inst.os, inst.merger.Err, false, inst.debug)
+	}
+	log.Logf(1, "qemu: vm %d boot: SSH wait completed in %v", inst.index, time.Since(sshStart))
+
+	if sshErr != nil {
 		bootOutputStop <- true
 		<-bootOutputStop
-		return vmimpl.MakeBootError(err, bootOutput)
+		return vmimpl.MakeBootError(sshErr, bootOutput)
 	}
 	bootOutputStop <- true
+	log.Logf(1, "qemu: vm %d boot: total boot time: %v", inst.index, time.Since(bootStart))
 	return nil
 }
 
@@ -524,7 +822,22 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 		args = append(args, "-device", inst.archConfig.RngDev)
 	}
 	templateDir := filepath.Join(inst.workdir, "template")
-	args = append(args, splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)...)
+	qemuArgsExpanded := splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)
+	
+	// Create copies for disk files in qemu_args to avoid lock conflicts
+	// This is especially important when running multiple VMs in parallel
+	// Use baseWorkdir (fixed) instead of workdir (temporary) so copies persist across VM restarts
+	// Note: We use full qcow2 copies instead of overlays because savevm doesn't work reliably with overlays
+	copyDir := inst.baseWorkdir
+	if copyDir == "" {
+		copyDir = inst.workdir // fallback to workdir if baseWorkdir not set
+	}
+	qemuArgsWithCopies, err := createDiskCopiesForArgs(copyDir, inst.index, qemuArgsExpanded)
+	if err != nil {
+		log.Logf(0, "qemu: warning: failed to create disk copies: %v", err)
+		qemuArgsWithCopies = qemuArgsExpanded // Fall back to original args
+	}
+	args = append(args, qemuArgsWithCopies...)
 	args = append(args,
 		"-device", inst.cfg.NetDev+",netdev=net0",
 		"-netdev", fmt.Sprintf("user,id=net0,restrict=on,hostfwd=tcp:127.0.0.1:%v-:22", inst.Port),
@@ -541,15 +854,26 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 				"-drive", fmt.Sprintf("file=%v,if=none,format=raw,id=hd0", inst.image),
 			)
 		} else {
-			// inst.cfg.ImageDevice can contain spaces
-			imgline := strings.Split(inst.cfg.ImageDevice, " ")
-			imgline[0] = "-" + imgline[0]
-			if strings.HasSuffix(imgline[len(imgline)-1], "file=") {
-				imgline[len(imgline)-1] = imgline[len(imgline)-1] + inst.image
+			// Check if the image is qcow2 format (e.g., our copied files for snapshot support)
+			// If so, use -drive with explicit format to ensure savevm works correctly
+			if strings.HasSuffix(inst.image, ".qcow2") {
+				// Use -hda for now to maintain compatibility
+				// The qcow2 format should auto-detect
+				// TODO: If savevm still fails, try explicit format specification
+				args = append(args, "-hda", inst.image)
+				log.Logf(1, "qemu: vm %d using -hda for qcow2 image %s", inst.index, inst.image)
 			} else {
-				imgline = append(imgline, inst.image)
+				// Original behavior for non-qcow2 images
+				// inst.cfg.ImageDevice can contain spaces
+				imgline := strings.Split(inst.cfg.ImageDevice, " ")
+				imgline[0] = "-" + imgline[0]
+				if strings.HasSuffix(imgline[len(imgline)-1], "file=") {
+					imgline[len(imgline)-1] = imgline[len(imgline)-1] + inst.image
+				} else {
+					imgline = append(imgline, inst.image)
+				}
+				args = append(args, imgline...)
 			}
-			args = append(args, imgline...)
 		}
 		if inst.cfg.Snapshot {
 			args = append(args, "-snapshot")
@@ -598,6 +922,10 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 		}
 		args = append(args, snapshotArgs...)
 	}
+	// Add -loadvm argument if a snapshot should be loaded on boot
+	if inst.loadSnapshotOnBoot != "" {
+		args = append(args, "-loadvm", inst.loadSnapshotOnBoot)
+	}
 	return args, nil
 }
 
@@ -638,17 +966,190 @@ func splitArgs(str, templateDir string, index int) (args []string) {
 	return
 }
 
+// diskPathInfo represents a disk path found in qemu_args
+type diskPathInfo struct {
+	originalPath string // The original disk path
+	argIndex     int    // Index in the args array where this path was found
+	argType      string // Type of argument: "hda", "hdb", "hdc", "hdd", "drive"
+}
+
+// extractDiskPathsFromArgs parses QEMU arguments and extracts disk file paths.
+// It recognizes: -hda/-hdb/-hdc/-hdd and -drive file=xxx patterns
+func extractDiskPathsFromArgs(args []string) []diskPathInfo {
+	var disks []diskPathInfo
+	
+	for i, arg := range args {
+		// Check for -hda, -hdb, -hdc, -hdd
+		if arg == "-hda" || arg == "-hdb" || arg == "-hdc" || arg == "-hdd" {
+			if i+1 < len(args) {
+				diskPath := args[i+1]
+				// Skip if it's already a {{TEMPLATE}} reference
+				if !strings.Contains(diskPath, "{{TEMPLATE}}") && osutil.IsExist(diskPath) {
+					disks = append(disks, diskPathInfo{
+						originalPath: diskPath,
+						argIndex:     i + 1,
+						argType:      arg[1:], // "hda", "hdb", etc.
+					})
+				}
+			}
+		}
+		
+		// Check for -drive file=xxx pattern
+		if strings.HasPrefix(arg, "-drive") || (i > 0 && args[i-1] == "-drive") {
+			// Parse the drive options
+			if strings.Contains(arg, "file=") {
+				// Extract the file= part
+				parts := strings.Split(arg, ",")
+				for _, part := range parts {
+					if strings.HasPrefix(part, "file=") {
+						diskPath := strings.TrimPrefix(part, "file=")
+						// Skip if it's already a {{TEMPLATE}} reference
+						if !strings.Contains(diskPath, "{{TEMPLATE}}") && osutil.IsExist(diskPath) {
+							disks = append(disks, diskPathInfo{
+								originalPath: diskPath,
+								argIndex:     i,
+								argType:      "drive",
+							})
+						}
+					}
+				}
+			}
+		}
+	}
+	
+	return disks
+}
+
+// detectDiskFormat uses qemu-img to detect the format of a disk image
+func detectDiskFormat(diskPath string) string {
+	cmd := osutil.Command("qemu-img", "info", "--output=json", diskPath)
+	output, err := cmd.CombinedOutput()
+	if err != nil {
+		return "qcow2" // Default to qcow2
+	}
+	
+	var info struct {
+		Format string `json:"format"`
+	}
+	if err := json.Unmarshal(output, &info); err != nil {
+		return "qcow2"
+	}
+	return info.Format
+}
+
+// createDiskCopy creates a standalone qcow2 copy of a disk image for reliable snapshot support
+// Returns the path to the copied file
+func createDiskCopy(workdir string, index int, diskPath string, diskType string) (string, error) {
+	// Generate copy filename based on the original disk name
+	baseName := filepath.Base(diskPath)
+	ext := filepath.Ext(baseName)
+	nameWithoutExt := strings.TrimSuffix(baseName, ext)
+	copyPath := filepath.Join(workdir, fmt.Sprintf("vm-%d-%s-copy.qcow2", index, nameWithoutExt))
+	
+	// Check if copy already exists
+	if osutil.IsExist(copyPath) {
+		log.Logf(1, "qemu: reusing existing disk copy %s", copyPath)
+		return copyPath, nil
+	}
+	
+	log.Logf(0, "qemu: creating standalone qcow2 copy for %s -> %s (this may take a moment)", diskPath, copyPath)
+	
+	// Use qemu-img convert to create a standalone qcow2 copy
+	// This ensures savevm/loadvm work correctly (overlay mode has issues)
+	cmd := osutil.Command("qemu-img", "convert", "-O", "qcow2", diskPath, copyPath)
+	if output, err := cmd.CombinedOutput(); err != nil {
+		return "", fmt.Errorf("failed to create disk copy: %v, output: %s", err, output)
+	}
+	
+	log.Logf(1, "qemu: disk copy created successfully: %s", copyPath)
+	return copyPath, nil
+}
+
+// createDiskCopiesForArgs creates standalone qcow2 copies for all disks in QEMU args and returns modified args
+// This is used to avoid disk lock conflicts when running multiple VMs and ensure savevm/loadvm work correctly
+func createDiskCopiesForArgs(workdir string, index int, args []string) ([]string, error) {
+	disks := extractDiskPathsFromArgs(args)
+	if len(disks) == 0 {
+		return args, nil
+	}
+	
+	log.Logf(1, "qemu: found %d disk(s) in qemu_args that need copies", len(disks))
+	
+	// Create a copy of args to modify
+	newArgs := make([]string, len(args))
+	copy(newArgs, args)
+	
+	for _, disk := range disks {
+		copyPath, err := createDiskCopy(workdir, index, disk.originalPath, disk.argType)
+		if err != nil {
+			log.Logf(0, "qemu: failed to create copy for %s: %v, using original", disk.originalPath, err)
+			continue
+		}
+		
+		// Replace the path in args
+		if disk.argType == "drive" {
+			// For -drive file=xxx, replace the file= part and ensure format=qcow2
+			newArg := strings.Replace(newArgs[disk.argIndex], 
+				"file="+disk.originalPath, "file="+copyPath, 1)
+			// Add format=qcow2 if not already present
+			if !strings.Contains(newArg, "format=") {
+				newArg = strings.Replace(newArg, "file="+copyPath, "file="+copyPath+",format=qcow2", 1)
+			}
+			newArgs[disk.argIndex] = newArg
+		} else {
+			// For -hda/-hdb/-hdc/-hdd, we need to convert to -drive syntax 
+			// with explicit qcow2 format for savevm to work properly.
+			
+			// Get the drive index from argType (hda=0, hdb=1, hdc=2, hdd=3)
+			driveIndex := 0
+			switch disk.argType {
+			case "hda":
+				driveIndex = 0
+			case "hdb":
+				driveIndex = 1
+			case "hdc":
+				driveIndex = 2
+			case "hdd":
+				driveIndex = 3
+			}
+			
+			// Replace the -hdX arg with -drive syntax using if=ide for compatibility
+			// The path was at argIndex, and -hdX was at argIndex-1
+			newArgs[disk.argIndex-1] = "-drive"
+			// Use if=ide,index=N to match the original -hdX behavior
+			newArgs[disk.argIndex] = fmt.Sprintf("file=%s,format=qcow2,if=ide,index=%d", copyPath, driveIndex)
+			log.Logf(1, "qemu: converted -%s %s to -drive with qcow2 format", disk.argType, copyPath)
+		}
+		
+		log.Logf(1, "qemu: disk %s -> copy %s", disk.originalPath, copyPath)
+	}
+	
+	return newArgs, nil
+}
+
 func (inst *instance) Forward(port int) (string, error) {
 	if port == 0 {
 		return "", fmt.Errorf("vm/qemu: forward port is zero")
 	}
 	if !inst.target.HostFuzzer {
 		if inst.forwardPort != 0 {
+			// Port already set - this can happen after snapshot restore.
+			// If it's the same port, just return success.
+			if inst.forwardPort == port {
+				return fmt.Sprintf("localhost:%v", port), nil
+			}
 			return "", fmt.Errorf("vm/qemu: forward port already set")
 		}
 		inst.forwardPort = port
 	}
 	return fmt.Sprintf("localhost:%v", port), nil
+}
+
+// ResetForwardPort resets the forward port state.
+// This is useful after snapshot restore when the port forwarding
+// needs to be re-established.
+func (inst *instance) ResetForwardPort() {
+	inst.forwardPort = 0
 }
 
 func (inst *instance) targetDir() string {

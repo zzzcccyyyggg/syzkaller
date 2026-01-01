@@ -67,6 +67,46 @@ func WaitForSSH(timeout time.Duration, opts SSHOptions, OS string, stop chan err
 
 var ErrCantSSH = fmt.Errorf("can't ssh into the instance")
 
+// WaitForSSHFast is like WaitForSSH but with faster polling for snapshot restore scenarios.
+// It skips the initial 5-second sleep and uses 500ms polling intervals instead of 5 seconds.
+// This is suitable when SSH is expected to be available almost immediately (e.g., after snapshot restore).
+func WaitForSSHFast(timeout time.Duration, opts SSHOptions, OS string, stop chan error, systemSSHCfg, debug bool) error {
+	pwd := "pwd"
+	if OS == targets.Windows {
+		pwd = "dir"
+	}
+	startTime := time.Now()
+	// No initial sleep - try immediately
+	for {
+		args := append(SSHArgs(debug, opts.Key, opts.Port, systemSSHCfg), opts.User+"@"+opts.Addr, pwd)
+		if debug {
+			log.Logf(0, "running ssh (fast): %#v", args)
+		}
+		_, err := osutil.RunCmd(10*time.Second, "", "ssh", args...)
+		if err == nil {
+			log.Logf(1, "SSH connected in %v (fast mode)", time.Since(startTime))
+			return nil
+		}
+		if debug {
+			log.Logf(0, "ssh failed: %v", err)
+		}
+		if time.Since(startTime) > timeout {
+			return &osutil.VerboseError{
+				Err:    ErrCantSSH,
+				Output: []byte(err.Error()),
+			}
+		}
+		// Fast polling: 500ms instead of 5 seconds
+		select {
+		case <-time.After(500 * time.Millisecond):
+		case err := <-stop:
+			return err
+		case <-Shutdown:
+			return fmt.Errorf("shutdown in progress")
+		}
+	}
+}
+
 func SSHArgs(debug bool, sshKey string, port int, systemSSHCfg bool) []string {
 	return sshArgs(debug, sshKey, "-p", port, 0, systemSSHCfg)
 }

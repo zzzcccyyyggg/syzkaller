@@ -53,6 +53,18 @@ type qmpResponse struct {
 	}
 }
 
+// qmpReconnect closes the current QMP connection (if any) and establishes a new one.
+// This is useful when the connection becomes stale or encounters errors.
+func (inst *instance) qmpReconnect() error {
+	if inst.mon != nil {
+		inst.mon.Close()
+		inst.mon = nil
+		inst.monEnc = nil
+		inst.monDec = nil
+	}
+	return inst.qmpConnCheck()
+}
+
 func (inst *instance) qmpConnCheck() error {
 	if inst.mon != nil {
 		return nil
@@ -69,12 +81,14 @@ func (inst *instance) qmpConnCheck() error {
 
 	var banner qmpBanner
 	if err := monDec.Decode(&banner); err != nil {
+		conn.Close()
 		return err
 	}
 
 	inst.monEnc = monEnc
 	inst.monDec = monDec
 	if _, err := inst.doQmp(&qmpCommand{Execute: "qmp_capabilities"}); err != nil {
+		conn.Close()
 		inst.monEnc = nil
 		inst.monDec = nil
 		return err
@@ -142,4 +156,108 @@ func (inst *instance) hmp(cmd string, cpu int) (string, error) {
 		return "", fmt.Errorf("qemu hmp command '%s': %w", cmd, err)
 	}
 	return resp.(string), nil
+}
+
+// SaveVMSnapshot saves the current VM state to a named snapshot using QEMU's savevm command.
+// This requires the disk image to be in qcow2 format (not raw).
+// The -snapshot flag must NOT be used for this to work properly.
+func (inst *instance) SaveVMSnapshot(name string) error {
+	log.Logf(0, "qemu: vm %d saving snapshot '%s'", inst.index, name)
+	
+	// First, check the current block device status
+	infoOutput, infoErr := inst.hmp("info block", 0)
+	if infoErr != nil {
+		log.Logf(0, "qemu: vm %d failed to get block info: %v", inst.index, infoErr)
+	} else {
+		log.Logf(0, "qemu: vm %d block devices before savevm:\n%s", inst.index, infoOutput)
+	}
+	
+	output, err := inst.hmp(fmt.Sprintf("savevm %s", name), 0)
+	if err != nil {
+		return fmt.Errorf("savevm failed: %w", err)
+	}
+	// Log the output regardless of debug mode to help diagnose snapshot issues
+	log.Logf(0, "qemu: vm %d savevm output: '%s' (empty means success)", inst.index, output)
+	
+	if strings.Contains(output, "Error") || strings.Contains(output, "error") {
+		return fmt.Errorf("savevm failed: %s", output)
+	}
+	
+	// Verify the snapshot was actually saved by listing snapshots
+	snapshotList, listErr := inst.hmp("info snapshots", 0)
+	if listErr != nil {
+		log.Logf(0, "qemu: vm %d failed to list snapshots after save: %v", inst.index, listErr)
+	} else {
+		log.Logf(0, "qemu: vm %d snapshots after save:\n%s", inst.index, snapshotList)
+		// Check if our snapshot is in the list
+		if !strings.Contains(snapshotList, name) {
+			return fmt.Errorf("savevm claimed success but snapshot '%s' not found in snapshot list", name)
+		}
+	}
+	
+	log.Logf(0, "qemu: vm %d snapshot '%s' saved successfully", inst.index, name)
+	return nil
+}
+
+// LoadVMSnapshot restores the VM state from a named snapshot using QEMU's loadvm command.
+// After loading, all network connections (including SSH) will be broken and need to be re-established.
+// Note: loadvm implicitly stops the VM and restores the CPU state from the snapshot.
+func (inst *instance) LoadVMSnapshot(name string) error {
+	if inst.debug {
+		log.Logf(0, "qemu: loading VM snapshot: %s", name)
+	}
+
+	// Step 1: Stop the VM before loading snapshot to ensure consistent state
+	// This is recommended by QEMU documentation to avoid issues during migration
+	stopOutput, stopErr := inst.hmp("stop", 0)
+	if stopErr != nil {
+		log.Logf(1, "qemu: warning: failed to stop VM before loadvm: %v", stopErr)
+		// Continue anyway, as loadvm might still work
+	} else if inst.debug {
+		log.Logf(0, "qemu: VM stopped, output: %s", stopOutput)
+	}
+
+	// Step 2: Load the snapshot
+	output, err := inst.hmp(fmt.Sprintf("loadvm %s", name), 0)
+	if err != nil {
+		// If we get a connection error, the QEMU process may have crashed
+		if strings.Contains(err.Error(), "closed") || strings.Contains(err.Error(), "connection") {
+			log.Logf(1, "qemu: loadvm got connection error (QEMU may have crashed): %v", err)
+			// Try to reconnect to see if QEMU is still alive
+			if reconnErr := inst.qmpReconnect(); reconnErr != nil {
+				return fmt.Errorf("loadvm failed (QEMU process likely crashed): loadvm error: %w, reconnect error: %v", err, reconnErr)
+			}
+			// If reconnection succeeded, QEMU is alive but loadvm may have partially completed
+			// Try to resume the VM
+			if _, contErr := inst.hmp("cont", 0); contErr != nil {
+				log.Logf(1, "qemu: warning: failed to resume VM after loadvm error: %v", contErr)
+			}
+			return fmt.Errorf("loadvm failed but QEMU still running: %w", err)
+		}
+		// Resume VM and return error
+		if _, contErr := inst.hmp("cont", 0); contErr != nil {
+			log.Logf(1, "qemu: warning: failed to resume VM after loadvm error: %v", contErr)
+		}
+		return fmt.Errorf("loadvm failed: %w", err)
+	}
+	if strings.Contains(output, "Error") {
+		// Resume VM and return error
+		if _, contErr := inst.hmp("cont", 0); contErr != nil {
+			log.Logf(1, "qemu: warning: failed to resume VM after loadvm error: %v", contErr)
+		}
+		return fmt.Errorf("loadvm failed: %s", output)
+	}
+
+	// Step 3: Resume the VM after successful loadvm
+	// Note: loadvm restores the VM to its paused/running state at snapshot time,
+	// but we explicitly resume to ensure it's running
+	if _, contErr := inst.hmp("cont", 0); contErr != nil {
+		log.Logf(1, "qemu: warning: failed to resume VM after loadvm: %v", contErr)
+		// This might not be critical if the VM was running when snapshot was taken
+	}
+
+	if inst.debug {
+		log.Logf(0, "qemu: snapshot loaded successfully: %s", name)
+	}
+	return nil
 }

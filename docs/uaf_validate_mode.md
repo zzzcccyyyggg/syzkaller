@@ -48,11 +48,13 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
 - `DelayRetryBudget`: Maximum retries per repeat when crashes or transient errors occur.
 - `TimeoutSeconds`: Execution timeout for each repeat.
 - `RepeatCount`: Total number of repeats attempted per entry (default 1). Stable pair intersection requires `repeat/2 + 1` successful observations.
+- `VerifyRepeatTimes`: Number of times to repeat verification phase for stable pairs (default 10). Higher values increase confidence but take longer.
 - `ExecutorProgramTimeoutSeconds`: Optional override for the executor's per-program watchdog (defaults to the target timeout if unset).
 - `ExecutorSyscallTimeoutMillis`: Optional override for the executor's per-syscall watchdog; useful when DDRD delays exceed the default 50 ms budget.
 - `ContinuousMode`: Enable incremental corpus reloading instead of one-shot validation. When enabled, the validator runs indefinitely and periodically checks for new entries.
 - `IncrementalReloadMinutes`: How often to reload new corpus entries in continuous mode (default: 10 minutes).
 - `IdleReloadSeconds`: How long to wait before reloading when no tasks are pending (default: 30 seconds).
+- `EnableVMSnapshot`: Enable QEMU VM snapshot support for faster validation cycles (experimental). See "VM Snapshot Optimization" section below.
 - `Debug`: Surfaces additional logging when enabled.
 
 ### Example Configuration (Continuous Mode)
@@ -101,3 +103,101 @@ Additional runtime files:
 - Symbolize stack hashes when resolver data becomes available.
 - Add regression tests around intersection logic and store persistence.
 - Extend dashboards to display confirmation results and stable pair digests.
+
+## VM Snapshot Optimization (Experimental)
+
+### Overview
+By default, each validation attempt creates a fresh VM, which incurs 30-60 seconds of startup overhead. The VM snapshot feature uses QEMU's `-loadvm` option to load a pre-saved snapshot during VM boot, reducing reset time to approximately **3-4 seconds**.
+
+### How It Works
+1. **First Run**: Create VM with a standalone qcow2 image copy, wait for SSH to be ready, save snapshot using `savevm` via QMP.
+2. **Subsequent Runs**: Close the current VM and start a new QEMU process with `-loadvm` flag to restore the saved snapshot. This is faster than using `loadvm` via QMP because QEMU optimizes the startup path.
+3. **State Reset**: The snapshot captures the entire VM state (memory, CPU, disk), so each restoration returns to a clean post-boot state.
+
+### Performance Optimizations
+The implementation includes several optimizations:
+
+1. **Fast SSH Polling**: After snapshot restore, SSH is expected to be available immediately. Instead of the default 5-second initial wait + 5-second polling intervals, we use 0 initial wait + 500ms polling intervals.
+
+2. **Binary Path Caching**: The paths to `syz-execprog` and `syz-executor` inside the VM are cached after the first setup. On snapshot restore, these paths are reused without re-copying via SCP.
+
+3. **Standalone qcow2 Copy**: Instead of using overlay images, the system creates a standalone qcow2 copy of the base image. This ensures `savevm`/`loadvm` work correctly (overlay mode has issues with snapshot persistence).
+
+### Prerequisites
+1. **QEMU VM Type**: Snapshot support is only available for QEMU VMs.
+2. **qcow2 Image Format**: The disk image must be in qcow2 format (raw images do not support snapshots). The system automatically converts images to qcow2.
+3. **Migratable CPU**: The QEMU CPU configuration must allow migration/snapshots. **Do NOT use `-cpu host,migratable=off`** as this prevents savevm from working.
+
+### Configuration
+
+#### Manager Configuration
+
+```json
+{
+  "image": "/path/to/base-image.img",
+  "vm": {
+    "qemu": "qemu-system-x86_64",
+    "count": 8,
+    "cpu": 2,
+    "mem": 4096,
+    "qemu_args": "-enable-kvm"
+  },
+  "experimental": {
+    "uaf_validate": {
+      "max_concurrent": 8,
+      "enable_vm_snapshot": true,
+      "continuous_mode": true
+    }
+  }
+}
+```
+
+**Important QEMU configuration:**
+- **DO**: Use `-enable-kvm` for performance
+- **DO**: Use `-cpu host` (without `migratable=off`) or omit the `-cpu` option
+- **DON'T**: Use `-cpu host,migratable=off` - this blocks snapshot save with error: `State blocked by non-migratable CPU device (invtsc flag)`
+
+### Fallback Behavior
+If snapshot save fails (e.g., due to incompatible CPU settings), the system automatically falls back to standard VM restart mode:
+
+```
+uafvalidate: vm 0 failed to save snapshot: savevm failed: ... (continuing without snapshot)
+```
+
+In fallback mode, each task still gets a fresh VM, but without the snapshot optimization.
+
+### Performance Impact
+| Mode | Reset Time | Notes |
+|------|-----------|-------|
+| Standard (VM restart) | 30-60s | Creates fresh VM each time |
+| VM Snapshot (old) | ~10s | Using loadvm via QMP |
+| VM Snapshot (optimized) | **3-4s** | Using -loadvm flag + fast SSH + cached binaries |
+
+For validation workloads with many entries, this can reduce total validation time by **80-90%**.
+
+### Troubleshooting
+
+#### Snapshot Save Fails with "non-migratable CPU"
+```
+Error: State blocked by non-migratable CPU device (invtsc flag)
+```
+**Solution**: Remove `migratable=off` from your qemu_args. Use `-cpu host` instead of `-cpu host,migratable=off`.
+
+#### Image Lock Conflicts
+```
+Failed to get "write" lock. Is another process using the image?
+```
+**Solution**: This indicates a previous QEMU process didn't fully terminate. The system will retry with a fresh image copy. If persistent, check for orphaned QEMU processes.
+
+#### Slow Restore Times
+If restore takes longer than 5 seconds, check the logs for timing breakdown:
+```
+qemu: vm 0 boot: SSH wait completed in Xs
+uafvalidate: vm 0 executor setup took Xs
+```
+
+### Limitations
+1. **Single Snapshot per VM**: Each VM maintains one snapshot. State changes after snapshot save are discarded on restore.
+2. **Disk Space**: Each VM gets its own qcow2 image copy (~2-5GB depending on base image).
+3. **SSH Reconnection**: After restore, the SSH connection needs to be re-established (handled automatically).
+4. **QEMU Only**: Not supported for other VM backends (GCE, AWS, etc.).

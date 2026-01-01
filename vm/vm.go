@@ -198,6 +198,126 @@ func (pool *Pool) Close() error {
 	return nil
 }
 
+// snapshotCreator is an optional interface that VM pools can implement
+// to support creating VMs that load a snapshot on boot.
+type snapshotCreator interface {
+	CreateWithSnapshot(ctx context.Context, workdir string, index int, snapshotName string) (vmimpl.Instance, error)
+}
+
+// imageOverrider is an optional interface that VM pools can implement
+// to support creating VMs with a custom image path.
+type imageOverrider interface {
+	CreateWithImage(ctx context.Context, workdir string, index int, imagePath string) (vmimpl.Instance, error)
+}
+
+// snapshotWithImageCreator combines both snapshot and custom image support.
+type snapshotWithImageCreator interface {
+	CreateWithSnapshotAndImage(ctx context.Context, workdir string, index int, snapshotName, imagePath string) (vmimpl.Instance, error)
+}
+
+// CreateWithSnapshot creates a new VM instance that loads a snapshot on boot.
+// This is much faster than booting from scratch and then calling LoadVMSnapshot.
+// Returns an error if the underlying VM implementation does not support this feature.
+func (pool *Pool) CreateWithSnapshot(ctx context.Context, index int, snapshotName string) (*Instance, error) {
+	impl, ok := pool.impl.(snapshotCreator)
+	if !ok {
+		return nil, fmt.Errorf("this VM type does not support CreateWithSnapshot")
+	}
+	if index < 0 || index >= pool.count {
+		return nil, fmt.Errorf("invalid VM index %v (count %v)", index, pool.count)
+	}
+	workdir, err := osutil.ProcessTempDir(pool.workdir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create instance temp dir: %w", err)
+	}
+	if pool.template != "" {
+		if err := osutil.CopyDirRecursively(pool.template, filepath.Join(workdir, "template")); err != nil {
+			return nil, err
+		}
+	}
+	vmImpl, err := impl.CreateWithSnapshot(ctx, workdir, index, snapshotName)
+	if err != nil {
+		os.RemoveAll(workdir)
+		return nil, err
+	}
+	atomic.AddInt32(&pool.activeCount, 1)
+	return &Instance{
+		pool:    pool,
+		impl:    vmImpl,
+		workdir: workdir,
+		index:   index,
+		onClose: func() { atomic.AddInt32(&pool.activeCount, -1) },
+	}, nil
+}
+
+// CreateWithImage creates a new VM instance using a custom image path.
+// Returns an error if the underlying VM implementation does not support this feature.
+func (pool *Pool) CreateWithImage(ctx context.Context, index int, imagePath string) (*Instance, error) {
+	impl, ok := pool.impl.(imageOverrider)
+	if !ok {
+		return nil, fmt.Errorf("this VM type does not support CreateWithImage")
+	}
+	if index < 0 || index >= pool.count {
+		return nil, fmt.Errorf("invalid VM index %v (count %v)", index, pool.count)
+	}
+	workdir, err := osutil.ProcessTempDir(pool.workdir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create instance temp dir: %w", err)
+	}
+	if pool.template != "" {
+		if err := osutil.CopyDirRecursively(pool.template, filepath.Join(workdir, "template")); err != nil {
+			return nil, err
+		}
+	}
+	vmImpl, err := impl.CreateWithImage(ctx, workdir, index, imagePath)
+	if err != nil {
+		os.RemoveAll(workdir)
+		return nil, err
+	}
+	atomic.AddInt32(&pool.activeCount, 1)
+	return &Instance{
+		pool:    pool,
+		impl:    vmImpl,
+		workdir: workdir,
+		index:   index,
+		onClose: func() { atomic.AddInt32(&pool.activeCount, -1) },
+	}, nil
+}
+
+// CreateWithSnapshotAndImage creates a new VM instance with a custom image that loads a snapshot on boot.
+// Returns an error if the underlying VM implementation does not support this feature.
+func (pool *Pool) CreateWithSnapshotAndImage(ctx context.Context, index int, snapshotName, imagePath string) (*Instance, error) {
+	impl, ok := pool.impl.(snapshotWithImageCreator)
+	if !ok {
+		return nil, fmt.Errorf("this VM type does not support CreateWithSnapshotAndImage")
+	}
+	if index < 0 || index >= pool.count {
+		return nil, fmt.Errorf("invalid VM index %v (count %v)", index, pool.count)
+	}
+	workdir, err := osutil.ProcessTempDir(pool.workdir)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create instance temp dir: %w", err)
+	}
+	if pool.template != "" {
+		if err := osutil.CopyDirRecursively(pool.template, filepath.Join(workdir, "template")); err != nil {
+			return nil, err
+		}
+	}
+	vmImpl, err := impl.CreateWithSnapshotAndImage(ctx, workdir, index, snapshotName, imagePath)
+	if err != nil {
+		os.RemoveAll(workdir)
+		return nil, err
+	}
+	atomic.AddInt32(&pool.activeCount, 1)
+	return &Instance{
+		pool:    pool,
+		impl:    vmImpl,
+		workdir: workdir,
+		index:   index,
+		onClose: func() { atomic.AddInt32(&pool.activeCount, -1) },
+	}, nil
+}
+
 // SetupSnapshot must be called once before calling RunSnapshot.
 // Input is copied into the VM in an implementation defined way and is interpreted by executor.
 func (inst *Instance) SetupSnapshot(input []byte) error {
@@ -232,6 +352,46 @@ func (inst *Instance) RunSnapshot(input []byte) (result, output []byte, err erro
 type snapshotter interface {
 	SetupSnapshot([]byte) error
 	RunSnapshot(time.Duration, []byte) ([]byte, []byte, error)
+}
+
+// vmSnapshotter is the interface for simple VM-level savevm/loadvm operations.
+// This is different from the complex ivshmem-based snapshotter interface above.
+// It provides simple QEMU savevm/loadvm functionality for faster VM reset.
+type vmSnapshotter interface {
+	SaveVMSnapshot(name string) error
+	LoadVMSnapshot(name string) error
+}
+
+// SaveVMSnapshot saves the current VM state to a named snapshot.
+// This uses QEMU's savevm command and requires a qcow2 disk image.
+// The snapshot is stored inside the qcow2 file.
+func (inst *Instance) SaveVMSnapshot(name string) error {
+	impl, ok := inst.impl.(vmSnapshotter)
+	if !ok {
+		return errors.New("this VM type does not support VM snapshots")
+	}
+	return impl.SaveVMSnapshot(name)
+}
+
+// LoadVMSnapshot restores the VM state from a named snapshot.
+// This uses QEMU's loadvm command. After loading, SSH connections will be broken
+// and need to be re-established.
+func (inst *Instance) LoadVMSnapshot(name string) error {
+	impl, ok := inst.impl.(vmSnapshotter)
+	if !ok {
+		return errors.New("this VM type does not support VM snapshots")
+	}
+	err := impl.LoadVMSnapshot(name)
+	if err != nil {
+		return err
+	}
+	// Reset forward port after successful snapshot restore.
+	// The port forwarding in QEMU still works, but the internal state
+	// needs to be reset so Forward() can be called again.
+	if resetter, ok := inst.impl.(interface{ ResetForwardPort() }); ok {
+		resetter.ResetForwardPort()
+	}
+	return nil
 }
 
 func (inst *Instance) Copy(hostSrc string) (string, error) {

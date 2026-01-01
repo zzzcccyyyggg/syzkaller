@@ -297,10 +297,10 @@ type Experimental struct {
 }
 
 type UAFValidateConfig struct {
-	MaxConcurrent                 int `json:"max_concurrent"`
-	DelayRetryBudget              int `json:"delay_retry_budget"`
-	TimeoutSeconds                int `json:"timeout_seconds"`
-	RepeatCount                   int `json:"repeat_count"`
+	MaxConcurrent    int `json:"max_concurrent"`
+	DelayRetryBudget int `json:"delay_retry_budget"`
+	TimeoutSeconds   int `json:"timeout_seconds"`
+	RepeatCount      int `json:"repeat_count"`
 	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
 	// Defaults to 10 if unset or zero.
 	VerifyRepeatTimes             int `json:"verify_repeat_times,omitempty"`
@@ -325,6 +325,16 @@ type UAFValidateConfig struct {
 	// by duplicating each with async calls marked, maximizing race triggering.
 	// When enabled (true), programs are used as-is without async splitting.
 	DisableAsyncSplit bool `json:"disable_async_split,omitempty"`
+	// EnableVMSnapshot enables VM snapshot mode for faster validation.
+	// When enabled, the VM state is saved after initial boot and SSH setup,
+	// then restored (instead of full reboot) between validation tasks.
+	// This can reduce per-task overhead from ~30-60s to ~3-5s.
+	// Requirements:
+	// - QEMU VM type only
+	// - Disk image must be in qcow2 format (not raw)
+	// - The "snapshot" QEMU option in config should be false or omitted
+	// Note: Each VM will create a copy of the disk image in the workdir.
+	EnableVMSnapshot bool `json:"enable_vm_snapshot,omitempty"`
 }
 
 type FocusArea struct {

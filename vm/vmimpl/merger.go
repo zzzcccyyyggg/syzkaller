@@ -16,6 +16,9 @@ type OutputMerger struct {
 	teeMu  sync.Mutex
 	tee    io.Writer
 	wg     sync.WaitGroup
+
+	closeMu sync.Mutex
+	closed  bool
 }
 
 type MergerError struct {
@@ -38,7 +41,12 @@ func NewOutputMerger(tee io.Writer) *OutputMerger {
 
 func (merger *OutputMerger) Wait() {
 	merger.wg.Wait()
-	close(merger.Output)
+	merger.closeMu.Lock()
+	defer merger.closeMu.Unlock()
+	if !merger.closed {
+		close(merger.Output)
+		merger.closed = true
+	}
 }
 
 func (merger *OutputMerger) Add(name string, r io.ReadCloser) {
