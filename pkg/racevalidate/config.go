@@ -23,6 +23,22 @@ type Config struct {
 	// by duplicating each with async calls marked, maximizing race triggering.
 	// When enabled (true), programs are used as-is without async splitting.
 	DisableAsyncSplit bool
+	// DisableCollectionDelay disables start_delay during the collection phase (finding stable pairs).
+	// When enabled (true), programs run without artificial delays during collection,
+	// allowing natural timing to determine which pairs are stable.
+	// Delays are only applied during the verification phase.
+	DisableCollectionDelay bool
+	// VerifyDelaySweep enables progressive start_delay sweep during verification.
+	// When enabled, start_delay increases from 0 to VerifyDelayMaxUs across repetitions
+	// using an exponential curve (slow start, fast end).
+	VerifyDelaySweep bool
+	// VerifyDelayMaxUs is the maximum start_delay in microseconds for delay sweep.
+	// Defaults to 800 if unset or zero.
+	VerifyDelayMaxUs int64
+	// VerifyDelayPower controls the exponential curve steepness.
+	// Higher values = slower start, faster end. Defaults to 2.0.
+	// delay(i) = maxDelay * (i/n)^power
+	VerifyDelayPower float64
 }
 
 func (cfg Config) withDefaults() Config {
@@ -40,6 +56,12 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.VerifyRepeatTimes <= 0 {
 		cfg.VerifyRepeatTimes = 10
+	}
+	if cfg.VerifyDelayMaxUs <= 0 {
+		cfg.VerifyDelayMaxUs = 800
+	}
+	if cfg.VerifyDelayPower <= 0 {
+		cfg.VerifyDelayPower = 2.0
 	}
 	return cfg
 }

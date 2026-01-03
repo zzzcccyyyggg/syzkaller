@@ -40,7 +40,6 @@ readahead$kccwf(fd fd, off intptr, count intptr)
 
 ### 元数据和属性 (Metadata and Attributes)
 
-
 fstat$kccwf(fd fd, statbuf ptr[out, stat])
 fstat64$kccwf(fd fd, statbuf ptr[out, stat64])
 cachestat$kccwf(fd fd, cstat_range ptr[in, cachestat_range], cstat ptr[out, cachestat], flags const[0])
@@ -116,20 +115,18 @@ setxattr$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], name ptr[in, string
 
 fsetxattr$kccwf(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
 
-
 # 文件状态获取 (修正指针嵌套)
 stat$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], buf ptr[out, stat_buffer])
 
-
 stat_buffer {
-    st_dev      int64
-    st_ino      int64
-    st_mode     int32
-    st_nlink    int32
-    st_uid      int32
-    st_gid      int32
-    st_rdev     int64
-    st_size     int64
-    st_blksize  int64
-    st_blocks   int64
+	st_dev		int64
+	st_ino		int64
+	st_mode		int32
+	st_nlink	int32
+	st_uid		int32
+	st_gid		int32
+	st_rdev		int64
+	st_size		int64
+	st_blksize	int64
+	st_blocks	int64
 }

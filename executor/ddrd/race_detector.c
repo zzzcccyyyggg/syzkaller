@@ -337,7 +337,19 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector, may_uaf
             (char*)&uaf_pair->free_access.call_stack_hash);
         uaf_buffer[basic_count].time_diff = uaf_pair->time_diff;
 
-        // PairSyscallSharedData integration was removed; syscall metadata is no longer exported.
+        // Lookup syscall call_index using tid and access_time from history
+        SyscallLookupResult free_result = syscall_context_lookup_with_time(
+            &g_syscall_context, 
+            uaf_pair->free_access.tid, 
+            uaf_pair->free_access.access_time);
+        SyscallLookupResult use_result = syscall_context_lookup_with_time(
+            &g_syscall_context, 
+            uaf_pair->use_access.tid, 
+            uaf_pair->use_access.access_time);
+        uaf_buffer[basic_count].free_call_idx = free_result.call_idx;
+        uaf_buffer[basic_count].free_prog_idx = free_result.prog_idx;
+        uaf_buffer[basic_count].use_call_idx = use_result.call_idx;
+        uaf_buffer[basic_count].use_prog_idx = use_result.prog_idx;
     }
 
     free(uaf_pairs);
@@ -389,6 +401,20 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
             (char*)&uaf_pair->free_access.call_stack_hash);
         uaf_buffer[basic_count].time_diff = uaf_pair->time_diff;
 
+        // Lookup syscall call_index using tid and access_time from history
+        SyscallLookupResult free_result = syscall_context_lookup_with_time(
+            &g_syscall_context, 
+            uaf_pair->free_access.tid, 
+            uaf_pair->free_access.access_time);
+        SyscallLookupResult use_result = syscall_context_lookup_with_time(
+            &g_syscall_context, 
+            uaf_pair->use_access.tid, 
+            uaf_pair->use_access.access_time);
+        uaf_buffer[basic_count].free_call_idx = free_result.call_idx;
+        uaf_buffer[basic_count].free_prog_idx = free_result.prog_idx;
+        uaf_buffer[basic_count].use_call_idx = use_result.call_idx;
+        uaf_buffer[basic_count].use_prog_idx = use_result.prog_idx;
+
         if (fill_extended) {
             extended_pairs[basic_count].basic_info = uaf_buffer[basic_count];
             extended_pairs[basic_count].use_thread_history_count = 0;
@@ -417,8 +443,11 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
 
 // 为了减少改动 先将uaf模型暂用到race上
 int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
-   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs)
+   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx)
 {
+    // Use provided syscall_ctx, or fall back to global g_syscall_context if NULL
+    SyscallContextTable* ctx = syscall_ctx ? syscall_ctx : &g_syscall_context;
+    
     if (!detector || !race_detector_is_available(detector) ||
         !uaf_buffer || max_uaf_pairs <= 0) {
         debug("Invalid parameters for combined race analysis\n");
@@ -449,6 +478,17 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
 
     // 3. 把 RacePair 压缩/映射为对外的 may_race_pair_t
     int basic_count = 0;
+    
+    // Debug: check if syscall context has any history
+    // fprintf(stderr, "[SYSCALL-CTX] Using context with history_count=%d for call_idx lookup\\n",
+    //     ctx->history_count);
+    // for (int dbg_i = 0; dbg_i < ctx->history_count && dbg_i < 8; dbg_i++) {
+    //     fprintf(stderr, "[SYSCALL-CTX]   history[%d]: tid=%d call_idx=%d time=[%llu-%llu]\\n",
+    //         dbg_i, ctx->history[dbg_i].tid, ctx->history[dbg_i].call_index,
+    //         (unsigned long long)ctx->history[dbg_i].start_time,
+    //         (unsigned long long)ctx->history[dbg_i].end_time);
+    // }
+    
     for (basic_count = 0;
          basic_count < race_pair_count && basic_count < max_uaf_pairs;
          basic_count++) {
@@ -459,6 +499,9 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
         uaf_buffer[basic_count].free_call_stack   = race_pair->second.call_stack_hash;
         uaf_buffer[basic_count].use_sn           = race_pair->first.sn;
         uaf_buffer[basic_count].free_sn          = race_pair->second.sn;
+        // Add missing tid fields
+        uaf_buffer[basic_count].use_tid          = race_pair->first.tid;
+        uaf_buffer[basic_count].free_tid         = race_pair->second.tid;
         uaf_buffer[basic_count].lock_type     = race_pair->lock_status;
         uaf_buffer[basic_count].use_access_type  = race_pair->first.access_type;
         uaf_buffer[basic_count].time_diff     = race_pair->access_time_diff;
@@ -467,6 +510,27 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
             (char*)&race_pair->first.call_stack_hash,
             (char*)&race_pair->second.var_name,
             (char*)&race_pair->second.call_stack_hash);
+        
+        // Lookup syscall call_index using tid and access_time from provided context
+        SyscallLookupResult use_result = syscall_context_lookup_with_time(
+            ctx, 
+            race_pair->first.tid, 
+            race_pair->first.access_time);
+        SyscallLookupResult free_result = syscall_context_lookup_with_time(
+            ctx, 
+            race_pair->second.tid, 
+            race_pair->second.access_time);
+        uaf_buffer[basic_count].use_call_idx = use_result.call_idx;
+        uaf_buffer[basic_count].use_prog_idx = use_result.prog_idx;
+        uaf_buffer[basic_count].free_call_idx = free_result.call_idx;
+        uaf_buffer[basic_count].free_prog_idx = free_result.prog_idx;
+        
+        // fprintf(stderr, "[RACE-PAIR] idx=%d use_tid=%d free_tid=%d use_call_idx=%d(prog%d) free_call_idx=%d(prog%d) access_time=[%llu,%llu]\\n",
+        //     basic_count, uaf_buffer[basic_count].use_tid, uaf_buffer[basic_count].free_tid,
+        //     uaf_buffer[basic_count].use_call_idx, uaf_buffer[basic_count].use_prog_idx,
+        //     uaf_buffer[basic_count].free_call_idx, uaf_buffer[basic_count].free_prog_idx,
+        //     (unsigned long long)race_pair->first.access_time,
+        //     (unsigned long long)race_pair->second.access_time);
     }
 
     free(race_pairs);
@@ -671,4 +735,169 @@ int race_detector_analyze_and_generate_extended_uaf_infos(RaceDetector* detector
 
     debug("Extended UAF analysis completed: %d extended UAF pairs generated\n", extended_count);
     return extended_count;
+}
+
+// ============================================================================
+// Syscall Context Tracking Implementation
+// ============================================================================
+
+// Global syscall context table
+SyscallContextTable g_syscall_context = {0};
+
+// Helper: get current monotonic time in nanoseconds
+static uint64_t get_current_time_ns(void)
+{
+    struct timespec ts;
+    if (clock_gettime(CLOCK_MONOTONIC, &ts) == 0) {
+        return (uint64_t)ts.tv_sec * 1000000000ULL + (uint64_t)ts.tv_nsec;
+    }
+    return 0;
+}
+
+void syscall_context_init(SyscallContextTable* table)
+{
+    if (!table)
+        return;
+    memset(table, 0, sizeof(SyscallContextTable));
+    table->count = 0;
+    table->history_count = 0;
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        table->entries[i].tid = -1;
+        table->entries[i].call_index = -1;
+        table->entries[i].call_num = -1;
+        table->entries[i].start_time = 0;
+        table->entries[i].active = false;
+    }
+}
+
+void syscall_context_enter(SyscallContextTable* table, int tid, int call_index, int call_num)
+{
+    if (!table || tid < 0)
+        return;
+    
+    uint64_t now = get_current_time_ns();
+    // fprintf(stderr, "[TIME-TRACK] syscall_context_enter: tid=%d call_idx=%d start_time=%llu (CLOCK_MONOTONIC ns)\\n",
+    //     tid, call_index, (unsigned long long)now);
+    
+    // Find existing entry or empty slot
+    int empty_slot = -1;
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        if (table->entries[i].tid == tid) {
+            // Update existing entry
+            table->entries[i].call_index = call_index;
+            table->entries[i].call_num = call_num;
+            table->entries[i].start_time = now;
+            table->entries[i].active = true;
+            return;
+        }
+        if (empty_slot < 0 && !table->entries[i].active) {
+            empty_slot = i;
+        }
+    }
+    
+    // Add new entry
+    if (empty_slot >= 0) {
+        table->entries[empty_slot].tid = tid;
+        table->entries[empty_slot].call_index = call_index;
+        table->entries[empty_slot].call_num = call_num;
+        table->entries[empty_slot].start_time = now;
+        table->entries[empty_slot].active = true;
+        table->count++;
+    }
+}
+
+void syscall_context_exit(SyscallContextTable* table, int tid)
+{
+    if (!table || tid < 0)
+        return;
+    
+    uint64_t now = get_current_time_ns();
+    // fprintf(stderr, "[TIME-TRACK] syscall_context_exit: tid=%d end_time=%llu (CLOCK_MONOTONIC ns)\\n",
+    //     tid, (unsigned long long)now);
+    
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        if (table->entries[i].tid == tid && table->entries[i].active) {
+            // Record to history before clearing
+            if (table->history_count < MAX_SYSCALL_HISTORY && 
+                table->entries[i].call_index >= 0 &&
+                table->entries[i].start_time > 0) {
+                SyscallHistoryEntry* hist = &table->history[table->history_count];
+                hist->tid = tid;
+                hist->call_index = table->entries[i].call_index;
+                hist->start_time = table->entries[i].start_time;
+                hist->end_time = now;
+                table->history_count++;
+            }
+            
+            table->entries[i].call_index = -1;
+            table->entries[i].call_num = -1;
+            table->entries[i].start_time = 0;
+            // Keep tid and active for reuse, just mark call_index as -1
+            return;
+        }
+    }
+}
+
+int syscall_context_lookup(SyscallContextTable* table, int tid)
+{
+    if (!table || tid < 0)
+        return -1;
+    
+    for (int i = 0; i < MAX_TRACKED_THREADS; i++) {
+        if (table->entries[i].tid == tid && table->entries[i].active) {
+            return table->entries[i].call_index;
+        }
+    }
+    
+    return -1; // Not found or kernel background thread
+}
+
+SyscallLookupResult syscall_context_lookup_with_time(SyscallContextTable* table, int tid, uint64_t access_time)
+{
+    SyscallLookupResult result = {-1, -1};
+    
+    if (!table || access_time == 0) {
+        // fprintf(stderr, "[CTX-LOOKUP] SKIP: table=%p access_time=%llu\\n", (void*)table, (unsigned long long)access_time);
+        return result;
+    }
+    
+    // fprintf(stderr, "[CTX-LOOKUP] Looking up tid=%d access_time=%llu in table with %d history entries\\n",
+    //     tid, (unsigned long long)access_time, table->history_count);
+    
+    // Search history for matching time range (ignore tid, use time only)
+    // Select the best match based on how close access_time is to the center of [start, end]
+    uint64_t best_match_diff = UINT64_MAX;
+    
+    for (int i = 0; i < table->history_count; i++) {
+        SyscallHistoryEntry* hist = &table->history[i];
+        
+        // Check if access_time falls within [start_time, end_time]
+        if (access_time >= hist->start_time && access_time <= hist->end_time) {
+            // Calculate how close to the center of the time range
+            uint64_t mid_time = (hist->start_time + hist->end_time) / 2;
+            uint64_t diff = (access_time > mid_time) ? (access_time - mid_time) : (mid_time - access_time);
+            if (diff < best_match_diff) {
+                best_match_diff = diff;
+                result.call_idx = hist->call_index;
+                result.prog_idx = hist->prog_idx;
+            }
+        }
+    }
+    
+    if (result.call_idx >= 0) {
+        // fprintf(stderr, "[M3-LOOKUP] Found call_idx=%d prog_idx=%d for tid=%d at time=%llu (best match from %d entries)\\n",
+        //     result.call_idx, result.prog_idx, tid, (unsigned long long)access_time, table->history_count);
+    } else {
+        // fprintf(stderr, "[M3-LOOKUP] NOT FOUND: tid=%d access_time=%llu did not match any of %d history entries\\n",
+        //     tid, (unsigned long long)access_time, table->history_count);
+        // // Print history entries for debugging
+        // for (int dbg = 0; dbg < table->history_count && dbg < 4; dbg++) {
+        //     fprintf(stderr, "[M3-LOOKUP]   history[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\\n",
+        //         dbg, table->history[dbg].tid, table->history[dbg].call_index, table->history[dbg].prog_idx,
+        //         (unsigned long long)table->history[dbg].start_time,
+        //         (unsigned long long)table->history[dbg].end_time);
+        // }
+    }
+    
+    return result;
 }

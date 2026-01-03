@@ -7,13 +7,15 @@ import (
 )
 
 type FeatureInfoRawT struct {
-	Id Feature `json:"id"`
-	NeedSetup bool `json:"need_setup"`
-	Reason string `json:"reason"`
+	Id        Feature `json:"id"`
+	NeedSetup bool    `json:"need_setup"`
+	Reason    string  `json:"reason"`
 }
 
 func (t *FeatureInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	reasonOffset := builder.CreateString(t.Reason)
 	FeatureInfoRawStart(builder)
 	FeatureInfoRawAddId(builder, t.Id)
@@ -29,7 +31,9 @@ func (rcv *FeatureInfoRaw) UnPackTo(t *FeatureInfoRawT) {
 }
 
 func (rcv *FeatureInfoRaw) UnPack() *FeatureInfoRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &FeatureInfoRawT{}
 	rcv.UnPackTo(t)
 	return t

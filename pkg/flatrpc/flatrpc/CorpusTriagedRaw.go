@@ -10,7 +10,9 @@ type CorpusTriagedRawT struct {
 }
 
 func (t *CorpusTriagedRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	CorpusTriagedRawStart(builder)
 	return CorpusTriagedRawEnd(builder)
 }
@@ -19,7 +21,9 @@ func (rcv *CorpusTriagedRaw) UnPackTo(t *CorpusTriagedRawT) {
 }
 
 func (rcv *CorpusTriagedRaw) UnPack() *CorpusTriagedRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &CorpusTriagedRawT{}
 	rcv.UnPackTo(t)
 	return t

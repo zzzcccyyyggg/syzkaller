@@ -25,6 +25,63 @@ typedef struct {
 	bool valid;
 } SyscallTimeRecord;
 
+// ============================================================================
+// Syscall Context Tracking for Race Pair Attribution
+// ============================================================================
+
+#define MAX_TRACKED_THREADS 64
+#define MAX_SYSCALL_HISTORY 128  // Max syscalls to track per execution
+
+typedef struct {
+	int tid;
+	int call_index;      // Current syscall index being executed (-1 if none)
+	int call_num;        // Current syscall number
+	uint64_t start_time; // Syscall start time (nanoseconds)
+	bool active;         // Whether this slot is in use
+} SyscallContextEntry;
+
+// Record of a completed syscall for time-based lookup
+typedef struct {
+	int tid;
+	int call_index;
+	int prog_idx;        // Which program/executor this belongs to (0 or 1 in barrier mode)
+	uint64_t start_time;
+	uint64_t end_time;
+} SyscallHistoryEntry;
+
+typedef struct {
+	SyscallContextEntry entries[MAX_TRACKED_THREADS];
+	int count;
+	// History of completed syscalls for time-based lookup
+	SyscallHistoryEntry history[MAX_SYSCALL_HISTORY];
+	int history_count;
+} SyscallContextTable;
+
+// Result of syscall context lookup (call_idx + prog_idx)
+typedef struct {
+    int call_idx;   // Matched syscall index (-1 if not found)
+    int prog_idx;   // Which program (0 or 1) this belongs to (-1 if not found)
+} SyscallLookupResult;
+
+// Initialize the syscall context table
+void syscall_context_init(SyscallContextTable* table);
+
+// Called when a syscall starts executing
+void syscall_context_enter(SyscallContextTable* table, int tid, int call_index, int call_num);
+
+// Called when a syscall finishes executing
+void syscall_context_exit(SyscallContextTable* table, int tid);
+
+// Lookup current call_index for a given tid (-1 if not found or kernel bg)
+int syscall_context_lookup(SyscallContextTable* table, int tid);
+
+// Lookup with time fallback: if tid not found, use access_time to match against history
+// Returns (call_idx, prog_idx) pair
+SyscallLookupResult syscall_context_lookup_with_time(SyscallContextTable* table, int tid, uint64_t access_time);
+
+// Global syscall context table (managed by executor)
+extern SyscallContextTable g_syscall_context;
+
 void race_detector_init(RaceDetector* detector);
 void race_detector_cleanup(RaceDetector* detector);
 void race_detector_reset(RaceDetector* detector);
@@ -42,7 +99,8 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
 int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector,
 						 may_uaf_pair_t* uaf_buffer, int max_uaf_pairs);
 int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
-						 may_uaf_pair_t* uaf_buffer, int max_uaf_pairs);
+						 may_uaf_pair_t* uaf_buffer, int max_uaf_pairs,
+						 SyscallContextTable* syscall_ctx);
 int race_detector_analyze_and_generate_extended_race_infos(RaceDetector* detector,
 							   may_race_pair_t* race_signals_buffer, int race_count,
 							   extended_race_pair_t* extended_buffer, int max_extended);

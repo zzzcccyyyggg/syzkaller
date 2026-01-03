@@ -290,6 +290,22 @@ public:
 		return;
 	}
 
+	// Get syscall history count from shared memory
+	int32_t GetSyscallHistoryCount() const
+	{
+		if (resp_mem_)
+			return resp_mem_->syscall_history_count.load(std::memory_order_acquire);
+		return 0;
+	}
+
+	// Get syscall history array from shared memory
+	const SyscallHistoryRecord* GetSyscallHistory() const
+	{
+		if (resp_mem_)
+			return resp_mem_->syscall_history;
+		return nullptr;
+	}
+
 private:
 	enum State : uint8 {
 		// The process has just started.
@@ -811,7 +827,7 @@ public:
 		}
 
 		if (set_pair) {
-			ukc_enter_disable_mode();
+			ukc_enter_monitor_mode();
 			ukc_set_may_uaf_pair(&pair);
 		} else if (collect_uaf) {
 			ukc_clear_may_uaf_pair();
@@ -854,7 +870,9 @@ public:
 	}
 
 	// Collect results after all barrier members complete
-	void CollectResults()
+	// barrier_procs: array of procs in the barrier group (to read syscall context from shared memory)
+	// proc_count: number of procs in the barrier group
+	void CollectResults(Proc** barrier_procs = nullptr, int proc_count = 0)
 	{
 		if (!active_for_group_)
 			return;
@@ -869,12 +887,50 @@ public:
 		ukc_enter_disable_mode();
 		debug("ddrd: collecting results\n");
 
+		// Build merged syscall context from all barrier members' shared memory
+		SyscallContextTable merged_ctx;
+		syscall_context_init(&merged_ctx);
+
+		if (barrier_procs && proc_count > 0) {
+			fprintf(stderr, "[SHM-READ] runner reading syscall context from %d barrier procs\n", proc_count);
+			for (int i = 0; i < proc_count; i++) {
+				if (!barrier_procs[i]) {
+					fprintf(stderr, "[SHM-READ]   proc[%d]: NULL\n", i);
+					continue;
+				}
+				int32_t shm_count = barrier_procs[i]->GetSyscallHistoryCount();
+				const SyscallHistoryRecord* shm_history = barrier_procs[i]->GetSyscallHistory();
+				fprintf(stderr, "[SHM-READ]   proc[%d]: shm_count=%d shm_history=%p\n", i, shm_count, (void*)shm_history);
+				if (!shm_history || shm_count <= 0)
+					continue;
+
+				// Print first few entries for debugging
+				for (int j = 0; j < shm_count && j < 4; j++) {
+					fprintf(stderr, "[SHM-READ]     entry[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\n",
+						j, shm_history[j].tid, shm_history[j].call_index, shm_history[j].prog_idx,
+						(unsigned long long)shm_history[j].start_time,
+						(unsigned long long)shm_history[j].end_time);
+				}
+
+				// Merge entries into merged_ctx, preserving prog_idx
+				for (int j = 0; j < shm_count && merged_ctx.history_count < MAX_SYSCALL_HISTORY; j++) {
+					int idx = merged_ctx.history_count++;
+					merged_ctx.history[idx].tid = shm_history[j].tid;
+					merged_ctx.history[idx].call_index = shm_history[j].call_index;
+					merged_ctx.history[idx].prog_idx = shm_history[j].prog_idx;
+					merged_ctx.history[idx].start_time = shm_history[j].start_time;
+					merged_ctx.history[idx].end_time = shm_history[j].end_time;
+				}
+			}
+			fprintf(stderr, "[SHM-MERGE] Total merged syscall context: %d entries\n", merged_ctx.history_count);
+		}
+
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
-		// int count = race_detector_analyze_and_generate_uaf_infos(&detector_, pairs.data(),
-		//                                                           (int)kDdrdMaxUafPairs);
 		// 为避免更改过多 race 也先使用uaf pair的模型
+		// Pass merged syscall context to race detector
 		int count = race_detector_analyze_and_generate_race_infos(&detector_, pairs.data(),
-									  (int)kDdrdMaxUafPairs);
+									  (int)kDdrdMaxUafPairs,
+									  &merged_ctx);
 		if (count <= 0) {
 			ClearOutput();
 			active_for_group_ = false;
@@ -1407,7 +1463,14 @@ private:
 #if GOOS_linux
 			const DdrdOutputState* injected = nullptr;
 			if (active.ddrd_active) {
-				ddrd_controller_.CollectResults();
+				// Build array of barrier member procs for syscall context collection
+				std::vector<Proc*> barrier_procs;
+				barrier_procs.reserve(active.group_size);
+				for (int i = 0; i < active.group_size; i++) {
+					if (active.pending_results[i].proc)
+						barrier_procs.push_back(active.pending_results[i].proc);
+				}
+				ddrd_controller_.CollectResults(barrier_procs.data(), (int)barrier_procs.size());
 				if (ddrd_controller_.HasResults()) {
 					debug("runner: DDRD collected for group=%lld (UAF pairs=%zu)\n",
 					      (long long)group_id, ddrd_controller_.GetOutput().basic_pairs.size());
@@ -1422,10 +1485,10 @@ private:
 					continue;
 #if GOOS_linux
 				const DdrdOutputState* use_injection = (i == 0) ? injected : nullptr;
-#else
-				const void* use_injection = nullptr;
-#endif
 				staged.proc->FlushPendingResult(staged, use_injection);
+#else
+				staged.proc->FlushPendingResult(staged, nullptr);
+#endif
 			}
 #if GOOS_linux
 			if (active.ddrd_active)

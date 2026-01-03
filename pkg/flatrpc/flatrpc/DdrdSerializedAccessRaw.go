@@ -7,15 +7,17 @@ import (
 )
 
 type DdrdSerializedAccessRawT struct {
-	VarName uint64 `json:"var_name"`
+	VarName       uint64 `json:"var_name"`
 	CallStackHash uint64 `json:"call_stack_hash"`
-	AccessTime uint64 `json:"access_time"`
-	Sn uint32 `json:"sn"`
-	AccessType uint32 `json:"access_type"`
+	AccessTime    uint64 `json:"access_time"`
+	Sn            uint32 `json:"sn"`
+	AccessType    uint32 `json:"access_type"`
 }
 
 func (t *DdrdSerializedAccessRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	DdrdSerializedAccessRawStart(builder)
 	DdrdSerializedAccessRawAddVarName(builder, t.VarName)
 	DdrdSerializedAccessRawAddCallStackHash(builder, t.CallStackHash)
@@ -34,7 +36,9 @@ func (rcv *DdrdSerializedAccessRaw) UnPackTo(t *DdrdSerializedAccessRawT) {
 }
 
 func (rcv *DdrdSerializedAccessRaw) UnPack() *DdrdSerializedAccessRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &DdrdSerializedAccessRawT{}
 	rcv.UnPackTo(t)
 	return t

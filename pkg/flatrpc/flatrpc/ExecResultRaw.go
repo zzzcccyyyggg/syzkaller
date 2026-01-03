@@ -7,20 +7,22 @@ import (
 )
 
 type ExecResultRawT struct {
-	Id int64 `json:"id"`
-	Proc int32 `json:"proc"`
-	Output []byte `json:"output"`
-	Hanged bool `json:"hanged"`
-	Error string `json:"error"`
-	Info *ProgInfoRawT `json:"info"`
-	BarrierProcs uint64 `json:"barrier_procs"`
-	BarrierGroupId int64 `json:"barrier_group_id"`
-	BarrierIndex int32 `json:"barrier_index"`
-	BarrierGroupSize int32 `json:"barrier_group_size"`
+	Id               int64         `json:"id"`
+	Proc             int32         `json:"proc"`
+	Output           []byte        `json:"output"`
+	Hanged           bool          `json:"hanged"`
+	Error            string        `json:"error"`
+	Info             *ProgInfoRawT `json:"info"`
+	BarrierProcs     uint64        `json:"barrier_procs"`
+	BarrierGroupId   int64         `json:"barrier_group_id"`
+	BarrierIndex     int32         `json:"barrier_index"`
+	BarrierGroupSize int32         `json:"barrier_group_size"`
 }
 
 func (t *ExecResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	outputOffset := flatbuffers.UOffsetT(0)
 	if t.Output != nil {
 		outputOffset = builder.CreateByteString(t.Output)
@@ -55,7 +57,9 @@ func (rcv *ExecResultRaw) UnPackTo(t *ExecResultRawT) {
 }
 
 func (rcv *ExecResultRaw) UnPack() *ExecResultRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ExecResultRawT{}
 	rcv.UnPackTo(t)
 	return t

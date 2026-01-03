@@ -7,22 +7,24 @@ import (
 )
 
 type ConnectReplyRawT struct {
-	Debug bool `json:"debug"`
-	Cover bool `json:"cover"`
-	CoverEdges bool `json:"cover_edges"`
-	Kernel64Bit bool `json:"kernel_64_bit"`
-	Procs int32 `json:"procs"`
-	Slowdown int32 `json:"slowdown"`
-	SyscallTimeoutMs int32 `json:"syscall_timeout_ms"`
-	ProgramTimeoutMs int32 `json:"program_timeout_ms"`
-	LeakFrames []string `json:"leak_frames"`
-	RaceFrames []string `json:"race_frames"`
-	Features Feature `json:"features"`
-	Files []string `json:"files"`
+	Debug            bool     `json:"debug"`
+	Cover            bool     `json:"cover"`
+	CoverEdges       bool     `json:"cover_edges"`
+	Kernel64Bit      bool     `json:"kernel_64_bit"`
+	Procs            int32    `json:"procs"`
+	Slowdown         int32    `json:"slowdown"`
+	SyscallTimeoutMs int32    `json:"syscall_timeout_ms"`
+	ProgramTimeoutMs int32    `json:"program_timeout_ms"`
+	LeakFrames       []string `json:"leak_frames"`
+	RaceFrames       []string `json:"race_frames"`
+	Features         Feature  `json:"features"`
+	Files            []string `json:"files"`
 }
 
 func (t *ConnectReplyRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	leakFramesOffset := flatbuffers.UOffsetT(0)
 	if t.LeakFrames != nil {
 		leakFramesLength := len(t.LeakFrames)
@@ -106,7 +108,9 @@ func (rcv *ConnectReplyRaw) UnPackTo(t *ConnectReplyRawT) {
 }
 
 func (rcv *ConnectReplyRaw) UnPack() *ConnectReplyRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ConnectReplyRawT{}
 	rcv.UnPackTo(t)
 	return t

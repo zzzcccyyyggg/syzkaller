@@ -30,7 +30,7 @@ declare -A VM_LAST_DEPLOY_TS=()
 declare -A VM_LAST_COLLECT_TS=()
 declare -A VM_FAIL_DEPLOY=()
 declare -A VM_FAIL_COLLECT=()
-
+declare -A VM_SIGNALS_COLLECTED_LINES=()  # 记录每个 VM 已收集的 signals 行数
 # ============================================================================
 # 默认配置
 # ============================================================================
@@ -413,6 +413,24 @@ deploy_collector() {
     return 1
   fi
 
+  # ====== 关键修复：先杀死所有旧的 collector 进程 ======
+  # 这样可以避免旧进程持有已删除文件的 inode 继续写入
+  log_debug "Killing any existing collector on VM-$vm_id..."
+  ssh_run "$vm_id" "$port" '
+    # 先尝试用 pid 文件杀死
+    if [ -f /tmp/collector-vm'"$vm_id"'.pid ]; then
+      pid=$(cat /tmp/collector-vm'"$vm_id"'.pid 2>/dev/null)
+      if [ -n "$pid" ]; then
+        kill -9 "$pid" 2>/dev/null || true
+      fi
+      rm -f /tmp/collector-vm'"$vm_id"'.pid
+    fi
+    # 再杀死所有匹配的 collector 进程（保险起见）
+    pkill -9 -f "syz-race-collector.*-o /tmp/races" 2>/dev/null || true
+    # 等待进程完全退出
+    sleep 0.3
+  ' 2>/dev/null || true
+
   if ! scp_put "$vm_id" "$port" "$COLLECTOR_BIN" "/tmp/syz-race-collector"; then
     log_warn "scp_put failed VM-$vm_id (see $(vm_dir "$vm_id")/scp.err)"
     VM_FAIL_DEPLOY["$vm_id"]=$(( ${VM_FAIL_DEPLOY["$vm_id"]:-0} + 1 ))
@@ -430,6 +448,7 @@ deploy_collector() {
   remote_cmd+="--format=${OUTPUT_FORMAT} "
   remote_cmd+="--race-threshold=${RACE_THRESHOLD} "
   remote_cmd+="--uaf-threshold=${UAF_THRESHOLD} "
+  remote_cmd+="--no-lru "  # 禁用 VM 内部 LRU 过滤，由外部统一去重
   remote_cmd+="-o /tmp/races-vm${vm_id}.${OUTPUT_FORMAT} "
   remote_cmd+="--signals ${remote_signals} "
   remote_cmd+="</dev/null >/tmp/collector-vm${vm_id}.log 2>&1 & "
@@ -445,6 +464,7 @@ deploy_collector() {
 
   VM_LAST_DEPLOY_TS["$vm_id"]="$(date +%s)"
   VM_FAIL_DEPLOY["$vm_id"]=0
+  VM_SIGNALS_COLLECTED_LINES["$vm_id"]=0  # 重置已收集行数（新 collector = 新文件）
   log_info "Collector deployed on VM-$vm_id."
   
   # 部署后等待几秒让 collector 采样，然后立即收集一次
@@ -496,19 +516,88 @@ collect_data() {
   # 收集 signals 文件（详细 race pair 信息）
   local signals_file="$OUTPUT_DIR/vm${vm_id}_signals.csv"
   local remote_signals="/tmp/races-vm${vm_id}_signals.csv"
+  local remote_debug_log="/tmp/collector-vm${vm_id}.log"
+  local local_debug_log="$OUTPUT_DIR/vm${vm_id}_collector.log"
   
-  if scp_get "$vm_id" "$port" "$remote_signals" "$signals_file.tmp"; then
-    # 追加到 signals 文件（保留历史数据）
-    if [[ -f "$signals_file" ]]; then
-      # 跳过 header 追加
-      tail -n +2 "$signals_file.tmp" >> "$signals_file" 2>/dev/null || true
+  # 先 sync 文件系统，确保所有缓冲区数据写入磁盘
+  ssh_run "$vm_id" "$port" "sync" 2>/dev/null || true
+  
+  # 调试：在 VM 上直接检查 signals 文件行数和大小（直接用 ssh 获取输出）
+  local ssh_opts; ssh_opts="$(ssh_opts_common)"
+  local remote_line_count remote_file_size remote_head remote_tail
+  # shellcheck disable=SC2086
+  remote_line_count=$(timeout 10 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+    "wc -l < $remote_signals 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+  # shellcheck disable=SC2086
+  remote_file_size=$(timeout 10 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+    "stat -c %s $remote_signals 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+  # shellcheck disable=SC2086
+  remote_head=$(timeout 10 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+    "head -2 $remote_signals 2>/dev/null || echo 'no-file'" 2>/dev/null)
+  # shellcheck disable=SC2086
+  remote_tail=$(timeout 10 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+    "tail -1 $remote_signals 2>/dev/null || echo 'no-file'" 2>/dev/null)
+  log_info "VM-$vm_id: signals file on VM: lines=$remote_line_count size=${remote_file_size}B"
+  log_info "VM-$vm_id: signals head: $remote_head"
+  log_info "VM-$vm_id: signals tail: $remote_tail"
+  
+  # 先收集 collector 的 debug log
+  if scp_get "$vm_id" "$port" "$remote_debug_log" "$local_debug_log.tmp" 2>/dev/null; then
+    # 追加到本地 log 文件
+    if [[ -f "$local_debug_log" ]]; then
+      cat "$local_debug_log.tmp" >> "$local_debug_log" 2>/dev/null || true
     else
-      mv "$signals_file.tmp" "$signals_file"
+      mv "$local_debug_log.tmp" "$local_debug_log" 2>/dev/null || true
     fi
-    rm -f "$signals_file.tmp"
-    log_info "Collected signals VM-$vm_id -> $signals_file"
-    # 清空远程 signals 文件
-    ssh_run "$vm_id" "$port" "> $remote_signals" || true
+    rm -f "$local_debug_log.tmp"
+    log_debug "Collected debug log VM-$vm_id -> $local_debug_log"
+  fi
+  
+  # 收集 signals 文件
+  # 使用增量收集：只获取上次收集后新增的行
+  local last_collected_lines="${VM_SIGNALS_COLLECTED_LINES[$vm_id]:-0}"
+  local current_lines
+  # shellcheck disable=SC2086
+  current_lines=$(timeout 10 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+    "wc -l < $remote_signals 2>/dev/null || echo 0" 2>/dev/null | tr -d '[:space:]')
+  current_lines="${current_lines:-0}"
+  
+  if [[ "$current_lines" -le "$last_collected_lines" ]]; then
+    log_info "VM-$vm_id: no new signals (current=$current_lines, last_collected=$last_collected_lines)"
+  elif [[ "$current_lines" -gt 1 ]]; then
+    # 有新数据，只收集新增的行
+    local start_line=$((last_collected_lines + 1))
+    # 如果是首次收集（last=0），跳过 header（从第2行开始）
+    if [[ "$last_collected_lines" -eq 0 ]]; then
+      start_line=2
+    fi
+    local new_lines=$((current_lines - start_line + 1))
+    
+    if [[ "$new_lines" -gt 0 ]]; then
+      log_info "VM-$vm_id: collecting lines $start_line-$current_lines ($new_lines new signals)"
+      
+      # 使用 sed 提取新增的行（比 scp 整个文件更高效）
+      local new_data
+      # shellcheck disable=SC2086
+      new_data=$(timeout 30 ssh $ssh_opts -p "$port" -i "$SSH_KEY" "${SSH_USER}@localhost" \
+        "sed -n '${start_line},${current_lines}p' $remote_signals 2>/dev/null" 2>/dev/null)
+      
+      if [[ -n "$new_data" ]]; then
+        # 追加到本地 signals 文件
+        if [[ ! -f "$signals_file" ]]; then
+          # 首次：先写入 header
+          echo "signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type" > "$signals_file"
+        fi
+        echo "$new_data" >> "$signals_file"
+        
+        # 更新已收集行数
+        VM_SIGNALS_COLLECTED_LINES["$vm_id"]="$current_lines"
+        
+        log_info "Collected signals VM-$vm_id -> $signals_file (new: $new_lines records, total on VM: $current_lines)"
+      else
+        log_warn "VM-$vm_id: failed to get new signals via ssh"
+      fi
+    fi
   fi
 
   VM_LAST_COLLECT_TS["$vm_id"]="$(date +%s)"
@@ -531,26 +620,43 @@ collect_all_data() {
 
 # ============================================================================
 # 增量去重（每次收集后调用）
+# 使用 --varname-stats 同时统计两种指标：
+#   1. unique_signals: 基于 (var1, stack1, var2, stack2) 的唯一信号
+#   2. unique_varname_pairs: 基于 (var1, var2) 的唯一变量名对（与主 fuzzer 一致）
+#
+# 修复：timeseries 记录的是**累计总数**，不是本次新增数
 # ============================================================================
 incremental_dedup() {
   local dedup_script="$SCRIPT_DIR/dedup_races.py"
+  local dedup_log="$OUTPUT_DIR/dedup_debug.log"
+  
+  echo "======== $(date -Iseconds) incremental_dedup ========" >> "$dedup_log"
   
   if [[ ! -f "$dedup_script" ]]; then
     log_debug "Dedup script not found, skipping"
+    echo "ERROR: dedup script not found: $dedup_script" >> "$dedup_log"
     return 0
   fi
   
   # 去重 signals 文件
-  local signals_merged="$OUTPUT_DIR/all_signals_merged.csv"
   local signals_unique="$OUTPUT_DIR/all_signals_unique.csv"
   local temp_merged="$OUTPUT_DIR/.temp_signals_merged.csv"
+  local stats_file="$OUTPUT_DIR/.dedup_stats.txt"
   
-  # 合并所有 vm*_signals.csv 文件
-  local has_signals=false
+  # 列出当前存在的 vm*_signals.csv 文件
+  echo "Looking for vm*_signals.csv files in $OUTPUT_DIR:" >> "$dedup_log"
+  ls -la "$OUTPUT_DIR"/vm*_signals.csv 2>&1 >> "$dedup_log" || echo "  (no files found)" >> "$dedup_log"
+  
+  # 合并所有 vm*_signals.csv 文件到临时文件
+  local has_new_signals=false
   local first=true
+  local merged_count=0
   for f in "$OUTPUT_DIR"/vm*_signals.csv; do
     if [[ -f "$f" && -s "$f" ]]; then
-      has_signals=true
+      local flines; flines=$(wc -l < "$f" 2>/dev/null || echo 0)
+      echo "  Found: $f ($flines lines)" >> "$dedup_log"
+      has_new_signals=true
+      merged_count=$((merged_count + 1))
       if $first; then
         cat "$f" > "$temp_merged"
         first=false
@@ -560,40 +666,109 @@ incremental_dedup() {
     fi
   done
   
-  if $has_signals && [[ -f "$temp_merged" ]]; then
-    # 如果已有去重结果，合并进来
+  echo "has_new_signals=$has_new_signals, merged_count=$merged_count" >> "$dedup_log"
+  
+  # 如果没有新数据，但有历史数据，仍然记录累计值
+  if ! $has_new_signals; then
+    echo "No new vm*_signals.csv files found" >> "$dedup_log"
     if [[ -f "$signals_unique" && -s "$signals_unique" ]]; then
+      echo "Using existing $signals_unique for cumulative stats" >> "$dedup_log"
+      # 使用 --analyze 获取累计统计
+      local stats; stats=$(python3 "$dedup_script" --analyze "$signals_unique" 2>&1)
+      echo "analyze output:" >> "$dedup_log"
+      echo "$stats" >> "$dedup_log"
+      local unique_signals=0
+      local unique_varnames=0
+      if [[ -n "$stats" ]]; then
+        # 注意：优先匹配 "Unique signals (fuzzer):" 格式（与 fuzzer 一致的计数）
+        unique_signals=$(echo "$stats" | grep -oP 'Unique signals \(fuzzer\):\s+\K\d+' 2>/dev/null || echo "")
+        # 如果没找到 fuzzer 格式，回退到普通格式
+        if [[ -z "$unique_signals" ]]; then
+          unique_signals=$(echo "$stats" | grep -oP 'Unique signals:\s+\K\d+' 2>/dev/null | head -1 || echo 0)
+        fi
+        unique_varnames=$(echo "$stats" | grep -oP 'Unique VarName pairs:\s+\K\d+' 2>/dev/null || echo 0)
+      fi
+      echo "Parsed: unique_signals=$unique_signals, unique_varnames=$unique_varnames" >> "$dedup_log"
+      log_info "No new signals, recording cumulative: signals=$unique_signals varname_pairs=$unique_varnames"
+      record_timeseries "$unique_signals" "$unique_varnames"
+    else
+      echo "No history file exists: $signals_unique" >> "$dedup_log"
+      log_debug "No new signals and no history file"
+    fi
+    return 0
+  fi
+  
+  # 有新数据，合并已有去重结果
+  echo "Merging with existing $signals_unique" >> "$dedup_log"
+  if [[ -f "$signals_unique" && -s "$signals_unique" ]]; then
+    local existing_lines; existing_lines=$(wc -l < "$signals_unique" 2>/dev/null || echo 0)
+    echo "Existing unique file has $existing_lines lines" >> "$dedup_log"
+    local first_line; first_line=$(head -1 "$signals_unique" 2>/dev/null || echo "")
+    if [[ "$first_line" == signal_hash,* ]]; then
       tail -n +2 "$signals_unique" >> "$temp_merged" 2>/dev/null || true
+    else
+      cat "$signals_unique" >> "$temp_merged" 2>/dev/null || true
+    fi
+  else
+    echo "No existing unique file" >> "$dedup_log"
+  fi
+  
+  local merged_lines; merged_lines=$(wc -l < "$temp_merged" 2>/dev/null || echo 0)
+  echo "Temp merged file has $merged_lines lines before dedup" >> "$dedup_log"
+  
+  # 执行去重
+  echo "Running: python3 $dedup_script $temp_merged $signals_unique --format signals --varname-stats" >> "$dedup_log"
+  if python3 "$dedup_script" "$temp_merged" "$signals_unique" --format signals --varname-stats 2>"$stats_file"; then
+    echo "Dedup succeeded, stats_file content:" >> "$dedup_log"
+    cat "$stats_file" >> "$dedup_log" 2>/dev/null || true
+    
+    # 解析统计结果 - 这是**累计总数**
+    # 注意：现在使用 "Unique signals (fuzzer)" 作为主要的 signals 计数（与 fuzzer 一致，max 20 stacks/pair）
+    local unique_signals=0
+    local unique_varnames=0
+    if [[ -f "$stats_file" ]]; then
+      # 优先使用与 fuzzer 一致的计数方法
+      unique_signals=$(grep -oP 'Unique signals \(fuzzer\):\s+\K\d+' "$stats_file" 2>/dev/null || echo 0)
+      # 如果没找到 fuzzer 格式，回退到普通格式
+      if [[ "$unique_signals" == "0" ]]; then
+        unique_signals=$(grep -oP 'Unique signals:\s+\K\d+' "$stats_file" 2>/dev/null | head -1 || echo 0)
+      fi
+      unique_varnames=$(grep -oP 'Unique VarName pairs:\s+\K\d+' "$stats_file" 2>/dev/null || echo 0)
     fi
     
-    # 执行去重
-    if python3 "$dedup_script" "$temp_merged" "$signals_unique" --format signals -q 2>/dev/null; then
-      local unique_count; unique_count="$(wc -l < "$signals_unique" 2>/dev/null || echo 0)"
-      # 减去 header 行
-      unique_count=$((unique_count - 1))
-      log_debug "Deduped signals: $unique_count unique entries"
-      
-      # 记录到时间序列文件
-      record_timeseries "$unique_count"
-      
-      # 清理临时文件
-      if $CLEAN_TEMP_FILES; then
-        for f in "$OUTPUT_DIR"/vm*_signals.csv; do
-          if [[ -f "$f" ]]; then
-            rm -f "$f"
-          fi
-        done
-      fi
+    echo "Parsed: unique_signals=$unique_signals, unique_varnames=$unique_varnames" >> "$dedup_log"
+    log_info "Cumulative: signals=$unique_signals (fuzzer-compatible, max 20 stacks/pair) varname_pairs=$unique_varnames"
+    
+    # 记录累计总数到时间序列
+    record_timeseries "$unique_signals" "$unique_varnames"
+    
+    # 清理 VM 临时文件（已合并到 signals_unique）
+    if $CLEAN_TEMP_FILES; then
+      echo "Cleaning vm*_signals.csv files (CLEAN_TEMP_FILES=true)" >> "$dedup_log"
+      for f in "$OUTPUT_DIR"/vm*_signals.csv; do
+        if [[ -f "$f" ]]; then
+          echo "  Removing: $f" >> "$dedup_log"
+          rm -f "$f"
+        fi
+      done
+    else
+      echo "Keeping vm*_signals.csv files (CLEAN_TEMP_FILES=false)" >> "$dedup_log"
     fi
-    rm -f "$temp_merged"
+  else
+    echo "Dedup FAILED" >> "$dedup_log"
   fi
+  rm -f "$temp_merged" "$stats_file"
 }
 
 # ============================================================================
 # 记录时间序列数据
+# 参数:
+#   $1: unique_signals - 基于 (var+stack) 4元组的唯一信号数
+#   $2: unique_varname_pairs - 基于 (var) 2元组的唯一变量名对数（可选，与 fuzzer 一致）
 # ============================================================================
 record_timeseries() {
-  local unique_count="$1"
+  local unique_signals="${1:-0}"
+  local unique_varnames="${2:-0}"
   local timeseries_file="$OUTPUT_DIR/race_timeseries.csv"
   local now_ts; now_ts="$(date +%s)"
   local now_iso; now_iso="$(date -Iseconds)"
@@ -606,14 +781,14 @@ record_timeseries() {
   
   # 如果文件不存在，写入 header
   if [[ ! -f "$timeseries_file" ]]; then
-    echo "timestamp,elapsed_sec,elapsed_min,unique_races" > "$timeseries_file"
+    echo "timestamp,elapsed_sec,elapsed_min,unique_signals,unique_varname_pairs" > "$timeseries_file"
   fi
   
   # 追加数据点
   local elapsed_min; elapsed_min=$(awk "BEGIN {printf \"%.2f\", $elapsed / 60}")
-  echo "$now_iso,$elapsed,$elapsed_min,$unique_count" >> "$timeseries_file"
+  echo "$now_iso,$elapsed,$elapsed_min,$unique_signals,$unique_varnames" >> "$timeseries_file"
   
-  log_info "Timeseries: elapsed=${elapsed}s unique_races=$unique_count"
+  log_info "Timeseries: elapsed=${elapsed}s signals=$unique_signals varname_pairs=$unique_varnames"
 }
 
 deploy_to_all_vms() {

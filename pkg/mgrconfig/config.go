@@ -325,6 +325,11 @@ type UAFValidateConfig struct {
 	// by duplicating each with async calls marked, maximizing race triggering.
 	// When enabled (true), programs are used as-is without async splitting.
 	DisableAsyncSplit bool `json:"disable_async_split,omitempty"`
+	// DisableCollectionDelay disables start_delay during the collection phase.
+	// When enabled (true), programs run without artificial delays during collection,
+	// allowing natural timing to determine which pairs are stable.
+	// Delays are only applied during the verification phase.
+	DisableCollectionDelay bool `json:"disable_collection_delay,omitempty"`
 	// EnableVMSnapshot enables VM snapshot mode for faster validation.
 	// When enabled, the VM state is saved after initial boot and SSH setup,
 	// then restored (instead of full reboot) between validation tasks.
@@ -335,6 +340,17 @@ type UAFValidateConfig struct {
 	// - The "snapshot" QEMU option in config should be false or omitted
 	// Note: Each VM will create a copy of the disk image in the workdir.
 	EnableVMSnapshot bool `json:"enable_vm_snapshot,omitempty"`
+	// VerifyDelaySweep enables progressive start_delay sweep during verification.
+	// When enabled, start_delay increases from 0 to VerifyDelayMaxUs across repetitions
+	// using an exponential curve (slow start, fast end).
+	VerifyDelaySweep bool `json:"verify_delay_sweep,omitempty"`
+	// VerifyDelayMaxUs is the maximum start_delay in microseconds for delay sweep.
+	// Defaults to 800 if unset or zero.
+	VerifyDelayMaxUs int64 `json:"verify_delay_max_us,omitempty"`
+	// VerifyDelayPower controls the exponential curve steepness.
+	// Higher values = slower start, faster end. Defaults to 2.0.
+	// Formula: delay(i) = maxDelay * (i/n)^power
+	VerifyDelayPower float64 `json:"verify_delay_power,omitempty"`
 }
 
 type FocusArea struct {

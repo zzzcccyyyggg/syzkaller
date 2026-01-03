@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/bits"
 	"net"
 	"strconv"
@@ -259,7 +260,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 
 	log.Logf(0, "uafvalidate: vm=%d executing barrier request mask=0x%x participants=%d delays=%d repeat=%d", vmIndex, mask, participants, len(delays), execReq.RepeatTimes)
 
-	manager := newValidationManager(&cfgCopy, request, e.cfg.Debug)
+	manager := newValidationManager(&cfgCopy, request, e.cfg.Debug, e.cfg)
 	if execReq.RepeatTimes > 0 {
 		manager.repeatCount = execReq.RepeatTimes
 	}
@@ -731,8 +732,31 @@ func isZeroUkcPair(pair ddrd.MayUAFPair) bool {
 		pair.FreeCallStack == 0 && pair.UseCallStack == 0
 }
 
-func newValidationManager(cfg *mgrconfig.Config, req *queue.Request, debug bool) *validationManager {
-	return &validationManager{cfg: cfg, request: req, debug: debug}
+func newValidationManager(cfg *mgrconfig.Config, req *queue.Request, debug bool, valCfg Config) *validationManager {
+	return &validationManager{
+		cfg:     cfg,
+		request: req,
+		debug:   debug,
+		valCfg:  valCfg,
+	}
+}
+
+// calculateSweepDelay computes start_delay using exponential curve: delay(i) = maxDelay * (i/n)^power
+// This produces slow growth initially and fast growth towards the end.
+func calculateSweepDelay(iteration, totalIterations int, maxDelayUs int64, power float64) int64 {
+	if totalIterations <= 1 {
+		return 0
+	}
+	if iteration <= 0 {
+		return 0
+	}
+	if iteration >= totalIterations {
+		return maxDelayUs
+	}
+	// ratio = i / n, where i is 0-based iteration
+	ratio := float64(iteration) / float64(totalIterations-1)
+	// Apply power to create exponential curve
+	return int64(float64(maxDelayUs) * math.Pow(ratio, power))
 }
 
 func crashMatchesTargetPair(reports []*report.Report, target *ddrd.MayUAFPair) int {
@@ -834,6 +858,7 @@ type validationManager struct {
 	served      atomic.Bool
 	repeatCount int
 	servedCount int
+	valCfg      Config // Validation config for delay sweep
 }
 
 func (m *validationManager) MaxSignal() signal.Signal { return nil }
@@ -861,7 +886,31 @@ func (m *validationManager) MachineChecked(features flatrpc.Feature, syscalls ma
 		}
 		if m.repeatCount > 0 {
 			if m.servedCount < m.repeatCount {
+				currentIteration := m.servedCount
 				m.servedCount++
+
+				// Apply delay sweep if enabled
+				if m.valCfg.VerifyDelaySweep && len(m.request.BarrierStartDelayUs) > 0 {
+					sweepDelay := calculateSweepDelay(
+						currentIteration,
+						m.repeatCount,
+						m.valCfg.VerifyDelayMaxUs,
+						m.valCfg.VerifyDelayPower,
+					)
+					// Create a copy of the request with updated delays
+					reqCopy := *m.request
+					newDelays := make([]int64, len(m.request.BarrierStartDelayUs))
+					copy(newDelays, m.request.BarrierStartDelayUs)
+					// Apply sweep delay to the first participant (free side)
+					newDelays[0] = sweepDelay
+					reqCopy.BarrierStartDelayUs = newDelays
+
+					if m.debug || currentIteration%10 == 0 {
+						log.Logf(0, "uafvalidate: delay sweep iteration %d/%d start_delay=%dus",
+							currentIteration+1, m.repeatCount, sweepDelay)
+					}
+					return &reqCopy
+				}
 				return m.request
 			}
 			return nil

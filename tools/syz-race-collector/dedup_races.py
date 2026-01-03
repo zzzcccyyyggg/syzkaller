@@ -37,6 +37,7 @@ Signals 格式 (signals.csv):
 import argparse
 import csv
 import json
+import os
 import sys
 from collections import OrderedDict
 from typing import Dict, List, Any, TextIO
@@ -235,6 +236,189 @@ def merge_and_dedup_csv_files(input_files: List[str], output_file: str,
     }
 
 
+# 与主 fuzzer 一致的限制：每个 VarNamePair 最多保留 20 个不同的 stack 组合
+MAX_STACKS_PER_VARNAME_PAIR = 20
+
+
+def dedup_with_varname_stats(input_file: TextIO, output_file: TextIO,
+                              signal_column: str = 'signal_hash',
+                              keep: str = 'first') -> Dict[str, Any]:
+    """
+    对 signals CSV 进行去重，同时统计两种唯一数量：
+    1. unique_signals: 基于 (var1, stack1, var2, stack2) 的唯一信号数
+       - 每个 VarNamePair 最多保留 MAX_STACKS_PER_VARNAME_PAIR 个不同的 stack 组合
+    2. unique_varname_pairs: 基于 (var1, var2) 的唯一变量名对数（与主 fuzzer 一致）
+    
+    signals 格式: signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type
+    
+    与主 fuzzer 保持一致：
+    - 使用 VarNamePair(var1, var2) 作为主要标识
+    - 每个 VarNamePair 最多保留 20 个不同的 (stack1, stack2) 组合
+    """
+    reader = csv.DictReader(input_file)
+    
+    if reader.fieldnames is None:
+        return {'total': 0, 'unique_signals': 0, 'unique_varname_pairs': 0, 
+                'duplicates': 0, 'skipped_by_stack_limit': 0}
+    
+    seen_signals: Dict[str, dict] = OrderedDict()  # signal_hash -> row
+    seen_varname_pairs: set = set()  # (var1, var2) normalized pairs
+    # 每个 VarNamePair 对应的 stack 组合集合
+    varname_pair_stacks: Dict[tuple, set] = {}  # (var1, var2) -> set of (stack1, stack2)
+    total_count = 0
+    skipped_by_stack_limit = 0
+    
+    for row in reader:
+        total_count += 1
+        
+        # 清理 row 中的 None 键
+        row = {k: v for k, v in row.items() if k is not None}
+        
+        signal = row.get(signal_column, '')
+        if not signal:
+            continue
+        
+        # 获取 var 和 stack 信息
+        var1 = row.get('var1', '')
+        var2 = row.get('var2', '')
+        stack1 = row.get('stack1', '')
+        stack2 = row.get('stack2', '')
+        
+        if not (var1 and var2):
+            continue
+        
+        # 规范化 VarNamePair：确保 var1 <= var2，使 (A,B) 和 (B,A) 算作同一对
+        if var1 <= var2:
+            pair = (var1, var2)
+            stack_pair = (stack1, stack2)
+        else:
+            pair = (var2, var1)
+            stack_pair = (stack2, stack1)
+        
+        # 记录唯一的 VarNamePair
+        seen_varname_pairs.add(pair)
+        
+        # 初始化该 VarNamePair 的 stack 集合
+        if pair not in varname_pair_stacks:
+            varname_pair_stacks[pair] = set()
+        
+        # 检查是否超过 MaxStacksPerVarPair 限制
+        if stack_pair not in varname_pair_stacks[pair]:
+            if len(varname_pair_stacks[pair]) >= MAX_STACKS_PER_VARNAME_PAIR:
+                # 已达到该 VarNamePair 的 stack 数量限制，跳过
+                skipped_by_stack_limit += 1
+                continue
+            # 添加新的 stack 组合
+            varname_pair_stacks[pair].add(stack_pair)
+        
+        # 统计唯一 signals（基于完整的 signal_hash）
+        if keep == 'first':
+            if signal not in seen_signals:
+                seen_signals[signal] = row
+        else:
+            seen_signals[signal] = row
+    
+    # 写入去重后的数据
+    fieldnames = [f for f in reader.fieldnames if f is not None] if reader.fieldnames else []
+    writer = csv.DictWriter(output_file, fieldnames=fieldnames)
+    writer.writeheader()
+    
+    for row in seen_signals.values():
+        writer.writerow(row)
+    
+    # 计算有效的 signal 数量（即实际保留的数量）
+    total_stacks = sum(len(stacks) for stacks in varname_pair_stacks.values())
+    
+    return {
+        'total': total_count,
+        'unique_signals': len(seen_signals),
+        'unique_signals_with_stack_limit': total_stacks,  # 按 fuzzer 计数方法的数量
+        'unique_varname_pairs': len(seen_varname_pairs),
+        'duplicates': total_count - len(seen_signals),
+        'skipped_by_stack_limit': skipped_by_stack_limit,
+        'max_stacks_per_pair': MAX_STACKS_PER_VARNAME_PAIR
+    }
+
+
+def analyze_signals_file(filepath: str) -> Dict[str, Any]:
+    """
+    分析 signals 文件，返回各种统计数据
+    与主 fuzzer 保持一致：每个 VarNamePair 最多统计 MAX_STACKS_PER_VARNAME_PAIR 个 stack 组合
+    """
+    if not os.path.exists(filepath):
+        return {'error': f'File not found: {filepath}'}
+    
+    try:
+        with open(filepath, 'r', newline='', encoding='utf-8') as f:
+            reader = csv.DictReader(f)
+            
+            total = 0
+            seen_signals: set = set()
+            seen_varname_pairs: set = set()
+            # 每个 VarNamePair 对应的 stack 组合集合
+            varname_pair_stacks: Dict[tuple, set] = {}
+            race_count = 0
+            uaf_count = 0
+            skipped_by_stack_limit = 0
+            
+            for row in reader:
+                total += 1
+                
+                signal = row.get('signal_hash', '')
+                if signal:
+                    seen_signals.add(signal)
+                
+                var1 = row.get('var1', '')
+                var2 = row.get('var2', '')
+                stack1 = row.get('stack1', '')
+                stack2 = row.get('stack2', '')
+                
+                if var1 and var2:
+                    # 规范化 VarNamePair
+                    if var1 <= var2:
+                        pair = (var1, var2)
+                        stack_pair = (stack1, stack2)
+                    else:
+                        pair = (var2, var1)
+                        stack_pair = (stack2, stack1)
+                    
+                    seen_varname_pairs.add(pair)
+                    
+                    # 初始化该 VarNamePair 的 stack 集合
+                    if pair not in varname_pair_stacks:
+                        varname_pair_stacks[pair] = set()
+                    
+                    # 应用 MaxStacksPerVarPair 限制
+                    if stack_pair not in varname_pair_stacks[pair]:
+                        if len(varname_pair_stacks[pair]) < MAX_STACKS_PER_VARNAME_PAIR:
+                            varname_pair_stacks[pair].add(stack_pair)
+                        else:
+                            skipped_by_stack_limit += 1
+                
+                ptype = row.get('type', 'R')
+                if ptype == 'U':
+                    uaf_count += 1
+                else:
+                    race_count += 1
+            
+            # 按 fuzzer 计数方法的有效 signal 数量
+            total_stacks_with_limit = sum(len(stacks) for stacks in varname_pair_stacks.values())
+            
+            return {
+                'total_records': total,
+                'unique_signals': len(seen_signals),
+                'unique_signals_with_stack_limit': total_stacks_with_limit,  # 按 fuzzer 计数方法
+                'unique_varname_pairs': len(seen_varname_pairs),
+                'race_records': race_count,
+                'uaf_records': uaf_count,
+                'skipped_by_stack_limit': skipped_by_stack_limit,
+                'max_stacks_per_pair': MAX_STACKS_PER_VARNAME_PAIR,
+                'duplicate_rate': f'{100 * (total - len(seen_signals)) / max(total, 1):.1f}%'
+            }
+    except Exception as e:
+        return {'error': str(e)}
+
+
 def main():
     parser = argparse.ArgumentParser(
         description='Deduplicate race pair data based on signal',
@@ -252,6 +436,9 @@ Examples:
   
   # Merge and deduplicate multiple files
   %(prog)s --merge vm0.csv vm1.csv vm2.csv -o merged.csv
+  
+  # Analyze a signals file (show both signal and VarNamePair counts)
+  %(prog)s --analyze signals.csv
   
   # Specify signal column name
   %(prog)s races.csv deduped.csv --signal-column race_signal
@@ -274,8 +461,37 @@ Examples:
                         help='Merge multiple input files and deduplicate')
     parser.add_argument('-o', '--output-file',
                         help='Output file for --merge mode')
+    parser.add_argument('--analyze', action='store_true',
+                        help='Analyze signals file and show statistics (no dedup output)')
+    parser.add_argument('--varname-stats', action='store_true',
+                        help='Include VarNamePair statistics (compatible with fuzzer counting)')
     
     args = parser.parse_args()
+    
+    # 分析模式
+    if args.analyze:
+        if args.input == '-':
+            sys.stderr.write("Error: --analyze requires a file path, not stdin\n")
+            sys.exit(1)
+        
+        stats = analyze_signals_file(args.input)
+        if 'error' in stats:
+            sys.stderr.write(f"Error: {stats['error']}\n")
+            sys.exit(1)
+        
+        print("=" * 60)
+        print("Race Signals Analysis")
+        print("=" * 60)
+        print(f"Total records:              {stats['total_records']}")
+        print(f"Unique signals:             {stats['unique_signals']} (var+stack 4-tuple, no limit)")
+        print(f"Unique signals (fuzzer):    {stats['unique_signals_with_stack_limit']} (max {stats['max_stacks_per_pair']} stacks/pair)")
+        print(f"Unique VarName pairs:       {stats['unique_varname_pairs']} (var 2-tuple)")
+        print(f"Skipped by stack limit:     {stats['skipped_by_stack_limit']}")
+        print(f"Race records:               {stats['race_records']}")
+        print(f"UAF records:                {stats['uaf_records']}")
+        print(f"Duplicate rate:             {stats['duplicate_rate']}")
+        print("=" * 60)
+        return
     
     # 合并模式
     if args.merge:
@@ -313,15 +529,28 @@ Examples:
             else:
                 signal_col = 'signal'
         
-        if args.format == 'csv' or args.format == 'signals':
+        # 如果是 signals 格式且启用 varname_stats，使用增强版去重函数
+        if args.format == 'signals' and args.varname_stats:
+            stats = dedup_with_varname_stats(input_file, output_file, signal_col, args.keep)
+            if not args.quiet:
+                sys.stderr.write(f"Total records: {stats['total']}\n")
+                sys.stderr.write(f"Unique signals: {stats['unique_signals']} (var+stack 4-tuple, no limit)\n")
+                sys.stderr.write(f"Unique signals (fuzzer): {stats['unique_signals_with_stack_limit']} (max {stats['max_stacks_per_pair']} stacks/pair)\n")
+                sys.stderr.write(f"Unique VarName pairs: {stats['unique_varname_pairs']} (var 2-tuple)\n")
+                sys.stderr.write(f"Skipped by stack limit: {stats['skipped_by_stack_limit']}\n")
+                sys.stderr.write(f"Duplicates removed: {stats['duplicates']}\n")
+        elif args.format == 'csv' or args.format == 'signals':
             stats = dedup_csv(input_file, output_file, signal_col, args.keep)
+            if not args.quiet:
+                sys.stderr.write(f"Total records: {stats['total']}\n")
+                sys.stderr.write(f"Unique signals: {stats['unique']}\n")
+                sys.stderr.write(f"Duplicates removed: {stats['duplicates']}\n")
         else:
             stats = dedup_json(input_file, output_file, signal_col, args.keep)
-        
-        if not args.quiet:
-            sys.stderr.write(f"Total records: {stats['total']}\n")
-            sys.stderr.write(f"Unique signals: {stats['unique']}\n")
-            sys.stderr.write(f"Duplicates removed: {stats['duplicates']}\n")
+            if not args.quiet:
+                sys.stderr.write(f"Total records: {stats['total']}\n")
+                sys.stderr.write(f"Unique signals: {stats['unique']}\n")
+                sys.stderr.write(f"Duplicates removed: {stats['duplicates']}\n")
     
     finally:
         if args.input != '-':

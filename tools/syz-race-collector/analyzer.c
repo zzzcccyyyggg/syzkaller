@@ -1,6 +1,8 @@
 // Copyright 2025 syzkaller project authors. All rights reserved.
 // Use of this source code is governed by Apache 2 LICENSE that can be found in the LICENSE file.
 
+#define _POSIX_C_SOURCE 200809L
+
 // ============================================
 // 这个文件直接复用 executor/ddrd 的代码
 // ============================================
@@ -10,6 +12,8 @@
 #include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
+#include <errno.h>
+#include <unistd.h>
 
 // ============================================
 // 复用 executor/ddrd 的核心代码
@@ -62,6 +66,14 @@ typedef struct {
     int capacity;
 } SignalSet;
 
+// VarNamePairSet - 仅基于 (var_name1, var_name2) 的去重集合
+// 与主 fuzzer 的 VarNamePair 统计方式一致
+typedef struct {
+    uint64_t* pairs;        // 存储 normalized pair ID
+    int count;
+    int capacity;
+} VarNamePairSet;
+
 // LRU 缓存，用于减少重复 signal 输出
 typedef struct {
     uint64_t* entries;      // 环形缓冲区
@@ -80,9 +92,13 @@ struct RaceAnalyzer {
     RacePair* race_pairs;
     UAFPair* uaf_pairs;
     
-    // 去重集合（用于统计唯一数量）
+    // 去重集合（用于统计唯一数量）- 基于 var+stack 4元组
     SignalSet race_signals;
     SignalSet uaf_signals;
+    
+    // VarNamePair 去重集合（用于与主 fuzzer 一致的统计）- 仅基于 var_name 2元组
+    VarNamePairSet race_varname_pairs;
+    VarNamePairSet uaf_varname_pairs;
     
     // LRU 缓存（用于减少输出重复）
     SignalLRU signal_lru;
@@ -110,6 +126,65 @@ static uint64_t hash_race_pair_signal(uint64_t var1, uint64_t stack1,
     }
 
     return pair1 * 1315423911ULL ^ pair2;
+}
+
+// ============================================
+// VarNamePair 计算（与主 fuzzer 一致）
+// 仅基于 (var_name1, var_name2)，不包含 stack
+// ============================================
+
+static uint64_t varname_pair_id(uint64_t var1, uint64_t var2)
+{
+    // 规范化：确保 var1 <= var2，使 (A,B) 和 (B,A) 产生相同的 ID
+    if (var1 > var2) {
+        uint64_t tmp = var1;
+        var1 = var2;
+        var2 = tmp;
+    }
+    // 使用与主 fuzzer 相同的哈希方式
+    return var1 * 1315423911ULL ^ var2;
+}
+
+// ============================================
+// VarNamePairSet 操作
+// ============================================
+
+static void varnamepairset_init(VarNamePairSet* s, int capacity) {
+    s->pairs = (uint64_t*)malloc(sizeof(uint64_t) * capacity);
+    s->count = 0;
+    s->capacity = capacity;
+}
+
+static void varnamepairset_destroy(VarNamePairSet* s) {
+    if (s->pairs) {
+        free(s->pairs);
+        s->pairs = NULL;
+    }
+    s->count = 0;
+    s->capacity = 0;
+}
+
+static bool varnamepairset_contains(VarNamePairSet* s, uint64_t pair_id) {
+    for (int i = 0; i < s->count; i++) {
+        if (s->pairs[i] == pair_id)
+            return true;
+    }
+    return false;
+}
+
+static bool varnamepairset_add(VarNamePairSet* s, uint64_t pair_id) {
+    if (varnamepairset_contains(s, pair_id))
+        return false;  // 已存在
+    
+    if (s->count < s->capacity) {
+        s->pairs[s->count++] = pair_id;
+        return true;  // 新增成功
+    }
+    return false;  // 容量已满
+}
+
+static void varnamepairset_clear(VarNamePairSet* s) {
+    s->count = 0;
 }
 
 // ============================================
@@ -361,9 +436,13 @@ RaceAnalyzer* analyzer_create(const CollectorConfig* config) {
         return NULL;
     }
     
-    // 初始化去重集合
+    // 初始化去重集合（基于 var+stack 4元组）
     signalset_init(&a->race_signals, SIGNAL_HASHSET_SIZE);
     signalset_init(&a->uaf_signals, SIGNAL_HASHSET_SIZE);
+    
+    // 初始化 VarNamePair 去重集合（仅基于 var_name 2元组，与主 fuzzer 一致）
+    varnamepairset_init(&a->race_varname_pairs, SIGNAL_HASHSET_SIZE);
+    varnamepairset_init(&a->uaf_varname_pairs, SIGNAL_HASHSET_SIZE);
     
     // 初始化 LRU 缓存 (使用配置的大小，如果有的话)
     int lru_size = (config && config->lru_cache_size > 0) ? config->lru_cache_size : SIGNAL_LRU_SIZE;
@@ -382,6 +461,8 @@ void analyzer_destroy(RaceAnalyzer* a) {
     
     signalset_destroy(&a->race_signals);
     signalset_destroy(&a->uaf_signals);
+    varnamepairset_destroy(&a->race_varname_pairs);
+    varnamepairset_destroy(&a->uaf_varname_pairs);
     signal_lru_destroy(&a->signal_lru);
     
     // 注意：不关闭 signals_fp，由调用者负责
@@ -407,6 +488,17 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
     
     if (!buffer || size == 0)
         return 0;
+    
+    // DEBUG: 第一次进入时打印 signals_fp 状态
+    static int first_call = 1;
+    if (first_call) {
+        fprintf(stderr, "[analyzer] First call: signals_fp=%p, output_signals=%d, no_lru_filter=%d\n",
+                (void*)a->signals_fp, 
+                a->config ? a->config->output_signals : -1,
+                a->config ? a->config->no_lru_filter : -1);
+        fflush(stderr);
+        first_call = 0;
+    }
     
     // 构建 AccessContext
     AccessContext ctx = {
@@ -485,6 +577,7 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
     
     // 统计唯一 race 并输出 signals
     int unique_this_interval = 0;
+    int unique_varname_this_interval = 0;  // VarNamePair 统计
     int signals_output = 0;
     
     for (int i = 0; i < race_count; i++) {
@@ -495,7 +588,7 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
             a->race_pairs[i].second.call_stack_hash
         );
         
-        // 统计去重（用于计数）
+        // 统计去重（用于计数）- 基于 var+stack 4元组
         if (a->config->dedup_signals) {
             if (signalset_add(&a->race_signals, signal)) {
                 unique_this_interval++;
@@ -504,9 +597,21 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
             unique_this_interval++;
         }
         
-        // 输出 signal 到文件（使用 LRU 减少重复）
+        // VarNamePair 统计（仅基于 var_name 2元组，与主 fuzzer 一致）
+        uint64_t varname_pair = varname_pair_id(
+            a->race_pairs[i].first.var_name,
+            a->race_pairs[i].second.var_name
+        );
+        if (varnamepairset_add(&a->race_varname_pairs, varname_pair)) {
+            unique_varname_this_interval++;
+        }
+        
+        // 输出 signal 到文件
+        // 如果启用 no_lru_filter，则跳过 LRU 检查，直接输出所有 signals（用于外部去重）
         if (a->signals_fp && a->config->output_signals) {
-            if (signal_lru_check_and_add(&a->signal_lru, signal)) {
+            bool should_output = a->config->no_lru_filter || 
+                                 signal_lru_check_and_add(&a->signal_lru, signal);
+            if (should_output) {
                 // 输出格式: signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type
                 fprintf(a->signals_fp, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,R\n",
                         (unsigned long)signal,
@@ -522,13 +627,34 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
         }
     }
     
-    // 刷新 signals 文件
+    // 刷新 signals 文件到磁盘
     if (a->signals_fp && signals_output > 0) {
-        fflush(a->signals_fp);
+        int flush_result = fflush(a->signals_fp);
+        if (flush_result != 0) {
+            fprintf(stderr, "[analyzer] ERROR: fflush failed! errno=%d: %s\n", 
+                    errno, strerror(errno));
+        }
+        // 强制 fsync 确保数据写入磁盘（防止 scp 读取到空文件）
+        int fd = fileno(a->signals_fp);
+        if (fd >= 0) {
+            int sync_result = fsync(fd);
+            if (sync_result != 0) {
+                fprintf(stderr, "[analyzer] ERROR: fsync failed! errno=%d: %s\n", 
+                        errno, strerror(errno));
+            }
+        }
+        // 调试：输出每次写入的 signals 数量和文件位置
+        static int total_signals_written = 0;
+        total_signals_written += signals_output;
+        long file_pos = ftell(a->signals_fp);
+        fprintf(stderr, "[analyzer] Wrote %d signals this iteration (total: %d, file_pos: %ld)\n", 
+                signals_output, total_signals_written, file_pos);
     }
     
     result->unique_race_count = unique_this_interval;
     result->total_unique_races = a->race_signals.count;
+    result->unique_varname_pairs = unique_varname_this_interval;
+    result->total_unique_varname_pairs = a->race_varname_pairs.count;
     
     // 分析 UAF pairs
     if (a->config->collect_uaf && ctx.free_count > 0) {
@@ -539,6 +665,7 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
         
         // 统计唯一 UAF 并输出 signals
         int unique_uaf_this_interval = 0;
+        int unique_uaf_varname_this_interval = 0;  // UAF VarNamePair 统计
         int uaf_signals_output = 0;
         
         for (int i = 0; i < uaf_count; i++) {
@@ -549,6 +676,7 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
                 a->uaf_pairs[i].free_access.call_stack_hash
             );
             
+            // 基于 var+stack 4元组的统计
             if (a->config->dedup_signals) {
                 if (signalset_add(&a->uaf_signals, signal)) {
                     unique_uaf_this_interval++;
@@ -557,9 +685,22 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
                 unique_uaf_this_interval++;
             }
             
+            // VarNamePair 统计（仅基于 var_name 2元组，与主 fuzzer 一致）
+            // 对于 UAF，使用 (free_var_name, use_var_name) 作为 pair
+            uint64_t varname_pair = varname_pair_id(
+                a->uaf_pairs[i].free_access.var_name,
+                a->uaf_pairs[i].use_access.var_name
+            );
+            if (varnamepairset_add(&a->uaf_varname_pairs, varname_pair)) {
+                unique_uaf_varname_this_interval++;
+            }
+            
             // 输出 UAF signal 到文件
+            // 如果启用 no_lru_filter，则跳过 LRU 检查，直接输出所有 signals
             if (a->signals_fp && a->config->output_signals) {
-                if (signal_lru_check_and_add(&a->signal_lru, signal)) {
+                bool should_output = a->config->no_lru_filter ||
+                                     signal_lru_check_and_add(&a->signal_lru, signal);
+                if (should_output) {
                     fprintf(a->signals_fp, "%lu,%lu,%lu,%lu,%lu,%lu,%lu,%ld,U\n",
                             (unsigned long)signal,
                             (unsigned long)a->uaf_pairs[i].use_access.var_name,
@@ -580,6 +721,8 @@ int analyzer_process(RaceAnalyzer* a, const char* buffer, size_t size, SampleRes
         
         result->unique_uaf_count = unique_uaf_this_interval;
         result->total_unique_uaf = a->uaf_signals.count;
+        result->unique_uaf_varname_pairs = unique_uaf_varname_this_interval;
+        result->total_unique_uaf_varname_pairs = a->uaf_varname_pairs.count;
     }
     
     return race_count + result->uaf_pair_count;
@@ -594,6 +737,8 @@ void analyzer_reset_all(RaceAnalyzer* a) {
     if (!a) return;
     signalset_clear(&a->race_signals);
     signalset_clear(&a->uaf_signals);
+    varnamepairset_clear(&a->race_varname_pairs);
+    varnamepairset_clear(&a->uaf_varname_pairs);
 }
 
 const CollectorConfig* analyzer_get_config(RaceAnalyzer* a) {

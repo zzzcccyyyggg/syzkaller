@@ -11,7 +11,9 @@ type InfoReplyRawT struct {
 }
 
 func (t *InfoReplyRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	coverFilterOffset := flatbuffers.UOffsetT(0)
 	if t.CoverFilter != nil {
 		coverFilterLength := len(t.CoverFilter)
@@ -35,7 +37,9 @@ func (rcv *InfoReplyRaw) UnPackTo(t *InfoReplyRawT) {
 }
 
 func (rcv *InfoReplyRaw) UnPack() *InfoReplyRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &InfoReplyRawT{}
 	rcv.UnPackTo(t)
 	return t

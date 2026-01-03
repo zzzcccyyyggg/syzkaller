@@ -14,7 +14,7 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/pkg/uafvalidate"
+	"github.com/google/syzkaller/pkg/racevalidate"
 	"github.com/google/syzkaller/vm"
 )
 
@@ -43,15 +43,19 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:     cfg.MaxConcurrent,
-		DelayRetryBudget:  cfg.DelayRetryBudget,
-		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:             *flagDebug,
-		RepeatCount:       cfg.RepeatCount,
-		VerifyRepeatTimes: cfg.VerifyRepeatTimes,
-		Workdir:           mgr.cfg.Workdir,
-		TargetVarNamePair: cfg.TargetVarNamePair,
-		DisableAsyncSplit: cfg.DisableAsyncSplit,
+		MaxConcurrent:          cfg.MaxConcurrent,
+		DelayRetryBudget:       cfg.DelayRetryBudget,
+		ExecutionTimeout:       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                  *flagDebug,
+		RepeatCount:            cfg.RepeatCount,
+		VerifyRepeatTimes:      cfg.VerifyRepeatTimes,
+		Workdir:                mgr.cfg.Workdir,
+		TargetVarNamePair:      cfg.TargetVarNamePair,
+		DisableAsyncSplit:      cfg.DisableAsyncSplit,
+		DisableCollectionDelay: cfg.DisableCollectionDelay,
+		VerifyDelaySweep:       cfg.VerifyDelaySweep,
+		VerifyDelayMaxUs:       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:       cfg.VerifyDelayPower,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -217,8 +221,8 @@ type snapshotVMState struct {
 	snapshotName string // name of the saved snapshot
 	ready        bool   // whether snapshot has been saved
 	// Cached binary paths in VM to avoid re-copying on restore
-	execprogBin  string // path to syz-execprog inside VM
-	executorBin  string // path to syz-executor inside VM
+	execprogBin string // path to syz-execprog inside VM
+	executorBin string // path to syz-executor inside VM
 }
 
 // snapshotVMPool manages VMs with snapshot support for faster reset.
@@ -620,15 +624,19 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:     cfg.MaxConcurrent,
-		DelayRetryBudget:  cfg.DelayRetryBudget,
-		ExecutionTimeout:  time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:             *flagDebug,
-		RepeatCount:       cfg.RepeatCount,
-		VerifyRepeatTimes: cfg.VerifyRepeatTimes,
-		Workdir:           mgr.cfg.Workdir,
-		TargetVarNamePair: cfg.TargetVarNamePair,
-		DisableAsyncSplit: cfg.DisableAsyncSplit,
+		MaxConcurrent:          cfg.MaxConcurrent,
+		DelayRetryBudget:       cfg.DelayRetryBudget,
+		ExecutionTimeout:       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                  *flagDebug,
+		RepeatCount:            cfg.RepeatCount,
+		VerifyRepeatTimes:      cfg.VerifyRepeatTimes,
+		Workdir:                mgr.cfg.Workdir,
+		TargetVarNamePair:      cfg.TargetVarNamePair,
+		DisableAsyncSplit:      cfg.DisableAsyncSplit,
+		DisableCollectionDelay: cfg.DisableCollectionDelay,
+		VerifyDelaySweep:       cfg.VerifyDelaySweep,
+		VerifyDelayMaxUs:       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:       cfg.VerifyDelayPower,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()

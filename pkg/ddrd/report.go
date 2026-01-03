@@ -66,6 +66,13 @@ func convertUAFPair(pair *flatrpc.DdrdUafPairRawT) *MayUAFPair {
 		UseSN:          pair.UseSn,
 		LockType:       pair.LockType,
 		UseAccessType:  pair.UseAccessType,
+		// New fields for syscall-level attribution (M3 support)
+		FreeTid:     pair.FreeTid,
+		UseTid:      pair.UseTid,
+		FreeCallIdx: pair.FreeCallIdx,
+		UseCallIdx:  pair.UseCallIdx,
+		FreeProgIdx: pair.FreeProgIdx,
+		UseProgIdx:  pair.UseProgIdx,
 	}
 }
 

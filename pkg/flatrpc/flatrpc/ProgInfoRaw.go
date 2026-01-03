@@ -7,16 +7,18 @@ import (
 )
 
 type ProgInfoRawT struct {
-	Calls []*CallInfoRawT `json:"calls"`
-	ExtraRaw []*CallInfoRawT `json:"extra_raw"`
-	Extra *CallInfoRawT `json:"extra"`
-	Elapsed uint64 `json:"elapsed"`
-	Freshness uint64 `json:"freshness"`
-	Ddrd *DdrdRawT `json:"ddrd"`
+	Calls     []*CallInfoRawT `json:"calls"`
+	ExtraRaw  []*CallInfoRawT `json:"extra_raw"`
+	Extra     *CallInfoRawT   `json:"extra"`
+	Elapsed   uint64          `json:"elapsed"`
+	Freshness uint64          `json:"freshness"`
+	Ddrd      *DdrdRawT       `json:"ddrd"`
 }
 
 func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	callsOffset := flatbuffers.UOffsetT(0)
 	if t.Calls != nil {
 		callsLength := len(t.Calls)
@@ -77,7 +79,9 @@ func (rcv *ProgInfoRaw) UnPackTo(t *ProgInfoRawT) {
 }
 
 func (rcv *ProgInfoRaw) UnPack() *ProgInfoRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ProgInfoRawT{}
 	rcv.UnPackTo(t)
 	return t

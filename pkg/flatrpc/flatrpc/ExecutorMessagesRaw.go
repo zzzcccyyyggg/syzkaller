@@ -39,7 +39,7 @@ func (v ExecutorMessagesRaw) String() string {
 }
 
 type ExecutorMessagesRawT struct {
-	Type ExecutorMessagesRaw
+	Type  ExecutorMessagesRaw
 	Value interface{}
 }
 
@@ -62,13 +62,13 @@ func (rcv ExecutorMessagesRaw) UnPack(table flatbuffers.Table) *ExecutorMessages
 	switch rcv {
 	case ExecutorMessagesRawExecResult:
 		x := ExecResultRaw{_tab: table}
-		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawExecResult, Value: x.UnPack() }
+		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawExecResult, Value: x.UnPack()}
 	case ExecutorMessagesRawExecuting:
 		x := ExecutingMessageRaw{_tab: table}
-		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawExecuting, Value: x.UnPack() }
+		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawExecuting, Value: x.UnPack()}
 	case ExecutorMessagesRawState:
 		x := StateResultRaw{_tab: table}
-		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawState, Value: x.UnPack() }
+		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawState, Value: x.UnPack()}
 	}
 	return nil
 }

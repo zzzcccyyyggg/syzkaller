@@ -264,7 +264,14 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 			return
 		}
 		task.attempts++
-		delays := sm.delay.BuildDelays(task.entry)
+		// In collection phase, optionally skip delays to let natural timing determine stable pairs
+		var delays []int64
+		if sm.cfg.DisableCollectionDelay {
+			// No delays during collection - run programs with natural timing
+			delays = nil
+		} else {
+			delays = sm.delay.BuildDelays(task.entry)
+		}
 		log.Logf(0, "uafvalidate: task start key=%s attempt=%d repeat=%d/%d delays=%d", task.key, task.attempts, task.repeats+1, sm.cfg.RepeatCount, len(delays))
 		result := &ValidationResult{
 			Entry:     task.entry.Clone(),

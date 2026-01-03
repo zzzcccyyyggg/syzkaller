@@ -11,7 +11,9 @@ type SignalUpdateRawT struct {
 }
 
 func (t *SignalUpdateRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	newMaxOffset := flatbuffers.UOffsetT(0)
 	if t.NewMax != nil {
 		newMaxLength := len(t.NewMax)
@@ -35,7 +37,9 @@ func (rcv *SignalUpdateRaw) UnPackTo(t *SignalUpdateRawT) {
 }
 
 func (rcv *SignalUpdateRaw) UnPack() *SignalUpdateRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &SignalUpdateRawT{}
 	rcv.UnPackTo(t)
 	return t

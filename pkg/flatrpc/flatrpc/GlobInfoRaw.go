@@ -7,12 +7,14 @@ import (
 )
 
 type GlobInfoRawT struct {
-	Name string `json:"name"`
+	Name  string   `json:"name"`
 	Files []string `json:"files"`
 }
 
 func (t *GlobInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	nameOffset := builder.CreateString(t.Name)
 	filesOffset := flatbuffers.UOffsetT(0)
 	if t.Files != nil {
@@ -43,7 +45,9 @@ func (rcv *GlobInfoRaw) UnPackTo(t *GlobInfoRawT) {
 }
 
 func (rcv *GlobInfoRaw) UnPack() *GlobInfoRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &GlobInfoRawT{}
 	rcv.UnPackTo(t)
 	return t

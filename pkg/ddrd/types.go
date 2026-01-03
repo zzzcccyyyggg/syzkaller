@@ -48,6 +48,13 @@ type MayUAFPair struct {
 	UseSN          int32  // Sequence number for use operation
 	LockType       uint32 // Lock status between free and use (e.g., mutex, rwlock)
 	UseAccessType  uint32 // Use access type (read/write)
+	// New fields for syscall-level attribution (M3 support)
+	FreeTid     int32 // Thread ID that triggered the free
+	UseTid      int32 // Thread ID that triggered the use
+	FreeCallIdx int32 // Syscall index for free (-1 = kernel bg)
+	UseCallIdx  int32 // Syscall index for use (-1 = kernel bg)
+	FreeProgIdx int32 // Program index for free (0 or 1 in barrier mode)
+	UseProgIdx  int32 // Program index for use (0 or 1 in barrier mode)
 }
 
 // MayRacePair represents a race condition pair transmitted from executor

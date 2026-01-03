@@ -37,6 +37,8 @@ type Stats struct {
 	statCoverOverflows      *stat.Val
 	statCompsOverflows      *stat.Val
 	statDdrdPairs           *stat.Val
+	statJobsThreePhase      *stat.Val
+	statThreePhaseCrossProgPairs *stat.Val
 }
 
 type SyscallStats struct {
@@ -91,6 +93,10 @@ func newStats(target *prog.Target) Stats {
 		statCompsOverflows: stat.New("comps overflows", "Number of times the comparisons buffer overflowed",
 			stat.Rate{}, stat.NoGraph),
 		statDdrdPairs: stat.New("ddrd pairs", "Unique DDRD UAF pairs discovered",
+			stat.Graph("ddrd")),
+		statJobsThreePhase: stat.New("three-phase jobs", "Running 3-phase filter jobs", 
+			stat.StackedGraph("jobs")),
+		statThreePhaseCrossProgPairs: stat.New("cross-prog pairs", "Cross-program race pairs after 3-phase filter",
 			stat.Graph("ddrd")),
 	}
 }

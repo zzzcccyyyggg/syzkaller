@@ -193,7 +193,7 @@ func printGroupedByVarName(records []*RecordInfo, reporter *report.Reporter) {
 }
 
 func printRecord(info *RecordInfo, reporter *report.Reporter) {
-	fmt.Printf("[%d] key=%s seq=%d size=%d bytes\n", 
+	fmt.Printf("[%d] key=%s seq=%d size=%d bytes\n",
 		info.Index, info.Key, info.Record.Seq, len(info.Record.Val))
 	if *summary || len(info.Record.Val) == 0 {
 		return

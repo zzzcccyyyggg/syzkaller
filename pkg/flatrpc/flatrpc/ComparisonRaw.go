@@ -7,14 +7,16 @@ import (
 )
 
 type ComparisonRawT struct {
-	Pc uint64 `json:"pc"`
-	Op1 uint64 `json:"op1"`
-	Op2 uint64 `json:"op2"`
-	IsConst bool `json:"is_const"`
+	Pc      uint64 `json:"pc"`
+	Op1     uint64 `json:"op1"`
+	Op2     uint64 `json:"op2"`
+	IsConst bool   `json:"is_const"`
 }
 
 func (t *ComparisonRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	return CreateComparisonRaw(builder, t.Pc, t.Op1, t.Op2, t.IsConst)
 }
 func (rcv *ComparisonRaw) UnPackTo(t *ComparisonRawT) {
@@ -25,7 +27,9 @@ func (rcv *ComparisonRaw) UnPackTo(t *ComparisonRawT) {
 }
 
 func (rcv *ComparisonRaw) UnPack() *ComparisonRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ComparisonRawT{}
 	rcv.UnPackTo(t)
 	return t

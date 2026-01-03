@@ -823,7 +823,7 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 	}
 	templateDir := filepath.Join(inst.workdir, "template")
 	qemuArgsExpanded := splitArgs(inst.cfg.QemuArgs, templateDir, inst.index)
-	
+
 	// Create copies for disk files in qemu_args to avoid lock conflicts
 	// This is especially important when running multiple VMs in parallel
 	// Use baseWorkdir (fixed) instead of workdir (temporary) so copies persist across VM restarts
@@ -977,7 +977,7 @@ type diskPathInfo struct {
 // It recognizes: -hda/-hdb/-hdc/-hdd and -drive file=xxx patterns
 func extractDiskPathsFromArgs(args []string) []diskPathInfo {
 	var disks []diskPathInfo
-	
+
 	for i, arg := range args {
 		// Check for -hda, -hdb, -hdc, -hdd
 		if arg == "-hda" || arg == "-hdb" || arg == "-hdc" || arg == "-hdd" {
@@ -993,7 +993,7 @@ func extractDiskPathsFromArgs(args []string) []diskPathInfo {
 				}
 			}
 		}
-		
+
 		// Check for -drive file=xxx pattern
 		if strings.HasPrefix(arg, "-drive") || (i > 0 && args[i-1] == "-drive") {
 			// Parse the drive options
@@ -1016,7 +1016,7 @@ func extractDiskPathsFromArgs(args []string) []diskPathInfo {
 			}
 		}
 	}
-	
+
 	return disks
 }
 
@@ -1027,7 +1027,7 @@ func detectDiskFormat(diskPath string) string {
 	if err != nil {
 		return "qcow2" // Default to qcow2
 	}
-	
+
 	var info struct {
 		Format string `json:"format"`
 	}
@@ -1045,22 +1045,22 @@ func createDiskCopy(workdir string, index int, diskPath string, diskType string)
 	ext := filepath.Ext(baseName)
 	nameWithoutExt := strings.TrimSuffix(baseName, ext)
 	copyPath := filepath.Join(workdir, fmt.Sprintf("vm-%d-%s-copy.qcow2", index, nameWithoutExt))
-	
+
 	// Check if copy already exists
 	if osutil.IsExist(copyPath) {
 		log.Logf(1, "qemu: reusing existing disk copy %s", copyPath)
 		return copyPath, nil
 	}
-	
+
 	log.Logf(0, "qemu: creating standalone qcow2 copy for %s -> %s (this may take a moment)", diskPath, copyPath)
-	
+
 	// Use qemu-img convert to create a standalone qcow2 copy
 	// This ensures savevm/loadvm work correctly (overlay mode has issues)
 	cmd := osutil.Command("qemu-img", "convert", "-O", "qcow2", diskPath, copyPath)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		return "", fmt.Errorf("failed to create disk copy: %v, output: %s", err, output)
 	}
-	
+
 	log.Logf(1, "qemu: disk copy created successfully: %s", copyPath)
 	return copyPath, nil
 }
@@ -1072,24 +1072,24 @@ func createDiskCopiesForArgs(workdir string, index int, args []string) ([]string
 	if len(disks) == 0 {
 		return args, nil
 	}
-	
+
 	log.Logf(1, "qemu: found %d disk(s) in qemu_args that need copies", len(disks))
-	
+
 	// Create a copy of args to modify
 	newArgs := make([]string, len(args))
 	copy(newArgs, args)
-	
+
 	for _, disk := range disks {
 		copyPath, err := createDiskCopy(workdir, index, disk.originalPath, disk.argType)
 		if err != nil {
 			log.Logf(0, "qemu: failed to create copy for %s: %v, using original", disk.originalPath, err)
 			continue
 		}
-		
+
 		// Replace the path in args
 		if disk.argType == "drive" {
 			// For -drive file=xxx, replace the file= part and ensure format=qcow2
-			newArg := strings.Replace(newArgs[disk.argIndex], 
+			newArg := strings.Replace(newArgs[disk.argIndex],
 				"file="+disk.originalPath, "file="+copyPath, 1)
 			// Add format=qcow2 if not already present
 			if !strings.Contains(newArg, "format=") {
@@ -1097,9 +1097,9 @@ func createDiskCopiesForArgs(workdir string, index int, args []string) ([]string
 			}
 			newArgs[disk.argIndex] = newArg
 		} else {
-			// For -hda/-hdb/-hdc/-hdd, we need to convert to -drive syntax 
+			// For -hda/-hdb/-hdc/-hdd, we need to convert to -drive syntax
 			// with explicit qcow2 format for savevm to work properly.
-			
+
 			// Get the drive index from argType (hda=0, hdb=1, hdc=2, hdd=3)
 			driveIndex := 0
 			switch disk.argType {
@@ -1112,7 +1112,7 @@ func createDiskCopiesForArgs(workdir string, index int, args []string) ([]string
 			case "hdd":
 				driveIndex = 3
 			}
-			
+
 			// Replace the -hdX arg with -drive syntax using if=ide for compatibility
 			// The path was at argIndex, and -hdX was at argIndex-1
 			newArgs[disk.argIndex-1] = "-drive"
@@ -1120,10 +1120,10 @@ func createDiskCopiesForArgs(workdir string, index int, args []string) ([]string
 			newArgs[disk.argIndex] = fmt.Sprintf("file=%s,format=qcow2,if=ide,index=%d", copyPath, driveIndex)
 			log.Logf(1, "qemu: converted -%s %s to -drive with qcow2 format", disk.argType, copyPath)
 		}
-		
+
 		log.Logf(1, "qemu: disk %s -> copy %s", disk.originalPath, copyPath)
 	}
-	
+
 	return newArgs, nil
 }
 

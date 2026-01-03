@@ -7,13 +7,15 @@ import (
 )
 
 type ExecOptsRawT struct {
-	EnvFlags ExecEnv `json:"env_flags"`
-	ExecFlags ExecFlag `json:"exec_flags"`
-	SandboxArg int64 `json:"sandbox_arg"`
+	EnvFlags   ExecEnv  `json:"env_flags"`
+	ExecFlags  ExecFlag `json:"exec_flags"`
+	SandboxArg int64    `json:"sandbox_arg"`
 }
 
 func (t *ExecOptsRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	return CreateExecOptsRaw(builder, t.EnvFlags, t.ExecFlags, t.SandboxArg)
 }
 func (rcv *ExecOptsRaw) UnPackTo(t *ExecOptsRawT) {
@@ -23,7 +25,9 @@ func (rcv *ExecOptsRaw) UnPackTo(t *ExecOptsRawT) {
 }
 
 func (rcv *ExecOptsRaw) UnPack() *ExecOptsRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ExecOptsRawT{}
 	rcv.UnPackTo(t)
 	return t

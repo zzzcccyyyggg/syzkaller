@@ -44,6 +44,7 @@ typedef struct {
     bool collect_uaf;             // 同时收集 UAF pair（默认 false）
     bool dedup_signals;           // 对 race signal 去重（默认 true）
     bool output_signals;          // 输出详细 signals 到文件（默认 true）
+    bool no_lru_filter;           // 禁用 LRU 过滤，输出所有 signals（默认 false，用于外部去重场景）
     int lru_cache_size;           // LRU 缓存大小（默认 SIGNAL_LRU_SIZE）
 } CollectorConfig;
 
@@ -70,7 +71,44 @@ static inline void config_set_defaults(CollectorConfig* cfg) {
     cfg->collect_uaf = false;           // 默认关闭 UAF 检测，只收集 race pair
     cfg->dedup_signals = true;
     cfg->output_signals = true;         // 默认输出 signals
+    cfg->no_lru_filter = false;         // 默认启用 LRU 过滤
     cfg->lru_cache_size = SIGNAL_LRU_SIZE;  // 默认 50000 entries
 }
+
+// ============================================
+// 日志宏（输出到 stderr，方便重定向到日志文件）
+// ============================================
+#define LOG_DEBUG(fmt, ...) \
+    do { \
+        struct timespec _ts; \
+        clock_gettime(CLOCK_REALTIME, &_ts); \
+        struct tm _tm; \
+        localtime_r(&_ts.tv_sec, &_tm); \
+        fprintf(stderr, "[%02d:%02d:%02d.%03ld] DEBUG: " fmt "\n", \
+                _tm.tm_hour, _tm.tm_min, _tm.tm_sec, _ts.tv_nsec / 1000000, ##__VA_ARGS__); \
+        fflush(stderr); \
+    } while(0)
+
+#define LOG_INFO(fmt, ...) \
+    do { \
+        struct timespec _ts; \
+        clock_gettime(CLOCK_REALTIME, &_ts); \
+        struct tm _tm; \
+        localtime_r(&_ts.tv_sec, &_tm); \
+        fprintf(stderr, "[%02d:%02d:%02d.%03ld] INFO: " fmt "\n", \
+                _tm.tm_hour, _tm.tm_min, _tm.tm_sec, _ts.tv_nsec / 1000000, ##__VA_ARGS__); \
+        fflush(stderr); \
+    } while(0)
+
+#define LOG_ERROR(fmt, ...) \
+    do { \
+        struct timespec _ts; \
+        clock_gettime(CLOCK_REALTIME, &_ts); \
+        struct tm _tm; \
+        localtime_r(&_ts.tv_sec, &_tm); \
+        fprintf(stderr, "[%02d:%02d:%02d.%03ld] ERROR: " fmt "\n", \
+                _tm.tm_hour, _tm.tm_min, _tm.tm_sec, _ts.tv_nsec / 1000000, ##__VA_ARGS__); \
+        fflush(stderr); \
+    } while(0)
 
 #endif // RACE_COLLECTOR_CONFIG_H

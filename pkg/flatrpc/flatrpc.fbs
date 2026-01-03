@@ -297,6 +297,13 @@ table DdrdUafPairRaw {
 	use_sn		:int32;
 	lock_type	:uint32;
 	use_access_type	:uint32;
+	// New fields for syscall-level attribution (M3 support)
+	free_tid	:int32;    // Thread ID that triggered the free
+	use_tid		:int32;    // Thread ID that triggered the use
+	free_call_idx	:int32;    // Syscall index for free (-1 = kernel bg)
+	use_call_idx	:int32;    // Syscall index for use (-1 = kernel bg)
+	free_prog_idx	:int32;    // Program index for free (0 or 1 in barrier mode)
+	use_prog_idx	:int32;    // Program index for use (0 or 1 in barrier mode)
 }
 
 table DdrdSerializedAccessRaw {

@@ -7,15 +7,17 @@ import (
 )
 
 type CallInfoRawT struct {
-	Flags CallFlag `json:"flags"`
-	Error int32 `json:"error"`
-	Signal []uint64 `json:"signal"`
-	Cover []uint64 `json:"cover"`
-	Comps []*ComparisonRawT `json:"comps"`
+	Flags  CallFlag          `json:"flags"`
+	Error  int32             `json:"error"`
+	Signal []uint64          `json:"signal"`
+	Cover  []uint64          `json:"cover"`
+	Comps  []*ComparisonRawT `json:"comps"`
 }
 
 func (t *CallInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	signalOffset := flatbuffers.UOffsetT(0)
 	if t.Signal != nil {
 		signalLength := len(t.Signal)
@@ -75,7 +77,9 @@ func (rcv *CallInfoRaw) UnPackTo(t *CallInfoRawT) {
 }
 
 func (rcv *CallInfoRaw) UnPack() *CallInfoRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &CallInfoRawT{}
 	rcv.UnPackTo(t)
 	return t

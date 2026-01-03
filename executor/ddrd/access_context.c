@@ -110,8 +110,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
 {
-    const uint64_t TIME_THRESHOLD = 1000000;
-    const uint64_t FAST_THRESHOLD = 1000000;
+    const uint64_t TIME_THRESHOLD = 10000000;
+    const uint64_t FAST_THRESHOLD = 10000000;
     int pair_count = 0;
 
     for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {
@@ -152,6 +152,11 @@ int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs
             pair->access_time_diff = time_diff;
             pair->trigger_counts = 1;
             pair->lock_status = lock_status;
+
+            // Debug: log the tid and access_time from parsed RacePair
+            debug("[RACE-ANALYZE] pair[%d] first.tid=%d second.tid=%d first.time=%llu second.time=%llu\n",
+                pair_count, pair->first.tid, pair->second.tid,
+                (unsigned long long)pair->first.access_time, (unsigned long long)pair->second.access_time);
 
             pair->thread1_history = access_context_find_thread(record_ctx, pair->first.tid);
             pair->thread2_history = access_context_find_thread(record_ctx, pair->second.tid);

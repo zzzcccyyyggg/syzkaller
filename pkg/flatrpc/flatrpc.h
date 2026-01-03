@@ -2803,6 +2803,12 @@ struct DdrdUafPairRawT : public flatbuffers::NativeTable {
   int32_t use_sn = 0;
   uint32_t lock_type = 0;
   uint32_t use_access_type = 0;
+  int32_t free_tid = 0;
+  int32_t use_tid = 0;
+  int32_t free_call_idx = 0;
+  int32_t use_call_idx = 0;
+  int32_t free_prog_idx = 0;
+  int32_t use_prog_idx = 0;
 };
 
 struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
@@ -2818,7 +2824,13 @@ struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_FREE_SN = 16,
     VT_USE_SN = 18,
     VT_LOCK_TYPE = 20,
-    VT_USE_ACCESS_TYPE = 22
+    VT_USE_ACCESS_TYPE = 22,
+    VT_FREE_TID = 24,
+    VT_USE_TID = 26,
+    VT_FREE_CALL_IDX = 28,
+    VT_USE_CALL_IDX = 30,
+    VT_FREE_PROG_IDX = 32,
+    VT_USE_PROG_IDX = 34
   };
   uint64_t free_access_name() const {
     return GetField<uint64_t>(VT_FREE_ACCESS_NAME, 0);
@@ -2850,6 +2862,24 @@ struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint32_t use_access_type() const {
     return GetField<uint32_t>(VT_USE_ACCESS_TYPE, 0);
   }
+  int32_t free_tid() const {
+    return GetField<int32_t>(VT_FREE_TID, 0);
+  }
+  int32_t use_tid() const {
+    return GetField<int32_t>(VT_USE_TID, 0);
+  }
+  int32_t free_call_idx() const {
+    return GetField<int32_t>(VT_FREE_CALL_IDX, 0);
+  }
+  int32_t use_call_idx() const {
+    return GetField<int32_t>(VT_USE_CALL_IDX, 0);
+  }
+  int32_t free_prog_idx() const {
+    return GetField<int32_t>(VT_FREE_PROG_IDX, 0);
+  }
+  int32_t use_prog_idx() const {
+    return GetField<int32_t>(VT_USE_PROG_IDX, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<uint64_t>(verifier, VT_FREE_ACCESS_NAME, 8) &&
@@ -2862,6 +2892,12 @@ struct DdrdUafPairRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_USE_SN, 4) &&
            VerifyField<uint32_t>(verifier, VT_LOCK_TYPE, 4) &&
            VerifyField<uint32_t>(verifier, VT_USE_ACCESS_TYPE, 4) &&
+           VerifyField<int32_t>(verifier, VT_FREE_TID, 4) &&
+           VerifyField<int32_t>(verifier, VT_USE_TID, 4) &&
+           VerifyField<int32_t>(verifier, VT_FREE_CALL_IDX, 4) &&
+           VerifyField<int32_t>(verifier, VT_USE_CALL_IDX, 4) &&
+           VerifyField<int32_t>(verifier, VT_FREE_PROG_IDX, 4) &&
+           VerifyField<int32_t>(verifier, VT_USE_PROG_IDX, 4) &&
            verifier.EndTable();
   }
   DdrdUafPairRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2903,6 +2939,24 @@ struct DdrdUafPairRawBuilder {
   void add_use_access_type(uint32_t use_access_type) {
     fbb_.AddElement<uint32_t>(DdrdUafPairRaw::VT_USE_ACCESS_TYPE, use_access_type, 0);
   }
+  void add_free_tid(int32_t free_tid) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_FREE_TID, free_tid, 0);
+  }
+  void add_use_tid(int32_t use_tid) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_USE_TID, use_tid, 0);
+  }
+  void add_free_call_idx(int32_t free_call_idx) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_FREE_CALL_IDX, free_call_idx, 0);
+  }
+  void add_use_call_idx(int32_t use_call_idx) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_USE_CALL_IDX, use_call_idx, 0);
+  }
+  void add_free_prog_idx(int32_t free_prog_idx) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_FREE_PROG_IDX, free_prog_idx, 0);
+  }
+  void add_use_prog_idx(int32_t use_prog_idx) {
+    fbb_.AddElement<int32_t>(DdrdUafPairRaw::VT_USE_PROG_IDX, use_prog_idx, 0);
+  }
   explicit DdrdUafPairRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2925,7 +2979,13 @@ inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(
     int32_t free_sn = 0,
     int32_t use_sn = 0,
     uint32_t lock_type = 0,
-    uint32_t use_access_type = 0) {
+    uint32_t use_access_type = 0,
+    int32_t free_tid = 0,
+    int32_t use_tid = 0,
+    int32_t free_call_idx = 0,
+    int32_t use_call_idx = 0,
+    int32_t free_prog_idx = 0,
+    int32_t use_prog_idx = 0) {
   DdrdUafPairRawBuilder builder_(_fbb);
   builder_.add_time_diff(time_diff);
   builder_.add_signal(signal);
@@ -2933,6 +2993,12 @@ inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(
   builder_.add_free_call_stack(free_call_stack);
   builder_.add_use_access_name(use_access_name);
   builder_.add_free_access_name(free_access_name);
+  builder_.add_use_prog_idx(use_prog_idx);
+  builder_.add_free_prog_idx(free_prog_idx);
+  builder_.add_use_call_idx(use_call_idx);
+  builder_.add_free_call_idx(free_call_idx);
+  builder_.add_use_tid(use_tid);
+  builder_.add_free_tid(free_tid);
   builder_.add_use_access_type(use_access_type);
   builder_.add_lock_type(lock_type);
   builder_.add_use_sn(use_sn);
@@ -4518,6 +4584,12 @@ inline void DdrdUafPairRaw::UnPackTo(DdrdUafPairRawT *_o, const flatbuffers::res
   { auto _e = use_sn(); _o->use_sn = _e; }
   { auto _e = lock_type(); _o->lock_type = _e; }
   { auto _e = use_access_type(); _o->use_access_type = _e; }
+  { auto _e = free_tid(); _o->free_tid = _e; }
+  { auto _e = use_tid(); _o->use_tid = _e; }
+  { auto _e = free_call_idx(); _o->free_call_idx = _e; }
+  { auto _e = use_call_idx(); _o->use_call_idx = _e; }
+  { auto _e = free_prog_idx(); _o->free_prog_idx = _e; }
+  { auto _e = use_prog_idx(); _o->use_prog_idx = _e; }
 }
 
 inline flatbuffers::Offset<DdrdUafPairRaw> DdrdUafPairRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const DdrdUafPairRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -4538,6 +4610,12 @@ inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(flatbuffers::Fla
   auto _use_sn = _o->use_sn;
   auto _lock_type = _o->lock_type;
   auto _use_access_type = _o->use_access_type;
+  auto _free_tid = _o->free_tid;
+  auto _use_tid = _o->use_tid;
+  auto _free_call_idx = _o->free_call_idx;
+  auto _use_call_idx = _o->use_call_idx;
+  auto _free_prog_idx = _o->free_prog_idx;
+  auto _use_prog_idx = _o->use_prog_idx;
   return rpc::CreateDdrdUafPairRaw(
       _fbb,
       _free_access_name,
@@ -4549,7 +4627,13 @@ inline flatbuffers::Offset<DdrdUafPairRaw> CreateDdrdUafPairRaw(flatbuffers::Fla
       _free_sn,
       _use_sn,
       _lock_type,
-      _use_access_type);
+      _use_access_type,
+      _free_tid,
+      _use_tid,
+      _free_call_idx,
+      _use_call_idx,
+      _free_prog_idx,
+      _use_prog_idx);
 }
 
 inline DdrdSerializedAccessRawT *DdrdSerializedAccessRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

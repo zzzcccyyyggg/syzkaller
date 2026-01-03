@@ -83,6 +83,7 @@ static void print_usage(const char* prog) {
         "  --no-signals              Disable detailed signals output\n"
         "  --signals <file>          Output signals to specified file (default: auto)\n"
         "  --lru-size <n>            LRU cache size for signals dedup (default: 50000)\n"
+        "  --no-lru                  Disable LRU filter, output all signals (for external dedup)\n"
         "\n"
         "Other:\n"
         "  -h, --help                Show this help message\n"
@@ -142,6 +143,7 @@ static struct option long_options[] = {
     {"no-signals",      no_argument,       0, 1011},
     {"signals",         required_argument, 0, 1012},
     {"lru-size",        required_argument, 0, 1013},
+    {"no-lru",          no_argument,       0, 1014},
     
     // 其他
     {"help",            no_argument,       0, 'h'},
@@ -235,6 +237,9 @@ static int parse_args(int argc, char* argv[], CollectorConfig* config) {
                     fprintf(stderr, "Invalid LRU cache size: %s\n", optarg);
                     return -1;
                 }
+                break;
+            case 1014:  // --no-lru
+                config->no_lru_filter = true;
                 break;
             
             // 其他
@@ -330,6 +335,11 @@ int main(int argc, char* argv[]) {
     FILE* signals_fp = NULL;
     char signals_path[512] = {0};
     
+    LOG_INFO("output_signals=%d, signals_file=%s, output_file=%s",
+             config.output_signals, 
+             config.signals_file ? config.signals_file : "(null)",
+             config.output_file ? config.output_file : "(null)");
+    
     if (config.output_signals) {
         if (config.signals_file) {
             // 使用指定的文件名
@@ -347,20 +357,28 @@ int main(int argc, char* argv[]) {
             strncpy(signals_path, "/tmp/race_signals.csv", sizeof(signals_path) - 1);
         }
         
+        LOG_INFO("Opening signals file: %s", signals_path);
+        
         signals_fp = fopen(signals_path, "a");  // 追加模式
         if (signals_fp) {
             // 如果文件为空，写入 CSV header
             fseek(signals_fp, 0, SEEK_END);
             if (ftell(signals_fp) == 0) {
                 fprintf(signals_fp, "signal_hash,var1,stack1,var2,stack2,addr1,addr2,delta_ns,type\n");
+                fflush(signals_fp);
+                LOG_INFO("Wrote CSV header to signals file");
             }
             analyzer_set_signals_file(analyzer, signals_fp);
+            LOG_INFO("Signals file opened successfully, fp=%p", (void*)signals_fp);
             if (config.verbose) {
                 fprintf(stderr, "  Signals output:        %s\n", signals_path);
             }
         } else {
-            fprintf(stderr, "Warning: Failed to open signals file: %s\n", signals_path);
+            LOG_ERROR("Failed to open signals file: %s (errno=%d: %s)", 
+                      signals_path, errno, strerror(errno));
         }
+    } else {
+        LOG_INFO("Signals output disabled");
     }
     
     // 初始化报告器
@@ -397,6 +415,12 @@ int main(int argc, char* argv[]) {
     
     time_t start_time = time(NULL);
     uint64_t iteration = 0;
+    uint64_t total_bytes_read = 0;
+    uint64_t total_race_pairs = 0;
+    uint64_t total_signals_output = 0;
+    
+    LOG_INFO("Starting main loop, interval=%dms, duration=%ds", 
+             config.interval_ms, config.duration_sec);
     
     // ========================================
     // 主循环
@@ -412,6 +436,7 @@ int main(int argc, char* argv[]) {
                 if (!config.quiet) {
                     fprintf(stderr, "\nDuration limit reached.\n");
                 }
+                LOG_INFO("Duration limit reached after %ld seconds", (long)elapsed);
                 break;
             }
         }
@@ -424,6 +449,7 @@ int main(int argc, char* argv[]) {
         
         // 3. 读取 trace buffer
         ssize_t bytes = collector_read_trace(&collector);
+        total_bytes_read += (bytes > 0 ? bytes : 0);
         
         // 4. 分析
         SampleResult sample = {0};
@@ -433,6 +459,16 @@ int main(int argc, char* argv[]) {
         if (bytes > 0) {
             analyzer_process(analyzer, collector_get_buffer(&collector), 
                            collector_get_data_size(&collector), &sample);
+            total_race_pairs += sample.race_pair_count;
+            total_signals_output += sample.unique_race_count;
+        }
+        
+        // 每 10 次迭代输出一次详细日志
+        if (iteration % 10 == 0) {
+            LOG_DEBUG("iter=%lu bytes=%zd race_pairs=%d new_unique=%d total_bytes=%lu total_pairs=%lu total_unique=%lu",
+                     (unsigned long)iteration, bytes, sample.race_pair_count, sample.unique_race_count,
+                     (unsigned long)total_bytes_read, (unsigned long)total_race_pairs, 
+                     (unsigned long)total_signals_output);
         }
         
         // 5. 记录统计
@@ -443,9 +479,15 @@ int main(int argc, char* argv[]) {
         
         // 7. 重新开启 LOG 模式（继续采集）
         if (g_running) {
-            collector_enable_log_mode(&collector);
+            if (!collector_enable_log_mode(&collector)) {
+                LOG_ERROR("Failed to re-enable LOG mode at iteration %lu", (unsigned long)iteration);
+            }
         }
     }
+    
+    LOG_INFO("Main loop ended after %lu iterations, total_bytes=%lu total_pairs=%lu total_signals=%lu",
+             (unsigned long)iteration, (unsigned long)total_bytes_read, 
+             (unsigned long)total_race_pairs, (unsigned long)total_signals_output);
     
     // ========================================
     // 清理

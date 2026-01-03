@@ -11,9 +11,11 @@ type HostMessageRawT struct {
 }
 
 func (t *HostMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	msgOffset := t.Msg.Pack(builder)
-	
+
 	HostMessageRawStart(builder)
 	if t.Msg != nil {
 		HostMessageRawAddMsgType(builder, t.Msg.Type)
@@ -30,7 +32,9 @@ func (rcv *HostMessageRaw) UnPackTo(t *HostMessageRawT) {
 }
 
 func (rcv *HostMessageRaw) UnPack() *HostMessageRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &HostMessageRawT{}
 	rcv.UnPackTo(t)
 	return t

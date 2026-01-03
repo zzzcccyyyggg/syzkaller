@@ -1,12 +1,14 @@
 #include "types.h"
 
 #include <stdint.h>
+#include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
 AccessRecord access_record_init_from_line(const char* line)
 {
     AccessRecord record = {0};
+    record.tid = -1;  // Initialize to -1 to distinguish "not set" from "tid=0"
     if (!line || strlen(line) < 20)
         return record;
 
@@ -67,6 +69,8 @@ AccessRecord access_record_init_from_line(const char* line)
             record.call_stack_hash = strtoull(value, NULL, 10);
         } else if (strcmp(key, "access_time") == 0) {
             record.access_time = strtoull(value, NULL, 10);
+            // fprintf(stderr, "[TIME-TRACK] kernel access_time=%llu (from trace buffer)\\n",
+            //     (unsigned long long)record.access_time);
         } else if (strcmp(key, "sn") == 0) {
             record.sn = atoi(value);
         }

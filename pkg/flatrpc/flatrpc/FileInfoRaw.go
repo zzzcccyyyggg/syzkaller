@@ -7,20 +7,22 @@ import (
 )
 
 type FileInfoRawT struct {
-	Name string `json:"name"`
-	Exists bool `json:"exists"`
-	UkcUseName uint64 `json:"ukc_use_name"`
-	UkcUseStack uint64 `json:"ukc_use_stack"`
-	UkcFreeName uint64 `json:"ukc_free_name"`
-	UkcFreeStack uint64 `json:"ukc_free_stack"`
-	UkcUseAccessDelayTime int32 `json:"ukc_use_access_delay_time"`
-	UkcIsValid bool `json:"ukc_is_valid"`
-	Error string `json:"error"`
-	Data []byte `json:"data"`
+	Name                  string `json:"name"`
+	Exists                bool   `json:"exists"`
+	UkcUseName            uint64 `json:"ukc_use_name"`
+	UkcUseStack           uint64 `json:"ukc_use_stack"`
+	UkcFreeName           uint64 `json:"ukc_free_name"`
+	UkcFreeStack          uint64 `json:"ukc_free_stack"`
+	UkcUseAccessDelayTime int32  `json:"ukc_use_access_delay_time"`
+	UkcIsValid            bool   `json:"ukc_is_valid"`
+	Error                 string `json:"error"`
+	Data                  []byte `json:"data"`
 }
 
 func (t *FileInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	nameOffset := builder.CreateString(t.Name)
 	errorOffset := builder.CreateString(t.Error)
 	dataOffset := flatbuffers.UOffsetT(0)
@@ -55,7 +57,9 @@ func (rcv *FileInfoRaw) UnPackTo(t *FileInfoRawT) {
 }
 
 func (rcv *FileInfoRaw) UnPack() *FileInfoRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &FileInfoRawT{}
 	rcv.UnPackTo(t)
 	return t

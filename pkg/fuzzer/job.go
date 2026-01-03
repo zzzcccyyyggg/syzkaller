@@ -14,9 +14,11 @@ import (
 
 	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/cover"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/signal"
+	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -55,10 +57,22 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 }
 
 func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
-	p := fuzzer.Config.Corpus.ChooseProgram(rnd)
+	var p *prog.Prog
+
+	// M2: Race-Yield Weighted Selection
+	// If race group manager is available, use race-yield feedback for selection
+	if fuzzer.raceGroup != nil {
+		corpus := fuzzer.Config.Corpus.Programs()
+		p = fuzzer.raceGroup.ChooseProgramWithFeedback(corpus, rnd)
+	} else {
+		p = fuzzer.Config.Corpus.ChooseProgram(rnd)
+	}
+
 	if p == nil {
 		return nil
 	}
+
+	// Standard mutation (M3 prefix-preserving mutation removed)
 	newP := p.Clone()
 	newP.Mutate(rnd,
 		prog.RecommendedCalls,
@@ -66,6 +80,7 @@ func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 		fuzzer.Config.NoMutateCalls,
 		fuzzer.Config.Corpus.Programs(),
 	)
+
 	req := &queue.Request{
 		Prog:     newP,
 		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
@@ -225,6 +240,11 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 		RawCover: info.rawCover,
 	}
 	job.fuzzer.Config.Corpus.Save(input)
+
+	// M1: Update namespace index when new programs are added to corpus
+	if job.fuzzer.raceGroup != nil {
+		job.fuzzer.raceGroup.UpdateNamespaceIndex(p)
+	}
 }
 
 func (job *triageJob) deflake(exec func(*queue.Request, ProgFlags) *queue.Result) (stop bool) {
@@ -619,4 +639,217 @@ func (sb *syncBuffer) Bytes() []byte {
 	sb.mu.Lock()
 	defer sb.mu.Unlock()
 	return sb.buf.Bytes()
+}
+
+// ============================================================================
+// Three-Phase Barrier Execution Job
+// ============================================================================
+// This job implements 3-phase execution for cross-program race pair filtering:
+//   Phase 1: Execute prog1 alone (barrier_group_size=1) → collect pairs_prog1
+//   Phase 2: Execute prog2 alone (barrier_group_size=1) → collect pairs_prog2
+//   Phase 3: Execute prog1+prog2 barrier → collect pairs_combined
+//   Filter: cross_program_pairs = pairs_combined - pairs_prog1 - pairs_prog2
+// ============================================================================
+
+type threePhaseJob struct {
+	exec    queue.Executor
+	prog1   *prog.Prog
+	prog2   *prog.Prog
+	mask    uint64 // original barrier mask
+	stat    *stat.Val
+	fuzzer  *Fuzzer
+	info    *JobInfo
+}
+
+func (job *threePhaseJob) run(fuzzer *Fuzzer) {
+	// Phase 1: Execute prog1 solo
+	prog1SoloPairs := job.executeSolo(job.prog1, "prog1")
+	
+	// Phase 2: Execute prog2 solo
+	prog2SoloPairs := job.executeSolo(job.prog2, "prog2")
+	
+	// Phase 3: Execute combined barrier
+	combinedReport := job.executeCombined()
+	
+	// Filter to get cross-program pairs
+	if combinedReport != nil && len(combinedReport.UAFPairs) > 0 {
+		crossProgramPairs := job.filterCrossProgramPairs(
+			combinedReport.UAFPairs,
+			prog1SoloPairs,
+			prog2SoloPairs,
+		)
+		
+		// Update stats for cross-program pairs found
+		if len(crossProgramPairs) > 0 {
+			fuzzer.statThreePhaseCrossProgPairs.Add(len(crossProgramPairs))
+			job.processCrossProgramPairs(crossProgramPairs, prog1SoloPairs, prog2SoloPairs)
+		}
+	}
+	
+	job.info.Execs.Add(3) // 3 executions
+}
+
+// executeSolo runs a single program and collects VarName pairs.
+// Note: For solo execution, we don't use barrier mode. Instead, we directly
+// set the DDRD collection flag to gather race pairs within the single program.
+func (job *threePhaseJob) executeSolo(p *prog.Prog, name string) *VarNamePairSet {
+	// Create request for solo execution - NOT barrier mode
+	// We manually add DDRD collection flag to collect intra-program race pairs
+	req := &queue.Request{
+		Prog:     p.Clone(),
+		ExecOpts: setFlags(flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectDdrdUaf),
+		Stat:     job.stat,
+	}
+	
+	// Execute without barrier mode (normal single-program execution)
+	result := job.fuzzer.executeWithFlags(job.exec, req, 0) // No ProgBarrier flag
+	if result == nil || result.Ddrd == nil {
+		return NewVarNamePairSet()
+	}
+	
+	return CollectVarNamePairsFromReport(result.Ddrd)
+}
+
+// executeCombined runs both programs in barrier mode.
+func (job *threePhaseJob) executeCombined() *ddrd.Report {
+	req := &queue.Request{
+		Prog:     job.prog1.Clone(),
+		ExecOpts: setFlags(flatrpc.ExecFlagCollectCover),
+		Stat:     job.stat,
+	}
+	
+	// Use SetBarrier to properly set all barrier flags including ExecFlagBarrier
+	req.SetBarrier(job.mask)
+	
+	programs := []*prog.Prog{job.prog1.Clone(), job.prog2.Clone()}
+	if err := req.SetBarrierPrograms(programs); err != nil {
+		job.fuzzer.Logf(1, "threePhase: failed to set combined programs: %v", err)
+		return nil
+	}
+	
+	result := job.fuzzer.executeWithFlags(job.exec, req, ProgBarrier)
+	if result == nil {
+		return nil
+	}
+	
+	return result.Ddrd
+}
+
+// filterCrossProgramPairs filters to keep only truly cross-program pairs.
+func (job *threePhaseJob) filterCrossProgramPairs(
+	combinedPairs []*ddrd.MayUAFPair,
+	prog1SoloPairs *VarNamePairSet,
+	prog2SoloPairs *VarNamePairSet,
+) []*ddrd.MayUAFPair {
+	
+	// Merge solo pairs into one set
+	soloPairs := NewVarNamePairSet()
+	soloPairs.Merge(prog1SoloPairs)
+	soloPairs.Merge(prog2SoloPairs)
+	
+	// Filter: keep only pairs not in solo runs
+	var crossProgram []*ddrd.MayUAFPair
+	for _, uafPair := range combinedPairs {
+		if uafPair == nil {
+			continue
+		}
+		pair := NewVarNamePair(uafPair.FreeAccessName, uafPair.UseAccessName)
+		if !soloPairs.Contains(pair) {
+			crossProgram = append(crossProgram, uafPair)
+		}
+	}
+	
+	job.fuzzer.Logf(2, "threePhase: filtered %d combined pairs to %d cross-program pairs (removed %d solo pairs from prog1=%d prog2=%d)",
+		len(combinedPairs), len(crossProgram), 
+		len(combinedPairs)-len(crossProgram),
+		prog1SoloPairs.Size(), prog2SoloPairs.Size())
+	
+	return crossProgram
+}
+
+// processCrossProgramPairs updates M1' share scores and M2 feedback.
+func (job *threePhaseJob) processCrossProgramPairs(
+	crossProgramPairs []*ddrd.MayUAFPair,
+	prog1SoloPairs *VarNamePairSet,
+	prog2SoloPairs *VarNamePairSet,
+) {
+	if job.fuzzer.raceGroup == nil {
+		return
+	}
+	
+	// Update share scores for M1' based on cross-program pairs
+	for _, uafPair := range crossProgramPairs {
+		if uafPair == nil {
+			continue
+		}
+		
+		// Extract (prog_idx, call_idx) information for M1' learning
+		// Free operation attribution
+		if uafPair.FreeProgIdx >= 0 && uafPair.FreeCallIdx >= 0 {
+			job.updateShareScore(uafPair.FreeProgIdx, uafPair.FreeCallIdx, uafPair)
+		}
+		// Use operation attribution  
+		if uafPair.UseProgIdx >= 0 && uafPair.UseCallIdx >= 0 {
+			job.updateShareScore(uafPair.UseProgIdx, uafPair.UseCallIdx, uafPair)
+		}
+	}
+	
+	// Update M2 race yield feedback
+	if len(crossProgramPairs) > 0 {
+		job.fuzzer.raceGroup.RecordRacePairs(job.prog1, crossProgramPairs)
+		job.fuzzer.raceGroup.RecordRacePairs(job.prog2, crossProgramPairs)
+	}
+}
+
+// updateShareScore updates M1' share score based on cross-program race.
+func (job *threePhaseJob) updateShareScore(progIdx int32, callIdx int32, pair *ddrd.MayUAFPair) {
+	if job.fuzzer.raceGroup == nil {
+		return
+	}
+	
+	// Determine which program this is
+	var p *prog.Prog
+	if progIdx == 0 {
+		p = job.prog1
+	} else if progIdx == 1 {
+		p = job.prog2
+	} else {
+		return
+	}
+	
+	// Get syscall at callIdx
+	if p == nil || int(callIdx) >= len(p.Calls) {
+		return
+	}
+	
+	// Calculate certainty score (for now, cross-program pairs are high certainty)
+	// since they passed the 3-phase filter
+	certaintyScore := CertaintyScore(1) // High certainty: passed filter
+	
+	// Update namespace share score
+	call := p.Calls[callIdx]
+	if call != nil && call.Meta != nil {
+		nsKey := extractNamespaceFromMeta(call.Meta)
+		if nsKey != "" {
+			job.fuzzer.raceGroup.IncrementShareScore(nsKey, certaintyScore)
+		}
+	}
+}
+
+func (job *threePhaseJob) getInfo() *JobInfo {
+	return job.info
+}
+
+// extractNamespaceFromMeta extracts namespace from syscall metadata.
+func extractNamespaceFromMeta(meta *prog.Syscall) string {
+	if meta == nil {
+		return ""
+	}
+	// Extract subsystem from syscall name (e.g., "syz_open_dev" -> "dev")
+	name := meta.Name
+	if idx := strings.Index(name, "$"); idx > 0 {
+		name = name[:idx]
+	}
+	// Use CallName as namespace key
+	return meta.CallName
 }

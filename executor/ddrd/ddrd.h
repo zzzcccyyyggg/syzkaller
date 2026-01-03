@@ -41,6 +41,10 @@ typedef struct {
     int use_sn;
     int free_tid;
     int use_tid;
+    int free_call_idx;   // Syscall index for free (-1 = kernel bg)
+    int use_call_idx;    // Syscall index for use (-1 = kernel bg)
+    int free_prog_idx;   // Which program (0 or 1) for free operation
+    int use_prog_idx;    // Which program (0 or 1) for use operation
     uint32_t lock_type;
     uint32_t use_access_type;
 } may_uaf_pair_t;

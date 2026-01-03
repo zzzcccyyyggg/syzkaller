@@ -7,13 +7,15 @@ import (
 )
 
 type SnapshotHeaderT struct {
-	State SnapshotState `json:"state"`
-	OutputOffset uint32 `json:"output_offset"`
-	OutputSize uint32 `json:"output_size"`
+	State        SnapshotState `json:"state"`
+	OutputOffset uint32        `json:"output_offset"`
+	OutputSize   uint32        `json:"output_size"`
 }
 
 func (t *SnapshotHeaderT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	SnapshotHeaderStart(builder)
 	SnapshotHeaderAddState(builder, t.State)
 	SnapshotHeaderAddOutputOffset(builder, t.OutputOffset)
@@ -28,7 +30,9 @@ func (rcv *SnapshotHeader) UnPackTo(t *SnapshotHeaderT) {
 }
 
 func (rcv *SnapshotHeader) UnPack() *SnapshotHeaderT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &SnapshotHeaderT{}
 	rcv.UnPackTo(t)
 	return t

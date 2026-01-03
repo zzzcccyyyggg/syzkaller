@@ -20,11 +20,17 @@ typedef struct {
     int access_count;             // 本次采样的访问记录数
     int free_count;               // 本次采样的 free 操作数
     int race_pair_count;          // 本次检测到的 race pair 数
-    int unique_race_count;        // 本次新发现的唯一 race 数
-    int total_unique_races;       // 累计唯一 race 总数
+    int unique_race_count;        // 本次新发现的唯一 race 数（基于 var+stack 4元组）
+    int total_unique_races;       // 累计唯一 race 总数（基于 var+stack 4元组）
     int uaf_pair_count;           // 本次检测到的 UAF pair 数
-    int unique_uaf_count;         // 本次新发现的唯一 UAF 数
-    int total_unique_uaf;         // 累计唯一 UAF 总数
+    int unique_uaf_count;         // 本次新发现的唯一 UAF 数（基于 var+stack 4元组）
+    int total_unique_uaf;         // 累计唯一 UAF 总数（基于 var+stack 4元组）
+    
+    // VarNamePair 统计（与主 fuzzer 一致，仅基于 var_name 2元组）
+    int unique_varname_pairs;           // 本次新发现的唯一 VarNamePair 数
+    int total_unique_varname_pairs;     // 累计唯一 VarNamePair 总数
+    int unique_uaf_varname_pairs;       // 本次新发现的唯一 UAF VarNamePair 数
+    int total_unique_uaf_varname_pairs; // 累计唯一 UAF VarNamePair 总数
 } SampleResult;
 
 // ============================================
@@ -43,6 +49,10 @@ typedef struct {
     uint64_t total_uaf_pairs;
     int last_unique_races;
     int last_unique_uaf;
+    
+    // VarNamePair 统计
+    int last_unique_varname_pairs;
+    int last_unique_uaf_varname_pairs;
     
     // 用于 JSON 格式的标记
     bool first_sample;

@@ -11,7 +11,9 @@ type StateResultRawT struct {
 }
 
 func (t *StateResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	dataOffset := flatbuffers.UOffsetT(0)
 	if t.Data != nil {
 		dataOffset = builder.CreateByteString(t.Data)
@@ -26,7 +28,9 @@ func (rcv *StateResultRaw) UnPackTo(t *StateResultRawT) {
 }
 
 func (rcv *StateResultRaw) UnPack() *StateResultRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &StateResultRawT{}
 	rcv.UnPackTo(t)
 	return t

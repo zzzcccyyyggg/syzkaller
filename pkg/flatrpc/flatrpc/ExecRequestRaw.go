@@ -7,28 +7,30 @@ import (
 )
 
 type ExecRequestRawT struct {
-	Id int64 `json:"id"`
-	Type RequestType `json:"type"`
-	Avoid uint64 `json:"avoid"`
-	Data []byte `json:"data"`
-	ExecOpts *ExecOptsRawT `json:"exec_opts"`
-	Flags RequestFlag `json:"flags"`
-	AllSignal []int32 `json:"all_signal"`
-	BarrierParticipants uint64 `json:"barrier_participants"`
-	BarrierGroupId int64 `json:"barrier_group_id"`
-	BarrierIndex int32 `json:"barrier_index"`
-	BarrierGroupSize int32 `json:"barrier_group_size"`
-	BarrierStartDelayUs []int64 `json:"barrier_start_delay_us"`
-	UkcUseName uint64 `json:"ukc_use_name"`
-	UkcUseStack uint64 `json:"ukc_use_stack"`
-	UkcFreeName uint64 `json:"ukc_free_name"`
-	UkcFreeStack uint64 `json:"ukc_free_stack"`
-	UkcUseAccessDelayTime int32 `json:"ukc_use_access_delay_time"`
-	UkcIsValid bool `json:"ukc_is_valid"`
+	Id                    int64         `json:"id"`
+	Type                  RequestType   `json:"type"`
+	Avoid                 uint64        `json:"avoid"`
+	Data                  []byte        `json:"data"`
+	ExecOpts              *ExecOptsRawT `json:"exec_opts"`
+	Flags                 RequestFlag   `json:"flags"`
+	AllSignal             []int32       `json:"all_signal"`
+	BarrierParticipants   uint64        `json:"barrier_participants"`
+	BarrierGroupId        int64         `json:"barrier_group_id"`
+	BarrierIndex          int32         `json:"barrier_index"`
+	BarrierGroupSize      int32         `json:"barrier_group_size"`
+	BarrierStartDelayUs   []int64       `json:"barrier_start_delay_us"`
+	UkcUseName            uint64        `json:"ukc_use_name"`
+	UkcUseStack           uint64        `json:"ukc_use_stack"`
+	UkcFreeName           uint64        `json:"ukc_free_name"`
+	UkcFreeStack          uint64        `json:"ukc_free_stack"`
+	UkcUseAccessDelayTime int32         `json:"ukc_use_access_delay_time"`
+	UkcIsValid            bool          `json:"ukc_is_valid"`
 }
 
 func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	dataOffset := flatbuffers.UOffsetT(0)
 	if t.Data != nil {
 		dataOffset = builder.CreateByteString(t.Data)
@@ -104,7 +106,9 @@ func (rcv *ExecRequestRaw) UnPackTo(t *ExecRequestRawT) {
 }
 
 func (rcv *ExecRequestRaw) UnPack() *ExecRequestRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ExecRequestRawT{}
 	rcv.UnPackTo(t)
 	return t

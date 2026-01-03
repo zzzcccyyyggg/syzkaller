@@ -3607,6 +3607,12 @@ type DdrdUafPairRawT struct {
 	UseSn          int32  `json:"use_sn"`
 	LockType       uint32 `json:"lock_type"`
 	UseAccessType  uint32 `json:"use_access_type"`
+	FreeTid        int32  `json:"free_tid"`
+	UseTid         int32  `json:"use_tid"`
+	FreeCallIdx    int32  `json:"free_call_idx"`
+	UseCallIdx     int32  `json:"use_call_idx"`
+	FreeProgIdx    int32  `json:"free_prog_idx"`
+	UseProgIdx     int32  `json:"use_prog_idx"`
 }
 
 func (t *DdrdUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -3624,6 +3630,12 @@ func (t *DdrdUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffset
 	DdrdUafPairRawAddUseSn(builder, t.UseSn)
 	DdrdUafPairRawAddLockType(builder, t.LockType)
 	DdrdUafPairRawAddUseAccessType(builder, t.UseAccessType)
+	DdrdUafPairRawAddFreeTid(builder, t.FreeTid)
+	DdrdUafPairRawAddUseTid(builder, t.UseTid)
+	DdrdUafPairRawAddFreeCallIdx(builder, t.FreeCallIdx)
+	DdrdUafPairRawAddUseCallIdx(builder, t.UseCallIdx)
+	DdrdUafPairRawAddFreeProgIdx(builder, t.FreeProgIdx)
+	DdrdUafPairRawAddUseProgIdx(builder, t.UseProgIdx)
 	return DdrdUafPairRawEnd(builder)
 }
 
@@ -3638,6 +3650,12 @@ func (rcv *DdrdUafPairRaw) UnPackTo(t *DdrdUafPairRawT) {
 	t.UseSn = rcv.UseSn()
 	t.LockType = rcv.LockType()
 	t.UseAccessType = rcv.UseAccessType()
+	t.FreeTid = rcv.FreeTid()
+	t.UseTid = rcv.UseTid()
+	t.FreeCallIdx = rcv.FreeCallIdx()
+	t.UseCallIdx = rcv.UseCallIdx()
+	t.FreeProgIdx = rcv.FreeProgIdx()
+	t.UseProgIdx = rcv.UseProgIdx()
 }
 
 func (rcv *DdrdUafPairRaw) UnPack() *DdrdUafPairRawT {
@@ -3796,8 +3814,80 @@ func (rcv *DdrdUafPairRaw) MutateUseAccessType(n uint32) bool {
 	return rcv._tab.MutateUint32Slot(22, n)
 }
 
+func (rcv *DdrdUafPairRaw) FreeTid() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(24))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeTid(n int32) bool {
+	return rcv._tab.MutateInt32Slot(24, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseTid() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(26))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseTid(n int32) bool {
+	return rcv._tab.MutateInt32Slot(26, n)
+}
+
+func (rcv *DdrdUafPairRaw) FreeCallIdx() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(28))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeCallIdx(n int32) bool {
+	return rcv._tab.MutateInt32Slot(28, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseCallIdx() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(30))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseCallIdx(n int32) bool {
+	return rcv._tab.MutateInt32Slot(30, n)
+}
+
+func (rcv *DdrdUafPairRaw) FreeProgIdx() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateFreeProgIdx(n int32) bool {
+	return rcv._tab.MutateInt32Slot(32, n)
+}
+
+func (rcv *DdrdUafPairRaw) UseProgIdx() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *DdrdUafPairRaw) MutateUseProgIdx(n int32) bool {
+	return rcv._tab.MutateInt32Slot(34, n)
+}
+
 func DdrdUafPairRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(10)
+	builder.StartObject(16)
 }
 func DdrdUafPairRawAddFreeAccessName(builder *flatbuffers.Builder, freeAccessName uint64) {
 	builder.PrependUint64Slot(0, freeAccessName, 0)
@@ -3828,6 +3918,24 @@ func DdrdUafPairRawAddLockType(builder *flatbuffers.Builder, lockType uint32) {
 }
 func DdrdUafPairRawAddUseAccessType(builder *flatbuffers.Builder, useAccessType uint32) {
 	builder.PrependUint32Slot(9, useAccessType, 0)
+}
+func DdrdUafPairRawAddFreeTid(builder *flatbuffers.Builder, freeTid int32) {
+	builder.PrependInt32Slot(10, freeTid, 0)
+}
+func DdrdUafPairRawAddUseTid(builder *flatbuffers.Builder, useTid int32) {
+	builder.PrependInt32Slot(11, useTid, 0)
+}
+func DdrdUafPairRawAddFreeCallIdx(builder *flatbuffers.Builder, freeCallIdx int32) {
+	builder.PrependInt32Slot(12, freeCallIdx, 0)
+}
+func DdrdUafPairRawAddUseCallIdx(builder *flatbuffers.Builder, useCallIdx int32) {
+	builder.PrependInt32Slot(13, useCallIdx, 0)
+}
+func DdrdUafPairRawAddFreeProgIdx(builder *flatbuffers.Builder, freeProgIdx int32) {
+	builder.PrependInt32Slot(14, freeProgIdx, 0)
+}
+func DdrdUafPairRawAddUseProgIdx(builder *flatbuffers.Builder, useProgIdx int32) {
+	builder.PrependInt32Slot(15, useProgIdx, 0)
 }
 func DdrdUafPairRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

@@ -7,18 +7,20 @@ import (
 )
 
 type DdrdExtendedUafPairRawT struct {
-	Basic *DdrdUafPairRawT `json:"basic"`
-	UseThreadHistoryCount uint32 `json:"use_thread_history_count"`
-	FreeThreadHistoryCount uint32 `json:"free_thread_history_count"`
-	UseTargetTime uint64 `json:"use_target_time"`
-	FreeTargetTime uint64 `json:"free_target_time"`
-	PathDistanceUse float64 `json:"path_distance_use"`
-	PathDistanceFree float64 `json:"path_distance_free"`
-	AccessHistory []*DdrdSerializedAccessRawT `json:"access_history"`
+	Basic                  *DdrdUafPairRawT            `json:"basic"`
+	UseThreadHistoryCount  uint32                      `json:"use_thread_history_count"`
+	FreeThreadHistoryCount uint32                      `json:"free_thread_history_count"`
+	UseTargetTime          uint64                      `json:"use_target_time"`
+	FreeTargetTime         uint64                      `json:"free_target_time"`
+	PathDistanceUse        float64                     `json:"path_distance_use"`
+	PathDistanceFree       float64                     `json:"path_distance_free"`
+	AccessHistory          []*DdrdSerializedAccessRawT `json:"access_history"`
 }
 
 func (t *DdrdExtendedUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	basicOffset := t.Basic.Pack(builder)
 	accessHistoryOffset := flatbuffers.UOffsetT(0)
 	if t.AccessHistory != nil {
@@ -63,7 +65,9 @@ func (rcv *DdrdExtendedUafPairRaw) UnPackTo(t *DdrdExtendedUafPairRawT) {
 }
 
 func (rcv *DdrdExtendedUafPairRaw) UnPack() *DdrdExtendedUafPairRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &DdrdExtendedUafPairRawT{}
 	rcv.UnPackTo(t)
 	return t

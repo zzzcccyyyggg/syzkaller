@@ -11,9 +11,11 @@ type ExecutorMessageRawT struct {
 }
 
 func (t *ExecutorMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	msgOffset := t.Msg.Pack(builder)
-	
+
 	ExecutorMessageRawStart(builder)
 	if t.Msg != nil {
 		ExecutorMessageRawAddMsgType(builder, t.Msg.Type)
@@ -30,7 +32,9 @@ func (rcv *ExecutorMessageRaw) UnPackTo(t *ExecutorMessageRawT) {
 }
 
 func (rcv *ExecutorMessageRaw) UnPack() *ExecutorMessageRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ExecutorMessageRawT{}
 	rcv.UnPackTo(t)
 	return t

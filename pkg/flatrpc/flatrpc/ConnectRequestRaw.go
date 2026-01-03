@@ -7,15 +7,17 @@ import (
 )
 
 type ConnectRequestRawT struct {
-	Cookie uint64 `json:"cookie"`
-	Id int64 `json:"id"`
-	Arch string `json:"arch"`
+	Cookie      uint64 `json:"cookie"`
+	Id          int64  `json:"id"`
+	Arch        string `json:"arch"`
 	GitRevision string `json:"git_revision"`
 	SyzRevision string `json:"syz_revision"`
 }
 
 func (t *ConnectRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	archOffset := builder.CreateString(t.Arch)
 	gitRevisionOffset := builder.CreateString(t.GitRevision)
 	syzRevisionOffset := builder.CreateString(t.SyzRevision)
@@ -37,7 +39,9 @@ func (rcv *ConnectRequestRaw) UnPackTo(t *ConnectRequestRawT) {
 }
 
 func (rcv *ConnectRequestRaw) UnPack() *ConnectRequestRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ConnectRequestRawT{}
 	rcv.UnPackTo(t)
 	return t

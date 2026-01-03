@@ -11,7 +11,9 @@ type ConnectHelloRawT struct {
 }
 
 func (t *ConnectHelloRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	ConnectHelloRawStart(builder)
 	ConnectHelloRawAddCookie(builder, t.Cookie)
 	return ConnectHelloRawEnd(builder)
@@ -22,7 +24,9 @@ func (rcv *ConnectHelloRaw) UnPackTo(t *ConnectHelloRawT) {
 }
 
 func (rcv *ConnectHelloRaw) UnPack() *ConnectHelloRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ConnectHelloRawT{}
 	rcv.UnPackTo(t)
 	return t

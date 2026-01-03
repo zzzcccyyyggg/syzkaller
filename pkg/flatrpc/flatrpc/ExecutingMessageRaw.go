@@ -7,14 +7,16 @@ import (
 )
 
 type ExecutingMessageRawT struct {
-	Id int64 `json:"id"`
-	ProcId int32 `json:"proc_id"`
-	Try int32 `json:"try"`
+	Id           int64 `json:"id"`
+	ProcId       int32 `json:"proc_id"`
+	Try          int32 `json:"try"`
 	WaitDuration int64 `json:"wait_duration"`
 }
 
 func (t *ExecutingMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	ExecutingMessageRawStart(builder)
 	ExecutingMessageRawAddId(builder, t.Id)
 	ExecutingMessageRawAddProcId(builder, t.ProcId)
@@ -31,7 +33,9 @@ func (rcv *ExecutingMessageRaw) UnPackTo(t *ExecutingMessageRawT) {
 }
 
 func (rcv *ExecutingMessageRaw) UnPack() *ExecutingMessageRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &ExecutingMessageRawT{}
 	rcv.UnPackTo(t)
 	return t

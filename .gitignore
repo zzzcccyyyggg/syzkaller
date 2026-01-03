@@ -39,3 +39,5 @@ executor/syscalls.h
 syzkaller-old/
 repro/
 DDRD/
+tools/syz-race-collector/__pycache__/
+*.png

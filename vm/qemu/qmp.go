@@ -163,7 +163,7 @@ func (inst *instance) hmp(cmd string, cpu int) (string, error) {
 // The -snapshot flag must NOT be used for this to work properly.
 func (inst *instance) SaveVMSnapshot(name string) error {
 	log.Logf(0, "qemu: vm %d saving snapshot '%s'", inst.index, name)
-	
+
 	// First, check the current block device status
 	infoOutput, infoErr := inst.hmp("info block", 0)
 	if infoErr != nil {
@@ -171,18 +171,18 @@ func (inst *instance) SaveVMSnapshot(name string) error {
 	} else {
 		log.Logf(0, "qemu: vm %d block devices before savevm:\n%s", inst.index, infoOutput)
 	}
-	
+
 	output, err := inst.hmp(fmt.Sprintf("savevm %s", name), 0)
 	if err != nil {
 		return fmt.Errorf("savevm failed: %w", err)
 	}
 	// Log the output regardless of debug mode to help diagnose snapshot issues
 	log.Logf(0, "qemu: vm %d savevm output: '%s' (empty means success)", inst.index, output)
-	
+
 	if strings.Contains(output, "Error") || strings.Contains(output, "error") {
 		return fmt.Errorf("savevm failed: %s", output)
 	}
-	
+
 	// Verify the snapshot was actually saved by listing snapshots
 	snapshotList, listErr := inst.hmp("info snapshots", 0)
 	if listErr != nil {
@@ -194,7 +194,7 @@ func (inst *instance) SaveVMSnapshot(name string) error {
 			return fmt.Errorf("savevm claimed success but snapshot '%s' not found in snapshot list", name)
 		}
 	}
-	
+
 	log.Logf(0, "qemu: vm %d snapshot '%s' saved successfully", inst.index, name)
 	return nil
 }

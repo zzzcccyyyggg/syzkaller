@@ -7,13 +7,15 @@ import (
 )
 
 type InfoRequestRawT struct {
-	Error string `json:"error"`
+	Error    string             `json:"error"`
 	Features []*FeatureInfoRawT `json:"features"`
-	Files []*FileInfoRawT `json:"files"`
+	Files    []*FileInfoRawT    `json:"files"`
 }
 
 func (t *InfoRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	errorOffset := builder.CreateString(t.Error)
 	featuresOffset := flatbuffers.UOffsetT(0)
 	if t.Features != nil {
@@ -67,7 +69,9 @@ func (rcv *InfoRequestRaw) UnPackTo(t *InfoRequestRawT) {
 }
 
 func (rcv *InfoRequestRaw) UnPack() *InfoRequestRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &InfoRequestRawT{}
 	rcv.UnPackTo(t)
 	return t

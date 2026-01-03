@@ -10,7 +10,9 @@ type StateRequestRawT struct {
 }
 
 func (t *StateRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	StateRequestRawStart(builder)
 	return StateRequestRawEnd(builder)
 }
@@ -19,7 +21,9 @@ func (rcv *StateRequestRaw) UnPackTo(t *StateRequestRawT) {
 }
 
 func (rcv *StateRequestRaw) UnPack() *StateRequestRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &StateRequestRawT{}
 	rcv.UnPackTo(t)
 	return t

@@ -42,7 +42,7 @@ func (v HostMessagesRaw) String() string {
 }
 
 type HostMessagesRawT struct {
-	Type HostMessagesRaw
+	Type  HostMessagesRaw
 	Value interface{}
 }
 
@@ -67,16 +67,16 @@ func (rcv HostMessagesRaw) UnPack(table flatbuffers.Table) *HostMessagesRawT {
 	switch rcv {
 	case HostMessagesRawExecRequest:
 		x := ExecRequestRaw{_tab: table}
-		return &HostMessagesRawT{ Type: HostMessagesRawExecRequest, Value: x.UnPack() }
+		return &HostMessagesRawT{Type: HostMessagesRawExecRequest, Value: x.UnPack()}
 	case HostMessagesRawSignalUpdate:
 		x := SignalUpdateRaw{_tab: table}
-		return &HostMessagesRawT{ Type: HostMessagesRawSignalUpdate, Value: x.UnPack() }
+		return &HostMessagesRawT{Type: HostMessagesRawSignalUpdate, Value: x.UnPack()}
 	case HostMessagesRawCorpusTriaged:
 		x := CorpusTriagedRaw{_tab: table}
-		return &HostMessagesRawT{ Type: HostMessagesRawCorpusTriaged, Value: x.UnPack() }
+		return &HostMessagesRawT{Type: HostMessagesRawCorpusTriaged, Value: x.UnPack()}
 	case HostMessagesRawStateRequest:
 		x := StateRequestRaw{_tab: table}
-		return &HostMessagesRawT{ Type: HostMessagesRawStateRequest, Value: x.UnPack() }
+		return &HostMessagesRawT{Type: HostMessagesRawStateRequest, Value: x.UnPack()}
 	}
 	return nil
 }

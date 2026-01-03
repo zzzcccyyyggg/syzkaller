@@ -33,6 +33,9 @@ type Fuzzer struct {
 	ddrd   *ddrd.Store
 	uaf    *uafMode
 
+	// Race-Guided Program-Group Fuzzing
+	raceGroup *RaceGroupManager
+
 	uafBootstrapDone atomic.Bool
 
 	ctx          context.Context
@@ -78,6 +81,10 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		ctRegenerate: make(chan struct{}),
 	}
 	f.uaf = newUAFMode(f)
+	// Initialize Race-Guided Program-Group Manager
+	if cfg.ModeUAF {
+		f.raceGroup = NewRaceGroupManager(DefaultRaceGroupConfig())
+	}
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
 	go f.choiceTableUpdater()
@@ -190,6 +197,12 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			// fuzzer.Logf(0, "uaf: handleNewPairs done barrier_id=%d duration=%s", groupID, time.Since(handleStart))
 			// } else if req != nil {
 			// 	fuzzer.Logf(0, "uaf: handleNewPairs skipped barrier_id=%d no-new-pairs mask=%#x", groupID, req.BarrierParticipants)
+			
+			// Strategy A: When new pairs are discovered, start 3-phase execution to verify
+			// This filters out same-program pairs and keeps only truly cross-program races
+			if fuzzer.raceGroup != nil && req != nil && len(req.BarrierPrograms) >= 2 {
+				fuzzer.triggerThreePhaseVerification(req, res)
+			}
 		}
 		// recordStart := time.Now()
 		fuzzer.uaf.recordExecution(req, res)
@@ -416,6 +429,15 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 	if count == 0 {
 		return nil
 	}
+
+	// Use Race-Guided Partner Selection if available
+	if fuzzer.raceGroup != nil {
+		corpus := fuzzer.Config.Corpus.Programs()
+		rnd := fuzzer.rand()
+		return fuzzer.raceGroup.BuildBarrierProgramsWithRaceGuidance(req.Prog, count, corpus, rnd)
+	}
+
+	// Fallback to original random selection
 	programs := make([]*prog.Prog, count)
 	programs[0] = req.Prog
 	if count == 1 {
@@ -436,6 +458,54 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 		}
 	}
 	return programs
+}
+
+// startThreePhaseJob starts a 3-phase execution job for precise cross-program race detection.
+// This runs: prog1 solo → prog2 solo → prog1+prog2 barrier, then filters to keep only
+// truly cross-program race pairs.
+func (fuzzer *Fuzzer) startThreePhaseJob(executor queue.Executor, prog1, prog2 *prog.Prog, mask uint64) {
+	if prog1 == nil || prog2 == nil {
+		return
+	}
+	job := &threePhaseJob{
+		exec:   executor,
+		prog1:  prog1.Clone(),
+		prog2:  prog2.Clone(),
+		mask:   mask,
+		stat:   fuzzer.statExecUAF,
+		fuzzer: fuzzer,
+		info: &JobInfo{
+			Name: "three-phase-filter",
+			Type: "three-phase",
+		},
+	}
+	fuzzer.startJob(fuzzer.statJobsThreePhase, job)
+}
+
+// triggerThreePhaseVerification starts a 3-phase job to verify newly discovered pairs.
+// This is called when new UAF pairs are found during barrier execution.
+// The 3-phase execution will filter out same-program pairs and keep only cross-program races.
+func (fuzzer *Fuzzer) triggerThreePhaseVerification(req *queue.Request, res *queue.Result) {
+	if req == nil || len(req.BarrierPrograms) < 2 {
+		return
+	}
+	
+	prog1 := req.BarrierPrograms[0]
+	prog2 := req.BarrierPrograms[1]
+	if prog1 == nil || prog2 == nil {
+		return
+	}
+	
+	mask := req.BarrierParticipants
+	if mask == 0 {
+		mask = 0x3 // default: proc 0 and 1
+	}
+	
+	// Use smashQueue as executor (it implements queue.Executor)
+	executor := fuzzer.smashQueue
+	
+	fuzzer.Logf(2, "triggering 3-phase verification for new pairs")
+	fuzzer.startThreePhaseJob(executor, prog1, prog2, mask)
 }
 
 func (fuzzer *Fuzzer) startJob(stat *stat.Val, newJob job) {

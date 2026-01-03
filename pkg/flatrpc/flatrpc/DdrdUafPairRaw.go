@@ -8,19 +8,21 @@ import (
 
 type DdrdUafPairRawT struct {
 	FreeAccessName uint64 `json:"free_access_name"`
-	UseAccessName uint64 `json:"use_access_name"`
-	FreeCallStack uint64 `json:"free_call_stack"`
-	UseCallStack uint64 `json:"use_call_stack"`
-	Signal uint64 `json:"signal"`
-	TimeDiff uint64 `json:"time_diff"`
-	FreeSn int32 `json:"free_sn"`
-	UseSn int32 `json:"use_sn"`
-	LockType uint32 `json:"lock_type"`
-	UseAccessType uint32 `json:"use_access_type"`
+	UseAccessName  uint64 `json:"use_access_name"`
+	FreeCallStack  uint64 `json:"free_call_stack"`
+	UseCallStack   uint64 `json:"use_call_stack"`
+	Signal         uint64 `json:"signal"`
+	TimeDiff       uint64 `json:"time_diff"`
+	FreeSn         int32  `json:"free_sn"`
+	UseSn          int32  `json:"use_sn"`
+	LockType       uint32 `json:"lock_type"`
+	UseAccessType  uint32 `json:"use_access_type"`
 }
 
 func (t *DdrdUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	DdrdUafPairRawStart(builder)
 	DdrdUafPairRawAddFreeAccessName(builder, t.FreeAccessName)
 	DdrdUafPairRawAddUseAccessName(builder, t.UseAccessName)
@@ -49,7 +51,9 @@ func (rcv *DdrdUafPairRaw) UnPackTo(t *DdrdUafPairRawT) {
 }
 
 func (rcv *DdrdUafPairRaw) UnPack() *DdrdUafPairRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &DdrdUafPairRawT{}
 	rcv.UnPackTo(t)
 	return t

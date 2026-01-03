@@ -7,12 +7,14 @@ import (
 )
 
 type DdrdRawT struct {
-	UafPairs []*DdrdUafPairRawT `json:"uaf_pairs"`
+	UafPairs    []*DdrdUafPairRawT         `json:"uaf_pairs"`
 	ExtendedUaf []*DdrdExtendedUafPairRawT `json:"extended_uaf"`
 }
 
 func (t *DdrdRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	uafPairsOffset := flatbuffers.UOffsetT(0)
 	if t.UafPairs != nil {
 		uafPairsLength := len(t.UafPairs)
@@ -63,7 +65,9 @@ func (rcv *DdrdRaw) UnPackTo(t *DdrdRawT) {
 }
 
 func (rcv *DdrdRaw) UnPack() *DdrdRawT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &DdrdRawT{}
 	rcv.UnPackTo(t)
 	return t

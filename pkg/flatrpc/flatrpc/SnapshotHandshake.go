@@ -7,18 +7,20 @@ import (
 )
 
 type SnapshotHandshakeT struct {
-	CoverEdges bool `json:"cover_edges"`
-	Kernel64Bit bool `json:"kernel_64_bit"`
-	Slowdown int32 `json:"slowdown"`
-	SyscallTimeoutMs int32 `json:"syscall_timeout_ms"`
-	ProgramTimeoutMs int32 `json:"program_timeout_ms"`
-	Features Feature `json:"features"`
-	EnvFlags ExecEnv `json:"env_flags"`
-	SandboxArg int64 `json:"sandbox_arg"`
+	CoverEdges       bool    `json:"cover_edges"`
+	Kernel64Bit      bool    `json:"kernel_64_bit"`
+	Slowdown         int32   `json:"slowdown"`
+	SyscallTimeoutMs int32   `json:"syscall_timeout_ms"`
+	ProgramTimeoutMs int32   `json:"program_timeout_ms"`
+	Features         Feature `json:"features"`
+	EnvFlags         ExecEnv `json:"env_flags"`
+	SandboxArg       int64   `json:"sandbox_arg"`
 }
 
 func (t *SnapshotHandshakeT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	SnapshotHandshakeStart(builder)
 	SnapshotHandshakeAddCoverEdges(builder, t.CoverEdges)
 	SnapshotHandshakeAddKernel64Bit(builder, t.Kernel64Bit)
@@ -43,7 +45,9 @@ func (rcv *SnapshotHandshake) UnPackTo(t *SnapshotHandshakeT) {
 }
 
 func (rcv *SnapshotHandshake) UnPack() *SnapshotHandshakeT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &SnapshotHandshakeT{}
 	rcv.UnPackTo(t)
 	return t

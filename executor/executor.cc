@@ -160,6 +160,21 @@ bool IsSet(T flags, T f)
 
 const uint32 kMaxCalls = 64;
 
+// Structure to store syscall context history in shared memory for M3 support
+// This is placed in OutputData so runner can access executor's syscall context
+struct SyscallHistoryRecord {
+	int32_t tid;
+	int32_t call_index;
+	int32_t prog_idx; // Which program/executor this belongs to (barrier_index)
+	int32_t padding; // Padding for alignment
+	uint64_t start_time;
+	uint64_t end_time;
+};
+static_assert(sizeof(SyscallHistoryRecord) == 32, "SyscallHistoryRecord size mismatch");
+
+// Maximum number of syscall history entries to share per executor
+#define MAX_SHARED_SYSCALL_HISTORY 128
+
 struct alignas(8) OutputData {
 	std::atomic<uint32> size;
 	std::atomic<uint32> consumed;
@@ -173,6 +188,10 @@ struct alignas(8) OutputData {
 		flatbuffers::Offset<rpc::CallInfoRaw> offset;
 	} calls[kMaxCalls];
 
+	// Syscall context history for M3 call_idx lookup (shared with runner process)
+	std::atomic<int32_t> syscall_history_count;
+	SyscallHistoryRecord syscall_history[MAX_SHARED_SYSCALL_HISTORY];
+
 	void Reset()
 	{
 		size.store(0, std::memory_order_relaxed);
@@ -180,6 +199,7 @@ struct alignas(8) OutputData {
 		completed.store(0, std::memory_order_relaxed);
 		num_calls.store(0, std::memory_order_relaxed);
 		result_offset.store(0, std::memory_order_relaxed);
+		syscall_history_count.store(0, std::memory_order_relaxed);
 	}
 };
 
@@ -398,6 +418,16 @@ static flatbuffers::Offset<rpc::DdrdRaw> ddrd_build_output(ShmemBuilder& fbb)
 		builder.add_use_sn(pair.use_sn);
 		builder.add_lock_type(pair.lock_type);
 		builder.add_use_access_type(pair.use_access_type);
+		// New fields for syscall-level attribution (M3 support)
+		builder.add_free_tid(pair.free_tid);
+		builder.add_use_tid(pair.use_tid);
+		builder.add_free_call_idx(pair.free_call_idx);
+		builder.add_use_call_idx(pair.use_call_idx);
+		builder.add_free_prog_idx(pair.free_prog_idx);
+		builder.add_use_prog_idx(pair.use_prog_idx);
+		// fprintf(stderr, "[UAF-PAIR] serialize: free_tid=%d use_tid=%d free_call_idx=%d(prog%d) use_call_idx=%d(prog%d) var1=0x%llx var2=0x%llx\n",
+		// 	pair.free_tid, pair.use_tid, pair.free_call_idx, pair.free_prog_idx, pair.use_call_idx, pair.use_prog_idx,
+		// 	(unsigned long long)pair.free_access_name, (unsigned long long)pair.use_access_name);
 		uaf_offsets.push_back(builder.Finish());
 	}
 
@@ -1178,6 +1208,10 @@ void execute_one()
 	// Linux TASK_COMM_LEN is only 16, so the name needs to be compact.
 	snprintf(buf, sizeof(buf), "syz.%llu.%llu", procid, request_id);
 	prctl(PR_SET_NAME, buf);
+	// Initialize syscall context table for race pair attribution
+	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+		syscall_context_init(&g_syscall_context);
+	}
 #endif
 	if (flag_snapshot)
 		SnapshotStart();
@@ -1419,6 +1453,32 @@ void execute_one()
 			write_extra_output();
 		}
 	}
+
+	// Copy syscall context to shared memory for runner process to read
+#if GOOS_linux
+	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+		int32_t ctx_count = g_syscall_context.history_count;
+		if (ctx_count > (int32_t)MAX_SHARED_SYSCALL_HISTORY)
+			ctx_count = (int32_t)MAX_SHARED_SYSCALL_HISTORY;
+		output_data->syscall_history_count.store(ctx_count, std::memory_order_release);
+		for (int32_t i = 0; i < ctx_count; i++) {
+			output_data->syscall_history[i].tid = g_syscall_context.history[i].tid;
+			output_data->syscall_history[i].call_index = g_syscall_context.history[i].call_index;
+			output_data->syscall_history[i].prog_idx = barrier_index >= 0 ? barrier_index : 0; // Record which program
+			output_data->syscall_history[i].start_time = g_syscall_context.history[i].start_time;
+			output_data->syscall_history[i].end_time = g_syscall_context.history[i].end_time;
+		}
+		// fprintf(stderr, "[SHM-WRITE] executor pid=%d barrier_idx=%d wrote %d syscall entries to shared memory\n",
+		// 	getpid(), barrier_index, ctx_count);
+		// for (int32_t i = 0; i < ctx_count && i < 8; i++) {
+		// 	fprintf(stderr, "[SHM-WRITE]   entry[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\n",
+		// 		i, output_data->syscall_history[i].tid, output_data->syscall_history[i].call_index,
+		// 		output_data->syscall_history[i].prog_idx,
+		// 		(unsigned long long)output_data->syscall_history[i].start_time,
+		// 		(unsigned long long)output_data->syscall_history[i].end_time);
+		// }
+	}
+#endif
 }
 
 thread_t* schedule_call(int call_index, int call_num, uint64 copyout_index, uint64 num_args, uint64* args, uint8* pos, call_props_t call_props)
@@ -1817,6 +1877,17 @@ void execute_call(thread_t* th)
 	}
 	debug(")\n");
 
+#if GOOS_linux
+	// Track syscall context for race pair attribution (M3 support)
+	// Use __NR_gettid (186 on x86_64) instead of SYS_gettid for better compatibility
+	int current_tid = syscall(186); // __NR_gettid on x86_64
+	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+		syscall_context_enter(&g_syscall_context, current_tid, th->call_index, th->call_num);
+		fprintf(stderr, "[M3-TRACK] syscall_context_enter: tid=%d call_idx=%d call_num=%d syscall=%s\n",
+			current_tid, th->call_index, th->call_num, call->name);
+	}
+#endif
+
 	int fail_fd = -1;
 	th->soft_fail_state = false;
 	if (th->call_props.fail_nth > 0) {
@@ -1840,6 +1911,13 @@ void execute_call(thread_t* th)
 	// Reset the flag before the first possible fail().
 	th->soft_fail_state = false;
 
+#if GOOS_linux
+	// Clear syscall context after execution
+	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+		syscall_context_exit(&g_syscall_context, current_tid);
+	}
+#endif
+
 	if (flag_coverage)
 		cover_collect(&th->cov);
 	th->fault_injected = false;
@@ -1852,9 +1930,9 @@ void execute_call(thread_t* th)
 	for (int i = 0; i < th->call_props.rerun; i++)
 		NONFAILING(execute_syscall(call, th->args));
 
-	debug("#%d [%llums] <- %s=0x%llx (tid=%ld)",
+	debug("#%d [%llums] <- %s=0x%llx",
 	      th->id, current_time_ms() - start_time_ms,
-	      call->name, (uint64)th->res, syscall(SYS_gettid));
+	      call->name, (uint64)th->res);
 	if (th->res == (intptr_t)-1)
 		debug(" errno=%d", th->reserrno);
 	if (flag_coverage)

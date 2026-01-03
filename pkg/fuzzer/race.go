@@ -36,14 +36,23 @@ type uafMode struct {
 	pairs   map[uint64]*ddrd.MayUAFPair
 }
 
+// MaxStacksPerVarnamePair limits how many unique (callstack1, callstack2) combinations
+// are tracked for each (FreeAccessName, UseAccessName) pair.
+// This matches the M1'/M2/M3 framework design in dedup_races.py.
+const MaxStacksPerVarnamePair = 20
+
 type uafCorpus struct {
-	mu        sync.RWMutex
-	seeds     map[string]*UAFCorpusEntry
-	pairs     map[uint64]*ddrd.MayUAFPair
-	coverage  cover.Cover
-	statSeeds *stat.Val
-	statCover *stat.Val
-	statPairs *stat.Val
+	mu                  sync.RWMutex
+	seeds               map[string]*UAFCorpusEntry
+	pairs               map[uint64]*ddrd.MayUAFPair
+	varnamePairs        map[uint64]struct{}        // unique (FreeAccessName, UseAccessName) pairs
+	varnameStackCounts  map[uint64]int             // count of stacks per varname pair
+	coverage            cover.Cover
+	statSeeds           *stat.Val
+	statCover           *stat.Val
+	statPairs           *stat.Val
+	statVarnames        *stat.Val
+	statSkippedByLimit  *stat.Val
 }
 
 type barrierSeed struct {
@@ -133,8 +142,10 @@ func newUAFMode(f *Fuzzer) *uafMode {
 
 func newUAFCorpus() *uafCorpus {
 	uc := &uafCorpus{
-		seeds: make(map[string]*UAFCorpusEntry),
-		pairs: make(map[uint64]*ddrd.MayUAFPair),
+		seeds:              make(map[string]*UAFCorpusEntry),
+		pairs:              make(map[uint64]*ddrd.MayUAFPair),
+		varnamePairs:       make(map[uint64]struct{}),
+		varnameStackCounts: make(map[uint64]int),
 	}
 	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer",
 		stat.Console, stat.Graph("uaf"), func() int {
@@ -154,6 +165,14 @@ func newUAFCorpus() *uafCorpus {
 			defer uc.mu.RUnlock()
 			return len(uc.pairs)
 		})
+	uc.statVarnames = stat.New("uaf varnames", "Unique VarName pairs (FreeAccessName, UseAccessName)",
+		stat.Console, stat.Graph("uaf"), func() int {
+			uc.mu.RLock()
+			defer uc.mu.RUnlock()
+			return len(uc.varnamePairs)
+		})
+	uc.statSkippedByLimit = stat.New("uaf skipped", "UAF pairs skipped due to MaxStacksPerVarnamePair limit",
+		stat.All, stat.Graph("uaf"))
 	return uc
 }
 
@@ -169,12 +188,38 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry) {
 		if pair == nil {
 			continue
 		}
+		// Calculate varname pair ID first to check stack limit
+		varnameID := varnamePairID(pair.FreeAccessName, pair.UseAccessName)
+		
+		// Check if this varname pair has reached the stack limit
+		currentCount := uc.varnameStackCounts[varnameID]
+		if currentCount >= MaxStacksPerVarnamePair {
+			// Skip this pair - already have enough stacks for this varname pair
+			if uc.statSkippedByLimit != nil {
+				uc.statSkippedByLimit.Add(1)
+			}
+			continue
+		}
+		
 		id := pair.UAFPairID()
 		if id == 0 {
 			continue
 		}
-		uc.pairs[id] = pair
+		
+		// Only add if this is a new pair (avoid counting duplicates)
+		if _, exists := uc.pairs[id]; !exists {
+			uc.pairs[id] = pair
+			// Track unique varname pairs and increment stack count
+			uc.varnamePairs[varnameID] = struct{}{}
+			uc.varnameStackCounts[varnameID] = currentCount + 1
+		}
 	}
+}
+
+// varnamePairID generates a unique ID for a (FreeAccessName, UseAccessName) pair
+func varnamePairID(name1, name2 uint64) uint64 {
+	// Use XOR with rotation to create a unique ID that's order-sensitive
+	return name1 ^ bits.RotateLeft64(name2, 32)
 }
 
 func (uc *uafCorpus) recordCoverage(info *flatrpc.ProgInfo) {
@@ -245,6 +290,12 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	u.mu.Unlock()
 	if len(batch) == 0 {
 		return
+	}
+
+	// M2: Record race yield for feedback-driven selection
+	// M1: Update namespace index for discovered programs
+	if u.fuzzer.raceGroup != nil {
+		u.fuzzer.raceGroup.RecordRacePairs(req.Prog, batch)
 	}
 
 	entry := newUAFCorpusEntry(req.Prog, batch, barrier, now)

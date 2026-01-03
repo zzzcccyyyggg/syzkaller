@@ -7,15 +7,17 @@ import (
 )
 
 type SnapshotRequestT struct {
-	ExecFlags ExecFlag `json:"exec_flags"`
-	NumCalls int32 `json:"num_calls"`
-	AllCallSignal uint64 `json:"all_call_signal"`
-	AllExtraSignal bool `json:"all_extra_signal"`
-	ProgData []byte `json:"prog_data"`
+	ExecFlags      ExecFlag `json:"exec_flags"`
+	NumCalls       int32    `json:"num_calls"`
+	AllCallSignal  uint64   `json:"all_call_signal"`
+	AllExtraSignal bool     `json:"all_extra_signal"`
+	ProgData       []byte   `json:"prog_data"`
 }
 
 func (t *SnapshotRequestT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil { return 0 }
+	if t == nil {
+		return 0
+	}
 	progDataOffset := flatbuffers.UOffsetT(0)
 	if t.ProgData != nil {
 		progDataOffset = builder.CreateByteString(t.ProgData)
@@ -38,7 +40,9 @@ func (rcv *SnapshotRequest) UnPackTo(t *SnapshotRequestT) {
 }
 
 func (rcv *SnapshotRequest) UnPack() *SnapshotRequestT {
-	if rcv == nil { return nil }
+	if rcv == nil {
+		return nil
+	}
 	t := &SnapshotRequestT{}
 	rcv.UnPackTo(t)
 	return t
