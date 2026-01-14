@@ -402,6 +402,15 @@ func (inst *Instance) Forward(port int) (string, error) {
 	return inst.impl.Forward(port)
 }
 
+// ResetForwardPort resets the forward port state.
+// This allows Forward() to be called again on the same VM instance.
+// Useful when running multiple RPC servers on the same VM.
+func (inst *Instance) ResetForwardPort() {
+	if resetter, ok := inst.impl.(interface{ ResetForwardPort() }); ok {
+		resetter.ResetForwardPort()
+	}
+}
+
 type ExitCondition int
 
 const (
@@ -619,9 +628,13 @@ func (mon *monitor) appendOutput(out []byte) ([]*report.Report, bool) {
 	}
 	if mon.reporter.ContainsCrash(mon.output[mon.curPos:]) {
 		if mon.skipDuplicateDataRace() {
+			log.Logf(0, "VM %v: appendOutput: crash detected but skipped as duplicate data race", mon.inst.Index())
 			return nil, false
 		}
-		return mon.extractErrors("unknown error"), true
+		log.Logf(0, "VM %v: appendOutput: crash detected, output len=%d curPos=%d, calling extractErrors", mon.inst.Index(), len(mon.output), mon.curPos)
+		reps := mon.extractErrors("unknown error")
+		log.Logf(0, "VM %v: appendOutput: extractErrors returned %d reports", mon.inst.Index(), len(reps))
+		return reps, true
 	}
 	if len(mon.output) > 2*mon.beforeContext {
 		copy(mon.output, mon.output[len(mon.output)-mon.beforeContext:])
@@ -687,10 +700,12 @@ func (mon *monitor) extractErrors(defaultError string) []*report.Report {
 
 func (mon *monitor) createReports(defaultError string) []*report.Report {
 	curPos := mon.curPos
+	log.Logf(0, "VM %v: createReports: output len=%d curPos=%d defaultError=%q", mon.inst.Index(), len(mon.output), curPos, defaultError)
 	var res []*report.Report
 	for {
 		rep := mon.reporter.ParseFrom(mon.output, curPos)
 		if rep == nil {
+			log.Logf(0, "VM %v: createReports: ParseFrom returned nil at curPos=%d", mon.inst.Index(), curPos)
 			if defaultError == "" || len(res) > 0 {
 				return res
 			}
@@ -706,6 +721,7 @@ func (mon *monitor) createReports(defaultError string) []*report.Report {
 			}}
 		}
 		curPos = rep.SkipPos
+		log.Logf(0, "VM %v: createReports: found report Title=%q StartPos=%d EndPos=%d", mon.inst.Index(), rep.Title, rep.StartPos, rep.EndPos)
 		start := max(rep.StartPos-mon.beforeContext, 0)
 		end := min(rep.EndPos+mon.afterContext, len(rep.Output))
 		rep.Output = rep.Output[start:end]

@@ -14,7 +14,7 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
-	"github.com/google/syzkaller/pkg/racevalidate"
+	uafvalidate "github.com/google/syzkaller/pkg/racevalidate"
 	"github.com/google/syzkaller/vm"
 )
 
@@ -42,20 +42,36 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		return
 	}
 
+	// Debug: check entries history after loading
+	for i, entry := range entries {
+		if entry != nil && len(entry.ReplayHistory) > 0 {
+			log.Logf(0, "[history] race_validate: loaded entry %d (ptr=%p) has %d history records", i, entry, len(entry.ReplayHistory))
+		}
+	}
+
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:          cfg.MaxConcurrent,
-		DelayRetryBudget:       cfg.DelayRetryBudget,
-		ExecutionTimeout:       time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:                  *flagDebug,
-		RepeatCount:            cfg.RepeatCount,
-		VerifyRepeatTimes:      cfg.VerifyRepeatTimes,
-		Workdir:                mgr.cfg.Workdir,
-		TargetVarNamePair:      cfg.TargetVarNamePair,
-		DisableAsyncSplit:      cfg.DisableAsyncSplit,
-		DisableCollectionDelay: cfg.DisableCollectionDelay,
-		VerifyDelaySweep:       cfg.VerifyDelaySweep,
-		VerifyDelayMaxUs:       cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:       cfg.VerifyDelayPower,
+		MaxConcurrent:           cfg.MaxConcurrent,
+		DelayRetryBudget:        cfg.DelayRetryBudget,
+		ExecutionTimeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                   *flagDebug,
+		RepeatCount:             cfg.RepeatCount,
+		VerifyRepeatTimes:       cfg.VerifyRepeatTimes,
+		Workdir:                 mgr.cfg.Workdir,
+		TargetVarNamePair:       cfg.TargetVarNamePair,
+		TargetCorpusKey:         cfg.TargetCorpusKey,
+		DisableAsyncSplit:       cfg.DisableAsyncSplit,
+		DisableCollectionDelay:  cfg.DisableCollectionDelay,
+		DisableVerifyDelay:      cfg.DisableVerifyDelay,
+		VerifyDelaySweep:        cfg.VerifyDelaySweep,
+		VerifyDelaySteps:        cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:        cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:        cfg.VerifyDelayPower,
+		EnableReplay:            cfg.EnableReplay,
+		ReplayCollectPairs:      cfg.ReplayCollectPairs,
+		EnableVarNameScheduling: cfg.EnableVarNameScheduling,
+		PriorityLowHistory:      cfg.PriorityLowHistory,
+		RequireOriginMatch:      cfg.RequireOriginMatch,
+		DisableHBSkip:           cfg.DisableHBSkip,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -83,7 +99,8 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		close(runDone)
 	}()
 
-	for _, entry := range entries {
+	for i, entry := range entries {
+		log.Logf(0, "[history] race_validate: enqueueing entry %d (ptr=%p) history=%d", i, entry, len(entry.ReplayHistory))
 		stage.Enqueue(entry)
 	}
 	stage.Close()
@@ -624,19 +641,28 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:          cfg.MaxConcurrent,
-		DelayRetryBudget:       cfg.DelayRetryBudget,
-		ExecutionTimeout:       time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:                  *flagDebug,
-		RepeatCount:            cfg.RepeatCount,
-		VerifyRepeatTimes:      cfg.VerifyRepeatTimes,
-		Workdir:                mgr.cfg.Workdir,
-		TargetVarNamePair:      cfg.TargetVarNamePair,
-		DisableAsyncSplit:      cfg.DisableAsyncSplit,
-		DisableCollectionDelay: cfg.DisableCollectionDelay,
-		VerifyDelaySweep:       cfg.VerifyDelaySweep,
-		VerifyDelayMaxUs:       cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:       cfg.VerifyDelayPower,
+		MaxConcurrent:           cfg.MaxConcurrent,
+		DelayRetryBudget:        cfg.DelayRetryBudget,
+		ExecutionTimeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                   *flagDebug,
+		RepeatCount:             cfg.RepeatCount,
+		VerifyRepeatTimes:       cfg.VerifyRepeatTimes,
+		Workdir:                 mgr.cfg.Workdir,
+		TargetVarNamePair:       cfg.TargetVarNamePair,
+		TargetCorpusKey:         cfg.TargetCorpusKey,
+		DisableAsyncSplit:       cfg.DisableAsyncSplit,
+		DisableCollectionDelay:  cfg.DisableCollectionDelay,
+		DisableVerifyDelay:      cfg.DisableVerifyDelay,
+		VerifyDelaySweep:        cfg.VerifyDelaySweep,
+		VerifyDelaySteps:        cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:        cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:        cfg.VerifyDelayPower,
+		EnableReplay:            cfg.EnableReplay,
+		ReplayCollectPairs:      cfg.ReplayCollectPairs,
+		EnableVarNameScheduling: cfg.EnableVarNameScheduling,
+		PriorityLowHistory:      cfg.PriorityLowHistory,
+		RequireOriginMatch:      cfg.RequireOriginMatch,
+		DisableHBSkip:           cfg.DisableHBSkip,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -674,11 +700,15 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	} else {
 		lastSeq = newSeq
 		enqueued := 0
+		withHistory := 0
 		for _, entry := range entries {
+			if entry != nil && len(entry.ReplayHistory) > 0 {
+				withHistory++
+			}
 			stage.Enqueue(entry)
 			enqueued++
 		}
-		log.Logf(0, "uaf validation: initial load enqueued %d entries (seq=%d)", enqueued, lastSeq)
+		log.Logf(0, "uaf validation: initial load enqueued %d entries (seq=%d, with_history=%d)", enqueued, lastSeq, withHistory)
 	}
 
 	// Periodic reload ticker
@@ -714,12 +744,16 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			if len(newEntries) > 0 {
 				lastSeq = newSeq
 				enqueued := 0
+				withHistory := 0
 				for _, entry := range newEntries {
+					if entry != nil && len(entry.ReplayHistory) > 0 {
+						withHistory++
+					}
 					stage.Enqueue(entry)
 					enqueued++
 				}
-				log.Logf(0, "uaf validation: periodic reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
-					enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
+				log.Logf(0, "uaf validation: periodic reload enqueued %d new entries (seq=%d, pending=%d, seen=%d, with_history=%d)",
+					enqueued, lastSeq, stage.PendingCount(), stage.SeenCount(), withHistory)
 			}
 
 		case <-idleTicker.C:
@@ -737,12 +771,16 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 				if len(newEntries) > 0 {
 					lastSeq = newSeq
 					enqueued := 0
+					withHistory := 0
 					for _, entry := range newEntries {
+						if entry != nil && len(entry.ReplayHistory) > 0 {
+							withHistory++
+						}
 						stage.Enqueue(entry)
 						enqueued++
 					}
-					log.Logf(0, "uaf validation: idle reload enqueued %d new entries (seq=%d, pending=%d, seen=%d)",
-						enqueued, lastSeq, stage.PendingCount(), stage.SeenCount())
+					log.Logf(0, "uaf validation: idle reload enqueued %d new entries (seq=%d, pending=%d, seen=%d, with_history=%d)",
+						enqueued, lastSeq, stage.PendingCount(), stage.SeenCount(), withHistory)
 				} else {
 					log.Logf(1, "uaf validation: idle, no new entries available (seq=%d, seen=%d)",
 						lastSeq, stage.SeenCount())

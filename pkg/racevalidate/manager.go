@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand"
 	"path/filepath"
 	"sort"
@@ -19,6 +20,11 @@ import (
 
 type Executor interface {
 	Run(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error)
+	// RunBatch executes multiple requests in a single RPC session.
+	// This is more efficient than calling Run multiple times as it avoids
+	// re-establishing SSH connections and RPC servers for each request.
+	// Returns results in the same order as requests.
+	RunBatch(ctx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error)
 }
 
 type ExecutorFactory func(ctx context.Context) (Executor, error)
@@ -94,6 +100,15 @@ type StageManager struct {
 	seq         uint64
 	tasksClosed bool
 
+	// VarName-based scheduling (when EnableVarNameScheduling is true)
+	varNameGroups  map[string][]string        // vnKey → []entryKey (entries containing this VarName)
+	entryStore     map[string]*validationTask // entryKey → task (all registered tasks)
+	entryVarNames  map[string][]string        // entryKey → []vnKey (VarNames in each entry)
+	varNameCounts  map[string]int             // vnKey → count of pending entries
+	sortedVarNames []string                   // vnKeys sorted by count (ascending)
+	currentVNIndex int                        // round-robin index
+	vnScheduleCond *sync.Cond                 // condition variable for task availability
+
 	closeOnce sync.Once
 }
 
@@ -112,6 +127,7 @@ type validationTask struct {
 	key            string
 	attempts       int
 	repeats        int
+	historyCount   int                        // number of replay history records
 	pairLatest     map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
 	pairCounts     map[string]int
 	pairOriginalTD map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
@@ -119,6 +135,13 @@ type validationTask struct {
 
 func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 	cfg = cfg.withDefaults()
+
+	// PriorityLowHistory requires VarName scheduling infrastructure
+	if cfg.PriorityLowHistory && !cfg.EnableVarNameScheduling {
+		log.Logf(0, "uafvalidate: PriorityLowHistory enabled, automatically enabling VarName scheduling")
+		cfg.EnableVarNameScheduling = true
+	}
+
 	if factory == nil {
 		factory = func(context.Context) (Executor, error) {
 			return nil, fmt.Errorf("no executor factory configured")
@@ -133,6 +156,19 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		pending:  make(map[string]*validationTask),
 		seenKeys: make(map[string]struct{}),
 		stable:   requiredStableCount(cfg.RepeatCount),
+	}
+
+	// Initialize VarName scheduling structures
+	if cfg.EnableVarNameScheduling {
+		sm.varNameGroups = make(map[string][]string)
+		sm.entryStore = make(map[string]*validationTask)
+		sm.entryVarNames = make(map[string][]string)
+		sm.varNameCounts = make(map[string]int)
+		sm.vnScheduleCond = sync.NewCond(&sm.mu)
+		log.Logf(0, "uafvalidate: VarName-based scheduling enabled")
+		if cfg.PriorityLowHistory {
+			log.Logf(0, "uafvalidate: PriorityLowHistory enabled (sort by ascending history count)")
+		}
 	}
 
 	if cfg.Workdir != "" {
@@ -187,7 +223,11 @@ func (sm *StageManager) Run(ctx context.Context) {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			sm.worker(ctx)
+			if sm.cfg.EnableVarNameScheduling {
+				sm.workerVarNameSchedule(ctx)
+			} else {
+				sm.worker(ctx)
+			}
 		}()
 	}
 	wg.Wait()
@@ -200,6 +240,10 @@ func (sm *StageManager) Close() {
 		sm.mu.Lock()
 		sm.closed = true
 		sm.maybeCloseTasksLocked()
+		// Wake up VarName workers if they're waiting
+		if sm.vnScheduleCond != nil {
+			sm.vnScheduleCond.Broadcast()
+		}
 		sm.mu.Unlock()
 	})
 }
@@ -212,6 +256,10 @@ func (sm *StageManager) Shutdown() {
 	if !sm.tasksClosed {
 		close(sm.tasks)
 		sm.tasksClosed = true
+	}
+	// Wake up VarName workers if they're waiting
+	if sm.vnScheduleCond != nil {
+		sm.vnScheduleCond.Broadcast()
 	}
 }
 
@@ -254,10 +302,77 @@ func (sm *StageManager) worker(ctx context.Context) {
 	}
 }
 
+// workerVarNameSchedule is the worker loop for VarName-based scheduling.
+func (sm *StageManager) workerVarNameSchedule(ctx context.Context) {
+	for {
+		// Check context first
+		select {
+		case <-ctx.Done():
+			return
+		default:
+		}
+
+		// Try to pick a task
+		sm.mu.Lock()
+		for {
+			// Check if we should exit
+			if sm.closed && len(sm.entryStore) == 0 {
+				sm.mu.Unlock()
+				return
+			}
+
+			// Try to pick a task
+			task := sm.pickNextVarNameTask()
+			if task != nil {
+				sm.mu.Unlock()
+				sm.handleTask(ctx, task)
+				break
+			}
+
+			// No task available, wait for signal or check context
+			if sm.closed {
+				sm.mu.Unlock()
+				return
+			}
+
+			// Wait for new tasks or close signal
+			// Use a goroutine to handle context cancellation while waiting
+			done := make(chan struct{})
+			go func() {
+				select {
+				case <-ctx.Done():
+					sm.mu.Lock()
+					if sm.vnScheduleCond != nil {
+						sm.vnScheduleCond.Broadcast()
+					}
+					sm.mu.Unlock()
+				case <-done:
+				}
+			}()
+			sm.vnScheduleCond.Wait()
+			close(done)
+
+			// Check context after waking up
+			if ctx.Err() != nil {
+				sm.mu.Unlock()
+				return
+			}
+		}
+	}
+}
+
 func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 	if task == nil || task.entry == nil {
 		return
 	}
+
+	// Log replay availability (actual replay happens in collection/verification phases)
+	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
+		log.Logf(0, "[history] validate: replay enabled for key=%s, history_count=%d", task.key, len(task.entry.ReplayHistory))
+	} else if sm.cfg.EnableReplay {
+		log.Logf(0, "[history] validate: no replay history available for key=%s", task.key)
+	}
+
 	for task.repeats < sm.cfg.RepeatCount {
 		if ctx.Err() != nil {
 			sm.complete(task)
@@ -283,7 +398,9 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		if err != nil {
 			result.Err = err
 		} else {
-			execRes, runErr := exec.Run(ctx, &ExecutionRequest{Entry: task.entry, Delays: delays})
+			// Use batch execution to run replay + collection in a single RPC session
+			// This avoids SSH reconnection issues between replay and main execution
+			execRes, runErr := sm.runBatchReplayAndCollect(ctx, exec, task, delays)
 			if closer, ok := exec.(interface{ Close() error }); ok {
 				if cerr := closer.Close(); cerr != nil {
 					log.Logf(0, "uafvalidate: executor close error key=%s err=%v", task.key, cerr)
@@ -291,7 +408,7 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 			}
 			if runErr != nil {
 				result.Err = runErr
-			} else {
+			} else if execRes != nil {
 				result.Duration = execRes.Duration
 				result.Output = append([]byte{}, execRes.Output...)
 				result.Success = !execRes.Crashed
@@ -299,6 +416,8 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 				if execRes.Ddrd != nil {
 					result.Pairs = clonePairs(execRes.Ddrd)
 				}
+			} else {
+				result.Err = fmt.Errorf("batch execution returned nil result")
 			}
 		}
 		if err := ctx.Err(); err != nil || errors.Is(result.Err, context.Canceled) || errors.Is(result.Err, context.DeadlineExceeded) {
@@ -329,7 +448,9 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 			if task.entry != nil {
 				originalPairs = task.entry.Pairs
 			}
-			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs)
+			// skipOriginalCheck: skip if debug mode OR if RequireOriginMatch is disabled
+			skipOriginalCheck := sm.cfg.TargetVarNamePair != "" || !sm.cfg.RequireOriginMatch
+			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs, skipOriginalCheck)
 			if len(result.StablePairs) > 0 {
 				// Compute stable pairs with per-pair delays (min/max of original vs runtime TimeDiff)
 				stablePairsWithDelays := collectStablePairsWithDelays(
@@ -338,6 +459,7 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 					task.pairOriginalTD,
 					sm.stable,
 					originalPairs,
+					skipOriginalCheck,
 				)
 				sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
 			}
@@ -448,9 +570,35 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 }
 
 func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTask {
+	// Debug: log incoming entry history status
+	if entry != nil {
+		log.Logf(1, "[history] prepareTask: incoming entry has %d history records", len(entry.ReplayHistory))
+	}
+
 	clone := entry.Clone()
 	if clone == nil {
 		return nil
+	}
+
+	// Debug: log cloned entry history status
+	log.Logf(1, "[history] prepareTask: cloned entry has %d history records", len(clone.ReplayHistory))
+
+	// Compute entry key early for TargetCorpusKey filtering
+	signature := clone.Profile
+	if IsZeroSignature(signature) && clone.PairBasicInfo.UAFPairID() != 0 {
+		signature = SignatureFromPair(&clone.PairBasicInfo)
+	}
+	entryKey := ""
+	if !IsZeroSignature(signature) {
+		entryKey = SignatureKey(signature)
+	}
+
+	// If TargetCorpusKey is set, only process the matching entry
+	if sm.cfg.TargetCorpusKey != "" {
+		if entryKey != sm.cfg.TargetCorpusKey {
+			return nil
+		}
+		log.Logf(0, "uafvalidate: [debug mode] entry matches target corpus key %s", sm.cfg.TargetCorpusKey)
 	}
 
 	// If TargetVarNamePair is set, only process entries containing that pair
@@ -462,22 +610,16 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 	}
 
 	// Pre-check: if all pairs have high HB confidence, skip entire entry
-	// Skip this check in debug mode (TargetVarNamePair is set)
-	if sm.cfg.TargetVarNamePair == "" {
+	// Skip this check in debug mode (TargetVarNamePair or TargetCorpusKey is set)
+	// Also skip if DisableHBSkip is enabled
+	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableHBSkip {
 		if skip, reason := sm.shouldSkipEntry(clone); skip {
 			log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
 			return nil
 		}
 	}
 
-	signature := clone.Profile
-	if IsZeroSignature(signature) && clone.PairBasicInfo.UAFPairID() != 0 {
-		signature = SignatureFromPair(&clone.PairBasicInfo)
-	}
-	key := ""
-	if !IsZeroSignature(signature) {
-		key = SignatureKey(signature)
-	}
+	key := entryKey
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.closed {
@@ -495,9 +637,10 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		return nil
 	}
 	task := &validationTask{
-		entry:     clone,
-		signature: signature,
-		key:       key,
+		entry:        clone,
+		signature:    signature,
+		key:          key,
+		historyCount: len(clone.ReplayHistory),
 	}
 	// Pre-compute original TimeDiff for each pair from entry.Pairs
 	if len(clone.Pairs) > 0 {
@@ -519,6 +662,14 @@ func (sm *StageManager) dispatch(task *validationTask) {
 	if task == nil {
 		return
 	}
+
+	// Use VarName-based scheduling if enabled
+	if sm.cfg.EnableVarNameScheduling {
+		sm.dispatchVarNameSchedule(task)
+		return
+	}
+
+	// Original channel-based dispatch
 	sm.mu.Lock()
 	if sm.tasksClosed {
 		log.Logf(0, "uafvalidate: dispatch drop key=%s (tasks closed)", task.key)
@@ -535,6 +686,199 @@ func (sm *StageManager) dispatch(task *validationTask) {
 		log.Logf(0, "uafvalidate: dispatch blocking key=%s", task.key)
 		tasksCh <- task
 		log.Logf(0, "uafvalidate: dispatch resumed key=%s", task.key)
+	}
+}
+
+// dispatchVarNameSchedule registers a task for VarName-based round-robin scheduling.
+func (sm *StageManager) dispatchVarNameSchedule(task *validationTask) {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+
+	if sm.closed {
+		log.Logf(0, "uafvalidate: dispatch drop key=%s (closed)", task.key)
+		return
+	}
+
+	// Extract VarName keys from the entry's pairs
+	vnKeys := sm.extractVarNameKeys(task.entry)
+	if len(vnKeys) == 0 {
+		// No pairs, use a fallback key
+		vnKeys = []string{"__no_pairs__"}
+	}
+
+	// Register task in entryStore
+	sm.entryStore[task.key] = task
+	sm.entryVarNames[task.key] = vnKeys
+
+	// Add to each VarName group (with optional history-based sorting)
+	for _, vnKey := range vnKeys {
+		if sm.cfg.PriorityLowHistory {
+			// Insert in sorted order by historyCount (ascending)
+			sm.varNameGroups[vnKey] = sm.insertSortedByHistory(sm.varNameGroups[vnKey], task.key)
+		} else {
+			// Default: append to end (FIFO)
+			sm.varNameGroups[vnKey] = append(sm.varNameGroups[vnKey], task.key)
+		}
+		sm.varNameCounts[vnKey]++
+	}
+
+	// Rebuild sorted VarNames
+	sm.rebuildSortedVarNames()
+
+	log.Logf(1, "uafvalidate: vn-dispatch key=%s vnkeys=%d history=%d total_entries=%d total_vnkeys=%d",
+		task.key, len(vnKeys), task.historyCount, len(sm.entryStore), len(sm.sortedVarNames))
+
+	// Signal waiting workers
+	if sm.vnScheduleCond != nil {
+		sm.vnScheduleCond.Broadcast()
+	}
+}
+
+// insertSortedByHistory inserts entryKey into the list maintaining ascending historyCount order.
+// Must be called with sm.mu held.
+func (sm *StageManager) insertSortedByHistory(list []string, entryKey string) []string {
+	task := sm.entryStore[entryKey]
+	if task == nil {
+		return append(list, entryKey)
+	}
+
+	// Find insertion point
+	insertIdx := len(list)
+	for i, key := range list {
+		other := sm.entryStore[key]
+		if other != nil && task.historyCount < other.historyCount {
+			insertIdx = i
+			break
+		}
+	}
+
+	// Insert at position
+	list = append(list, "")
+	copy(list[insertIdx+1:], list[insertIdx:])
+	list[insertIdx] = entryKey
+	return list
+}
+
+// extractVarNameKeys extracts unique VarName keys from an entry's pairs.
+func (sm *StageManager) extractVarNameKeys(entry *fuzzer.UAFCorpusEntry) []string {
+	if entry == nil {
+		return nil
+	}
+
+	seen := make(map[string]struct{})
+	var keys []string
+
+	for _, pair := range entry.Pairs {
+		if pair == nil {
+			continue
+		}
+		vnKey := VarNamePairKey(pair)
+		if _, exists := seen[vnKey]; !exists {
+			seen[vnKey] = struct{}{}
+			keys = append(keys, vnKey)
+		}
+	}
+
+	// Also check PairBasicInfo if no pairs in slice
+	if len(keys) == 0 && (entry.PairBasicInfo.FreeAccessName != 0 || entry.PairBasicInfo.UseAccessName != 0) {
+		vnKey := VarNamePairKey(&entry.PairBasicInfo)
+		keys = append(keys, vnKey)
+	}
+
+	return keys
+}
+
+// rebuildSortedVarNames rebuilds the sorted VarName list by ascending count.
+func (sm *StageManager) rebuildSortedVarNames() {
+	// Collect VarNames with non-zero counts
+	sm.sortedVarNames = make([]string, 0, len(sm.varNameCounts))
+	for vnKey, count := range sm.varNameCounts {
+		if count > 0 && len(sm.varNameGroups[vnKey]) > 0 {
+			sm.sortedVarNames = append(sm.sortedVarNames, vnKey)
+		}
+	}
+
+	// Sort by count ascending
+	sort.Slice(sm.sortedVarNames, func(i, j int) bool {
+		return sm.varNameCounts[sm.sortedVarNames[i]] < sm.varNameCounts[sm.sortedVarNames[j]]
+	})
+
+	// Reset index if out of range
+	if sm.currentVNIndex >= len(sm.sortedVarNames) {
+		sm.currentVNIndex = 0
+	}
+}
+
+// pickNextVarNameTask picks the next task using VarName-based round-robin.
+// Must be called with sm.mu held. Returns nil if no tasks available.
+func (sm *StageManager) pickNextVarNameTask() *validationTask {
+	if len(sm.sortedVarNames) == 0 || len(sm.entryStore) == 0 {
+		return nil
+	}
+
+	// Try each VarName in round-robin order
+	for attempts := 0; attempts < len(sm.sortedVarNames); attempts++ {
+		if sm.currentVNIndex >= len(sm.sortedVarNames) {
+			sm.currentVNIndex = 0
+		}
+
+		vnKey := sm.sortedVarNames[sm.currentVNIndex]
+		sm.currentVNIndex++
+
+		entryKeys := sm.varNameGroups[vnKey]
+		if len(entryKeys) == 0 {
+			continue
+		}
+
+		// Find first valid entry in this group
+		for len(entryKeys) > 0 {
+			entryKey := entryKeys[0]
+			entryKeys = entryKeys[1:]
+			sm.varNameGroups[vnKey] = entryKeys
+
+			task, ok := sm.entryStore[entryKey]
+			if !ok {
+				// Entry already processed, skip
+				continue
+			}
+
+			// Remove entry from all VarName groups
+			for _, otherVN := range sm.entryVarNames[entryKey] {
+				if otherVN != vnKey {
+					sm.removeEntryFromGroup(otherVN, entryKey)
+				}
+			}
+
+			// Update counts
+			for _, vn := range sm.entryVarNames[entryKey] {
+				sm.varNameCounts[vn]--
+			}
+
+			// Remove from stores
+			delete(sm.entryStore, entryKey)
+			delete(sm.entryVarNames, entryKey)
+
+			// Rebuild sorted list (counts changed)
+			sm.rebuildSortedVarNames()
+
+			log.Logf(0, "uafvalidate: vn-pick key=%s from_vn=%s remaining_entries=%d",
+				entryKey, vnKey, len(sm.entryStore))
+
+			return task
+		}
+	}
+
+	return nil
+}
+
+// removeEntryFromGroup removes an entry key from a VarName group.
+func (sm *StageManager) removeEntryFromGroup(vnKey, entryKey string) {
+	entries := sm.varNameGroups[vnKey]
+	for i, key := range entries {
+		if key == entryKey {
+			sm.varNameGroups[vnKey] = append(entries[:i], entries[i+1:]...)
+			return
+		}
 	}
 }
 
@@ -555,6 +899,325 @@ func (sm *StageManager) maybeCloseTasksLocked() {
 		close(sm.tasks)
 		sm.tasksClosed = true
 	}
+}
+
+// runReplayOnExecutor replays the execution history on a given executor.
+// This warms up the kernel state before the main task execution.
+// The executor is NOT closed - caller is responsible for closing it.
+// DEPRECATED: This creates new RPC server for each Run call, causing SSH reconnection issues.
+// Use runBatchReplayAndCollect instead.
+func (sm *StageManager) runReplayOnExecutor(ctx context.Context, exec Executor, task *validationTask) error {
+	if !sm.cfg.EnableReplay {
+		return nil
+	}
+	historyLen := len(task.entry.ReplayHistory)
+	if historyLen == 0 {
+		return nil
+	}
+
+	log.Logf(0, "[history] replay: starting on same executor key=%s history=%d", task.key, historyLen)
+	startTime := time.Now()
+
+	for i, record := range task.entry.ReplayHistory {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if record == nil || len(record.Programs) == 0 {
+			continue
+		}
+
+		// Create a minimal entry for replay with the recorded program group
+		replayEntry := &fuzzer.UAFCorpusEntry{
+			Programs: record.Programs,
+			Barrier: fuzzer.BarrierSnapshot{
+				GroupSize: len(record.Programs),
+				GroupID:   record.GroupID,
+			},
+		}
+
+		// Run in barrier mode but optionally skip race pair collection
+		replayReq := &ExecutionRequest{
+			Entry:       replayEntry,
+			DisableDdrd: !sm.cfg.ReplayCollectPairs,
+		}
+
+		_, runErr := exec.Run(ctx, replayReq)
+		if runErr != nil {
+			log.Logf(1, "[history] replay %d/%d execution error: %v", i+1, historyLen, runErr)
+			// Continue with remaining replays - don't abort
+		}
+	}
+
+	log.Logf(0, "[history] replay: completed key=%s history=%d duration=%s", task.key, historyLen, time.Since(startTime))
+	return nil
+}
+
+// runBatchReplayAndCollect combines replay history + main collection into a single batch execution.
+// This uses RunBatch to execute all requests in a single RPC session, avoiding SSH reconnection issues.
+// Returns the result of the main (last) request.
+func (sm *StageManager) runBatchReplayAndCollect(ctx context.Context, exec Executor, task *validationTask, delays []int64) (*ExecutionResult, error) {
+	var reqs []*ExecutionRequest
+
+	// Build replay requests first
+	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
+		for _, record := range task.entry.ReplayHistory {
+			if record == nil || len(record.Programs) == 0 {
+				continue
+			}
+			replayEntry := &fuzzer.UAFCorpusEntry{
+				Programs: record.Programs,
+				Barrier: fuzzer.BarrierSnapshot{
+					GroupSize: len(record.Programs),
+					GroupID:   record.GroupID,
+				},
+			}
+			reqs = append(reqs, &ExecutionRequest{
+				Entry:       replayEntry,
+				DisableDdrd: !sm.cfg.ReplayCollectPairs,
+			})
+		}
+	}
+
+	// Add main collection request as the last request
+	mainReq := &ExecutionRequest{
+		Entry:  task.entry,
+		Delays: delays,
+	}
+	reqs = append(reqs, mainReq)
+
+	log.Logf(0, "[batch] executing key=%s replay=%d main=1 total=%d", task.key, len(reqs)-1, len(reqs))
+	startTime := time.Now()
+
+	// Run all requests in a single batch (single RPC session)
+	results, err := exec.RunBatch(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+
+	log.Logf(0, "[batch] completed key=%s results=%d duration=%s", task.key, len(results), time.Since(startTime))
+
+	// Return the last result (the main collection)
+	if len(results) > 0 {
+		return results[len(results)-1], nil
+	}
+	return nil, fmt.Errorf("batch execution produced no results")
+}
+
+// runBatchReplayAndVerify combines replay history + verification request(s) into a single batch execution.
+// This uses RunBatch to execute all requests in a single RPC session, avoiding SSH reconnection issues.
+// If VerifyDelaySweep is enabled, generates multiple verify requests with different delays.
+// Returns the aggregated result of the verification request(s).
+func (sm *StageManager) runBatchReplayAndVerify(ctx context.Context, exec Executor, task *validationTask, verifyReq *ExecutionRequest) (*ExecutionResult, error) {
+	var reqs []*ExecutionRequest
+	replayCount := 0
+
+	// Build replay requests first
+	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
+		for _, record := range task.entry.ReplayHistory {
+			if record == nil || len(record.Programs) == 0 {
+				continue
+			}
+			replayEntry := &fuzzer.UAFCorpusEntry{
+				Programs: record.Programs,
+				Barrier: fuzzer.BarrierSnapshot{
+					GroupSize: len(record.Programs),
+					GroupID:   record.GroupID,
+				},
+			}
+			reqs = append(reqs, &ExecutionRequest{
+				Entry:       replayEntry,
+				DisableDdrd: !sm.cfg.ReplayCollectPairs,
+			})
+			replayCount++
+		}
+	}
+
+	// Build verify requests - with delay sweep if enabled
+	verifyCount := 1
+	if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+		verifyCount = sm.cfg.VerifyDelaySteps
+		maxDelay := sm.cfg.VerifyDelayMaxUs
+		power := sm.cfg.VerifyDelayPower
+
+		for i := 0; i < verifyCount; i++ {
+			sweepDelay := sweepDelayForStep(i, verifyCount, maxDelay, power)
+
+			// Create a copy of the verify request with updated delay
+			verifyReqCopy := *verifyReq
+			verifyReqCopy.StartDelayUs = sweepDelay
+			verifyReqCopy.Delays = buildStartDelaysFromPair(task.entry, sweepDelay)
+
+			// Also update the TargetPair's TimeDiff if provided
+			if verifyReq.TargetPair != nil {
+				pairCopy := *verifyReq.TargetPair
+				pairCopy.TimeDiff = uint64(sweepDelay) * 1000 // Convert to nanoseconds
+				verifyReqCopy.TargetPair = &pairCopy
+			}
+
+			reqs = append(reqs, &verifyReqCopy)
+		}
+
+		log.Logf(0, "[batch] verify: executing key=%s replay=%d verify=%d (delay_sweep 0-%dµs) total=%d",
+			task.key, replayCount, verifyCount, maxDelay, len(reqs))
+	} else {
+		// No delay sweep - single verify request
+		reqs = append(reqs, verifyReq)
+		log.Logf(0, "[batch] verify: executing key=%s replay=%d verify=1 total=%d", task.key, replayCount, len(reqs))
+	}
+
+	startTime := time.Now()
+
+	// Run all requests in a single batch (single RPC session)
+	results, err := exec.RunBatch(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+
+	duration := time.Since(startTime)
+	log.Logf(0, "[batch] verify: completed key=%s results=%d duration=%s", task.key, len(results), duration)
+
+	// Extract verify results (skip replay results)
+	if len(results) <= replayCount {
+		return nil, fmt.Errorf("batch verification produced no verify results (got %d, need >%d)", len(results), replayCount)
+	}
+
+	verifyResults := results[replayCount:]
+
+	// Aggregate verify results
+	return sm.aggregateVerifyResults(verifyResults, duration), nil
+}
+
+// aggregateVerifyResults combines multiple verify results into a single result.
+func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, totalDuration time.Duration) *ExecutionResult {
+	if len(results) == 0 {
+		return nil
+	}
+
+	// For single result, return as-is
+	if len(results) == 1 {
+		return results[0]
+	}
+
+	// Aggregate multiple results
+	aggregated := &ExecutionResult{
+		Duration:       totalDuration,
+		TriggeredCount: 0,
+	}
+
+	triggeredDelays := []int64{}
+	for i, r := range results {
+		if r == nil {
+			continue
+		}
+		if r.TriggeredCount > 0 {
+			aggregated.TriggeredCount++
+			// Record which delay step triggered
+			if sm.cfg.VerifyDelaySweep {
+				sweepDelay := sweepDelayForStep(i, len(results), sm.cfg.VerifyDelayMaxUs, sm.cfg.VerifyDelayPower)
+				triggeredDelays = append(triggeredDelays, sweepDelay)
+			}
+		}
+		// Capture first crash info
+		if r.Crashed && aggregated.CrashTitle == "" {
+			aggregated.Crashed = true
+			aggregated.CrashTitle = r.CrashTitle
+			aggregated.CrashReport = r.CrashReport
+		}
+		// Merge DDRD reports (take first non-nil)
+		if r.Ddrd != nil && aggregated.Ddrd == nil {
+			aggregated.Ddrd = r.Ddrd
+		}
+	}
+
+	// Log delay sweep statistics
+	if sm.cfg.VerifyDelaySweep && len(results) > 1 {
+		if len(triggeredDelays) > 0 {
+			log.Logf(0, "[batch] verify: delay sweep triggered %d/%d steps, first at %dµs",
+				aggregated.TriggeredCount, len(results), triggeredDelays[0])
+		} else {
+			log.Logf(0, "[batch] verify: delay sweep triggered 0/%d steps", len(results))
+		}
+	}
+
+	return aggregated
+}
+
+// sweepDelayForStep computes the delay for a given step in the sweep.
+// Uses exponential curve: delay(i) = maxDelay * (i/(n-1))^power
+func sweepDelayForStep(step, totalSteps int, maxDelayUs int64, power float64) int64 {
+	if totalSteps <= 1 {
+		return 0
+	}
+	if step <= 0 {
+		return 0
+	}
+	if step >= totalSteps-1 {
+		return maxDelayUs
+	}
+	ratio := float64(step) / float64(totalSteps-1)
+	return int64(float64(maxDelayUs) * math.Pow(ratio, power))
+}
+
+// runReplayPhase replays the execution history to reconstruct system state before validation.
+// DEPRECATED: This runs each replay in a separate executor, which doesn't achieve the intended effect.
+// Use runReplayOnExecutor instead to replay on the same executor that will run the main task.
+func (sm *StageManager) runReplayPhase(ctx context.Context, task *validationTask) error {
+	historyLen := len(task.entry.ReplayHistory)
+	if historyLen == 0 {
+		return nil
+	}
+
+	log.Logf(0, "uafvalidate: starting replay phase key=%s history=%d", task.key, historyLen)
+	startTime := time.Now()
+
+	for i, record := range task.entry.ReplayHistory {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+
+		if record == nil || len(record.Programs) == 0 {
+			continue
+		}
+
+		exec, err := sm.factory(ctx)
+		if err != nil {
+			log.Logf(0, "uafvalidate: replay %d/%d failed to create executor: %v", i+1, historyLen, err)
+			continue
+		}
+
+		// Create a minimal entry for replay with the recorded program group
+		replayEntry := &fuzzer.UAFCorpusEntry{
+			Programs: record.Programs,
+			Barrier: fuzzer.BarrierSnapshot{
+				GroupSize: len(record.Programs),
+				GroupID:   record.GroupID,
+			},
+		}
+
+		// Run in barrier mode but optionally skip race pair collection
+		replayReq := &ExecutionRequest{
+			Entry:       replayEntry,
+			DisableDdrd: !sm.cfg.ReplayCollectPairs,
+		}
+
+		_, runErr := exec.Run(ctx, replayReq)
+
+		// Clean up executor
+		if closer, ok := exec.(interface{ Close() error }); ok {
+			if cerr := closer.Close(); cerr != nil {
+				log.Logf(0, "uafvalidate: replay %d/%d close error: %v", i+1, historyLen, cerr)
+			}
+		}
+
+		if runErr != nil {
+			log.Logf(0, "uafvalidate: replay %d/%d execution failed: %v", i+1, historyLen, runErr)
+			// Continue with remaining replays
+		}
+	}
+
+	log.Logf(0, "uafvalidate: replay phase completed key=%s duration=%s", task.key, time.Since(startTime))
+	return nil
 }
 
 func (sm *StageManager) updateIntersection(task *validationTask, res *ValidationResult) {
@@ -596,7 +1259,7 @@ func clonePairs(report *ddrd.Report) []ddrd.MayUAFPair {
 	return cloned
 }
 
-func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair) []ddrd.MayUAFPair {
+func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair, skipOriginalCheck bool) []ddrd.MayUAFPair {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
 	}
@@ -620,7 +1283,8 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 			continue
 		}
 		// Additional condition: pair must exist in original corpus pairs
-		if len(originalKeys) > 0 {
+		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs
+		if !skipOriginalCheck && len(originalKeys) > 0 {
 			if _, inOriginal := originalKeys[key]; !inOriginal {
 				continue
 			}
@@ -647,6 +1311,7 @@ func collectStablePairsWithDelays(
 	originalTD map[string]uint64,
 	minCount int,
 	originalPairs []*ddrd.MayUAFPair,
+	skipOriginalCheck bool,
 ) []StablePairWithDelays {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
@@ -671,7 +1336,8 @@ func collectStablePairsWithDelays(
 			continue
 		}
 		// Additional condition: pair must exist in original corpus pairs
-		if len(originalKeys) > 0 {
+		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs
+		if !skipOriginalCheck && len(originalKeys) > 0 {
 			if _, inOriginal := originalKeys[key]; !inOriginal {
 				continue
 			}
@@ -811,7 +1477,9 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		// ========== Execute verification ==========
-		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x",
+			i+1, len(stablePairs), task.key,
+			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack)
 
 		pairCopy := pair
 		exec, err := sm.factory(ctx)
@@ -829,7 +1497,8 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			StopOnSuccess: true,
 		}
 
-		execRes, runErr := exec.Run(ctx, req)
+		// Use batch execution to run replay + verification in a single RPC session
+		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
 		if closer, ok := exec.(interface{ Close() error }); ok {
 			closer.Close()
 		}
@@ -862,14 +1531,18 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 		// ========== Update statistics ==========
 		status := "Not Triggerable"
+		statusDetail := ""
 		if execRes.TriggeredCount >= 2 {
 			status = "Stable"
 		} else if execRes.TriggeredCount > 0 {
 			status = "Not Stable"
+		} else if execRes.Crashed && execRes.CrashTitle != "" {
+			// Crash happened but target pair was not triggered - different race detected
+			statusDetail = " (crashed with different race, target pair not matched)"
 		}
 
-		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s",
-			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status)
+		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s%s",
+			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status, statusDetail)
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves not HB relationship ==========
@@ -944,8 +1617,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			}
 			log.Logf(0, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
 				i+1, len(stablePairs), vnKey, fullKey)
-		} else {
+		} else if !sm.cfg.DisableHBSkip {
 			// ========== Normal mode: Layer 1 & 2 skip checks ==========
+			// (Skipped when DisableHBSkip is enabled)
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
 				log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
@@ -972,9 +1646,21 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			}
 		}
 
+		// Build start delays array using spd.StartDelayUs for the first participant
+		startDelays := buildStartDelaysFromPair(task.entry, spd.StartDelayUs)
+
+		// If DisableVerifyDelay is enabled, disable start delays in verification phase
+		actualStartDelayUs := spd.StartDelayUs
+		if sm.cfg.DisableVerifyDelay {
+			startDelays = nil
+			actualStartDelayUs = 0
+		}
+
 		// ========== Execute verification ==========
-		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s start_delay=%dus access_delay=%dus",
-			i+1, len(stablePairs), task.key, spd.StartDelayUs, spd.AccessDelayUs)
+		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus access_delay=%dus",
+			i+1, len(stablePairs), task.key,
+			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack,
+			actualStartDelayUs, spd.AccessDelayUs)
 
 		// Create a copy of the pair with AccessDelayUs as TimeDiff (for kernel udelay)
 		pairCopy := pair
@@ -985,9 +1671,6 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			log.Logf(0, "uafvalidate: failed to create executor for verification: %v", err)
 			continue
 		}
-
-		// Build start delays array using spd.StartDelayUs for the first participant
-		startDelays := buildStartDelaysFromPair(task.entry, spd.StartDelayUs)
 
 		req := &ExecutionRequest{
 			Entry:         task.entry,
@@ -1000,7 +1683,8 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			AccessDelayUs: spd.AccessDelayUs,
 		}
 
-		execRes, runErr := exec.Run(ctx, req)
+		// Use batch execution to run replay + verification in a single RPC session
+		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
 		if closer, ok := exec.(interface{ Close() error }); ok {
 			closer.Close()
 		}
@@ -1032,15 +1716,30 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		// ========== Update statistics ==========
+		// Determine total attempts (delay sweep steps or repeat times)
+		totalAttempts := req.RepeatTimes
+		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+			totalAttempts = sm.cfg.VerifyDelaySteps
+		}
+
 		status := "Not Triggerable"
+		statusDetail := ""
 		if execRes.TriggeredCount >= 2 {
 			status = "Stable"
 		} else if execRes.TriggeredCount > 0 {
 			status = "Not Stable"
+		} else if execRes.Crashed && execRes.CrashTitle != "" {
+			// Crash happened but target pair was not triggered - different race detected
+			statusDetail = " (crashed with different race, target pair not matched)"
 		}
 
-		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s",
-			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status)
+		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d (delay_sweep) status=%s%s",
+				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)
+		} else {
+			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s%s",
+				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)
+		}
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves not HB relationship ==========
@@ -1050,7 +1749,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			// In debug mode, only log but don't update databases
 			if debugMode {
 				log.Logf(0, "uafvalidate: [debug mode] SUCCESS vnkey=%s triggered=%d/%d (not updating databases)",
-					vnKey, execRes.TriggeredCount, req.RepeatTimes)
+					vnKey, execRes.TriggeredCount, totalAttempts)
 				reportPreview := string(reportData)
 				if len(reportPreview) > 2000 {
 					reportPreview = reportPreview[:2000] + "...[truncated]"

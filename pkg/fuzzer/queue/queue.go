@@ -55,6 +55,9 @@ type Request struct {
 	// DisableDdrd prevents automatic DDRD collection even for barrier executions.
 	DisableDdrd bool
 
+	// IsValidationMode indicates this request is from validation framework (use FINE modes)
+	IsValidationMode bool
+
 	// This stat will be incremented on request completion.
 	Stat *stat.Val
 

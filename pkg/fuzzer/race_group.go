@@ -100,7 +100,6 @@ type RaceGroupStats struct {
 	StatHighYieldSelections *stat.Val
 	StatExploreSelections   *stat.Val
 	StatTotalRaceYield      *stat.Val
-
 }
 
 // NewRaceGroupManager creates a new race group manager.
@@ -136,7 +135,6 @@ func newRaceGroupStats() *RaceGroupStats {
 			"Exploration selections (random)", stat.Console, stat.Graph("race_group")),
 		StatTotalRaceYield: stat.New("race total yield",
 			"Total race pairs discovered", stat.Console, stat.Graph("race_group")),
-
 	}
 }
 
@@ -543,7 +541,7 @@ func (mgr *RaceGroupManager) selectByScore(primary *prog.Prog, candidates []*pro
 	}
 
 	primaryLen := len(primary.Calls)
-	
+
 	// Calculate scores for all candidates
 	type scoredProg struct {
 		prog  *prog.Prog
@@ -928,6 +926,33 @@ func (reg *VarNamePairRegistry) GetStats() (varPairCount, totalStackPairs int) {
 	return
 }
 
+// CheckNewness checks if a pair represents a new VarName pair or a new stack for an existing VarName pair.
+// Returns (isNewVarNamePair, isNewStack):
+//   - isNewVarNamePair: true if this is the first time seeing this (FreeAccessName, UseAccessName) combination
+//   - isNewStack: true if the VarName pair exists but this (FreeCallStack, UseCallStack) is new
+//
+// Both return false if the exact pair (including stacks) has already been recorded.
+func (reg *VarNamePairRegistry) CheckNewness(pair *ddrd.MayUAFPair) (isNewVarNamePair, isNewStack bool) {
+	if reg == nil || pair == nil {
+		return false, false
+	}
+
+	varPairID := varNamePairID(pair.FreeAccessName, pair.UseAccessName)
+	stkPairID := stackPairID(pair.FreeCallStack, pair.UseCallStack)
+
+	reg.mu.RLock()
+	defer reg.mu.RUnlock()
+
+	stacks, exists := reg.stacksPerPair[varPairID]
+	if !exists {
+		return true, false // New VarName pair
+	}
+	if !stacks[stkPairID] {
+		return false, true // Existing VarName pair, new stack
+	}
+	return false, false // Already recorded
+}
+
 // RaceYieldTracker tracks race pair yield per program for feedback-driven selection.
 type RaceYieldTracker struct {
 	mu sync.RWMutex
@@ -1109,6 +1134,15 @@ func (mgr *RaceGroupManager) RecordRacePairWithPartner(primary, partner *prog.Pr
 // GetVarPairStats returns VarName pair registry statistics.
 func (mgr *RaceGroupManager) GetVarPairStats() (varPairCount, totalStackPairs int) {
 	return mgr.varPairRegistry.GetStats()
+}
+
+// CheckPairNewness checks if a pair is a new VarName pair or a new stack for existing VarName pair.
+// Returns (isNewVarNamePair, isNewStack).
+func (mgr *RaceGroupManager) CheckPairNewness(pair *ddrd.MayUAFPair) (bool, bool) {
+	if mgr == nil || mgr.varPairRegistry == nil {
+		return false, false
+	}
+	return mgr.varPairRegistry.CheckNewness(pair)
 }
 
 // GetRacePairsForProg returns stored race pairs for a program.

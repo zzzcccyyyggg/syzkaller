@@ -23,16 +23,17 @@ type UAFCorpusStore struct {
 }
 
 type storedUAFCorpusEntry struct {
-	Program    []byte                 `json:"program"`
-	Programs   [][]byte               `json:"programs,omitempty"`
-	CallIdx    int                    `json:"call_idx"`
-	Pair       ddrd.MayUAFPair        `json:"pair"`
-	Pairs      []ddrd.MayUAFPair      `json:"pairs,omitempty"`
-	Signals    []uint64               `json:"signals,omitempty"`
-	Barrier    fuzzer.BarrierSnapshot `json:"barrier"`
-	ReplayPlan *storedReplayPlan      `json:"replay_plan,omitempty"`
-	Profile    *storedPairProfile     `json:"profile,omitempty"`
-	Timestamp  time.Time              `json:"timestamp"`
+	Program       []byte                 `json:"program"`
+	Programs      [][]byte               `json:"programs,omitempty"`
+	CallIdx       int                    `json:"call_idx"`
+	Pair          ddrd.MayUAFPair        `json:"pair"`
+	Pairs         []ddrd.MayUAFPair      `json:"pairs,omitempty"`
+	Signals       []uint64               `json:"signals,omitempty"`
+	Barrier       fuzzer.BarrierSnapshot `json:"barrier"`
+	ReplayPlan    *storedReplayPlan      `json:"replay_plan,omitempty"`
+	Profile       *storedPairProfile     `json:"profile,omitempty"`
+	ReplayHistory []storedBarrierRecord  `json:"replay_history,omitempty"`
+	Timestamp     time.Time              `json:"timestamp"`
 }
 
 type storedReplayPlan struct {
@@ -44,6 +45,13 @@ type storedPairProfile struct {
 	UseAccessName  uint64 `json:"use_access_name,omitempty"`
 	FreeCallStack  uint64 `json:"free_call_stack,omitempty"`
 	UseCallStack   uint64 `json:"use_call_stack,omitempty"`
+}
+
+// storedBarrierRecord represents a serialized barrier execution record for replay.
+type storedBarrierRecord struct {
+	Programs  [][]byte  `json:"programs"`
+	Timestamp time.Time `json:"timestamp"`
+	GroupID   int64     `json:"group_id"`
 }
 
 func NewUAFCorpusStore(workdir string, target *prog.Target) (*UAFCorpusStore, error) {
@@ -124,7 +132,17 @@ func (store *UAFCorpusStore) EntriesSince(sinceSeq uint64) ([]*fuzzer.UAFCorpusE
 		}
 		entries = append(entries, entry)
 	}
+	// Sort entries: prioritize entries with ReplayHistory, then by Timestamp.
+	// This ensures that when multiple entries have the same signature/key,
+	// the one with history is processed first (and others are deduplicated away).
 	sort.Slice(entries, func(i, j int) bool {
+		iHasHistory := len(entries[i].ReplayHistory) > 0
+		jHasHistory := len(entries[j].ReplayHistory) > 0
+		if iHasHistory != jHasHistory {
+			// Entry with history comes first
+			return iHasHistory
+		}
+		// Same history status: sort by timestamp (older first)
 		return entries[i].Timestamp.Before(entries[j].Timestamp)
 	})
 	return entries, maxSeq, nil
@@ -138,6 +156,7 @@ func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) 
 	defer store.mu.Unlock()
 
 	added := 0
+	updated := 0
 	for _, entry := range entries {
 		if entry == nil {
 			continue
@@ -147,7 +166,29 @@ func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) 
 			continue
 		}
 		key := fmt.Sprintf("%016x", id)
-		if _, exists := store.db.Records[key]; exists {
+		if existingRec, exists := store.db.Records[key]; exists {
+			// Entry already exists - check if we should update it (if new entry has history but existing doesn't)
+			if len(entry.ReplayHistory) > 0 {
+				// Deserialize existing entry to check if it has history
+				existingEntry, err := store.deserialize(existingRec.Val)
+				if err == nil && len(existingEntry.ReplayHistory) == 0 {
+					// Existing entry has no history, update with new entry that has history
+					data, err := serializeUAFCorpusEntry(entry)
+					if err != nil {
+						log.Errorf("failed to serialize updated uaf corpus entry: %v", err)
+						continue
+					}
+					// Use current time as seq so that EntriesSince() will pick up
+					// this updated entry in incremental reads. Using the original
+					// entry.Timestamp would keep the old seq and the update would
+					// be missed by validate's incremental reload.
+					seq := uint64(time.Now().UnixNano())
+					store.db.Save(key, data, seq)
+					updated++
+					// Debug logging disabled for production
+					// log.Logf(0, "[history] race_store: updated existing entry with %d history records (new_seq=%d)", len(entry.ReplayHistory), seq)
+				}
+			}
 			continue
 		}
 		data, err := serializeUAFCorpusEntry(entry)
@@ -158,10 +199,10 @@ func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) 
 		store.db.Save(key, data, seq)
 		added++
 	}
-	if added == 0 {
+	if added == 0 && updated == 0 {
 		return 0, nil
 	}
-	return added, store.db.Flush()
+	return added + updated, store.db.Flush()
 }
 
 func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
@@ -200,7 +241,34 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 			UseCallStack:   entry.Profile.UseCallStack,
 		}
 	}
+	// Serialize replay history
+	if len(entry.ReplayHistory) != 0 {
+		stored.ReplayHistory = serializeReplayHistory(entry.ReplayHistory)
+		// Debug logging disabled for production
+		// log.Logf(0, "[history] race_store: serializing entry with %d history records", len(entry.ReplayHistory))
+	}
 	return json.Marshal(stored)
+}
+
+func serializeReplayHistory(history []*fuzzer.BarrierExecutionRecord) []storedBarrierRecord {
+	if len(history) == 0 {
+		return nil
+	}
+	result := make([]storedBarrierRecord, 0, len(history))
+	for _, rec := range history {
+		if rec == nil {
+			continue
+		}
+		stored := storedBarrierRecord{
+			Timestamp: rec.Timestamp,
+			GroupID:   rec.GroupID,
+		}
+		if len(rec.Programs) != 0 {
+			stored.Programs = serializeProgramGroup(rec.Programs)
+		}
+		result = append(result, stored)
+	}
+	return result
 }
 
 func (store *UAFCorpusStore) Entries() ([]*fuzzer.UAFCorpusEntry, error) {
@@ -221,7 +289,17 @@ func (store *UAFCorpusStore) Entries() ([]*fuzzer.UAFCorpusEntry, error) {
 		}
 		entries = append(entries, entry)
 	}
+	// Sort entries: prioritize entries with ReplayHistory, then by Timestamp.
+	// This ensures that when multiple entries have the same signature/key,
+	// the one with history is processed first (and others are deduplicated away).
 	sort.Slice(entries, func(i, j int) bool {
+		iHasHistory := len(entries[i].ReplayHistory) > 0
+		jHasHistory := len(entries[j].ReplayHistory) > 0
+		if iHasHistory != jHasHistory {
+			// Entry with history comes first
+			return iHasHistory
+		}
+		// Same history status: sort by timestamp (older first)
 		return entries[i].Timestamp.Before(entries[j].Timestamp)
 	})
 	return entries, nil
@@ -288,7 +366,43 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 			UseCallStack:   stored.Pair.UseCallStack,
 		}
 	}
+	// Deserialize replay history
+	if len(stored.ReplayHistory) != 0 {
+		// Debug logging disabled for production
+		// log.Logf(0, "[history] race_store: deserializing entry with %d stored history records", len(stored.ReplayHistory))
+		history, err := store.deserializeReplayHistory(stored.ReplayHistory)
+		if err != nil {
+			log.Logf(0, "warning: failed to deserialize replay history: %v", err)
+			// Continue without history - not fatal
+		} else {
+			entry.ReplayHistory = history
+			// Debug logging disabled for production
+			// log.Logf(0, "[history] race_store: deserialized %d history records", len(history))
+		}
+	}
 	return entry, nil
+}
+
+func (store *UAFCorpusStore) deserializeReplayHistory(records []storedBarrierRecord) ([]*fuzzer.BarrierExecutionRecord, error) {
+	if len(records) == 0 || store.target == nil {
+		return nil, nil
+	}
+	result := make([]*fuzzer.BarrierExecutionRecord, 0, len(records))
+	for _, rec := range records {
+		entry := &fuzzer.BarrierExecutionRecord{
+			Timestamp: rec.Timestamp,
+			GroupID:   rec.GroupID,
+		}
+		if len(rec.Programs) != 0 {
+			programs, err := store.deserializeProgramGroup(rec.Programs)
+			if err != nil {
+				return nil, fmt.Errorf("deserialize replay history programs: %w", err)
+			}
+			entry.Programs = programs
+		}
+		result = append(result, entry)
+	}
+	return result, nil
 }
 
 func isZeroMayUAFPair(pair ddrd.MayUAFPair) bool {

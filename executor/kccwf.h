@@ -59,8 +59,12 @@ typedef struct {
 typedef struct {
 	unsigned long use_name;
 	unsigned long use_stack;
+	int use_sn;
+	int use_tid;
 	unsigned long free_name;
 	unsigned long free_stack;
+	int free_sn;
+	int free_tid;
 	int use_access_delay_time;
 	bool is_valid;
 } may_uaf_pair_t;

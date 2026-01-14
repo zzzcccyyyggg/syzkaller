@@ -340,8 +340,12 @@ static int64_t barrier_start_delay_us[kMaxBarrierDelays];
 struct UkcPreloadPair {
 	uint64_t use_name = 0;
 	uint64_t use_stack = 0;
+	int32_t use_sn = 0;
+	int32_t use_tid = 0;
 	uint64_t free_name = 0;
 	uint64_t free_stack = 0;
+	int32_t free_sn = 0;
+	int32_t free_tid = 0;
 	int32_t use_access_delay_time = 0;
 };
 static bool ukc_preload_valid;
@@ -634,8 +638,12 @@ struct execute_req {
 	int64_t barrier_start_delay_us[kMaxBarrierDelays];
 	uint64_t ukc_use_name;
 	uint64_t ukc_use_stack;
+	int32_t ukc_use_sn;
+	int32_t ukc_use_tid;
 	uint64_t ukc_free_name;
 	uint64_t ukc_free_stack;
+	int32_t ukc_free_sn;
+	int32_t ukc_free_tid;
 	int32_t ukc_use_access_delay_time;
 	bool ukc_is_valid;
 };
@@ -1106,8 +1114,12 @@ void parse_execute(const execute_req& req)
 	if (ukc_preload_valid) {
 		ukc_preload_pair.use_name = req.ukc_use_name;
 		ukc_preload_pair.use_stack = req.ukc_use_stack;
+		ukc_preload_pair.use_sn = req.ukc_use_sn;
+		ukc_preload_pair.use_tid = req.ukc_use_tid;
 		ukc_preload_pair.free_name = req.ukc_free_name;
 		ukc_preload_pair.free_stack = req.ukc_free_stack;
+		ukc_preload_pair.free_sn = req.ukc_free_sn;
+		ukc_preload_pair.free_tid = req.ukc_free_tid;
 		ukc_preload_pair.use_access_delay_time = req.ukc_use_access_delay_time;
 	}
 #endif

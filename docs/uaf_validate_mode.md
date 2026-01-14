@@ -44,20 +44,36 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
   - When a corpus entry carries DDRD pairs, the first pair's `time_diff` seeds a leading delay so the free/use windows compress towards the observed overlap.
 
 ## Configuration Knobs (`manager.Config.Experimental.UAFValidate`)
+
+> **Note**: For detailed configuration documentation with examples, see [uaf_validate_config.md](uaf_validate_config.md).
+
+### Core Settings
 - `MaxConcurrent`: Caps worker count (auto-clamped to VM pool size).
 - `DelayRetryBudget`: Maximum retries per repeat when crashes or transient errors occur.
 - `TimeoutSeconds`: Execution timeout for each repeat.
 - `RepeatCount`: Total number of repeats attempted per entry (default 1). Stable pair intersection requires `repeat/2 + 1` successful observations.
 - `VerifyRepeatTimes`: Number of times to repeat verification phase for stable pairs (default 10). Higher values increase confidence but take longer.
-- `ExecutorProgramTimeoutSeconds`: Optional override for the executor's per-program watchdog (defaults to the target timeout if unset).
-- `ExecutorSyscallTimeoutMillis`: Optional override for the executor's per-syscall watchdog; useful when DDRD delays exceed the default 50 ms budget.
+
+### Runtime Mode
 - `ContinuousMode`: Enable incremental corpus reloading instead of one-shot validation. When enabled, the validator runs indefinitely and periodically checks for new entries.
 - `IncrementalReloadMinutes`: How often to reload new corpus entries in continuous mode (default: 10 minutes).
 - `IdleReloadSeconds`: How long to wait before reloading when no tasks are pending (default: 30 seconds).
-- `EnableVMSnapshot`: Enable QEMU VM snapshot support for faster validation cycles (experimental). See "VM Snapshot Optimization" section below.
-- `Debug`: Surfaces additional logging when enabled.
 
-### Example Configuration (Continuous Mode)
+### Scheduling
+- `EnableVarNameScheduling`: Enable VarName-based round-robin scheduling. Ensures fair resource distribution across different VarName pairs by prioritizing those with fewer entries.
+
+### Stable Pairs
+- `RequireOriginMatch`: When false (default), any runtime-discovered pair meeting the stability threshold is accepted. When true, pairs must also exist in the original corpus entry.
+
+### Performance
+- `EnableVMSnapshot`: Enable QEMU VM snapshot support for faster validation cycles (experimental). See "VM Snapshot Optimization" section below.
+- `ExecutorProgramTimeoutSeconds`: Optional override for the executor's per-program watchdog (defaults to the target timeout if unset).
+- `ExecutorSyscallTimeoutMillis`: Optional override for the executor's per-syscall watchdog; useful when DDRD delays exceed the default 50 ms budget.
+
+### Debugging
+- `TargetVarNamePair`: Specify a VarName pair to debug (format: `"hex-hex"`). Only entries containing this pair are validated, and all skip logic is bypassed.
+
+### Example Configuration (Continuous Mode with VarName Scheduling)
 ```json
 {
   "experimental": {
@@ -68,7 +84,9 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
       "repeat_count": 3,
       "continuous_mode": true,
       "incremental_reload_minutes": 10,
-      "idle_reload_seconds": 30
+      "idle_reload_seconds": 30,
+      "enable_varname_scheduling": true,
+      "require_origin_match": false
     }
   }
 }

@@ -91,6 +91,21 @@ func (p *Pool[T]) TogglePause(paused bool) {
 	}
 }
 
+// RestartAll forces all instances to restart by stopping them.
+// This is used when transitioning to a new fuzzing phase (e.g., UAF mode)
+// to ensure all VMs start with a clean kernel state.
+func (p *Pool[T]) RestartAll() {
+	p.mu.Lock()
+	defer p.mu.Unlock()
+	for _, inst := range p.instances {
+		inst.mu.Lock()
+		if inst.stop != nil {
+			inst.stop()
+		}
+		inst.mu.Unlock()
+	}
+}
+
 func (p *Pool[T]) waitUnpaused() {
 	p.mu.Lock()
 	defer p.mu.Unlock()

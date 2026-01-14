@@ -2252,6 +2252,14 @@ var linuxOopses = append([]*oops{
 				title: compile("Kernel panic - not syncing: (.*)"),
 				fmt:   "kernel panic: %[1]v",
 			},
+			// Custom DATARACE format (for UAF race detection kernel instrumentation).
+			// Format: "Kernel panic: ============ DATARACE ============"
+			// Note: This uses "Kernel panic:" (colon) not "Kernel panic - not syncing:".
+			{
+				title:        compile("Kernel panic: =+ DATARACE =+"),
+				fmt:          "DATARACE",
+				noStackTrace: true,
+			},
 		},
 		[]*regexp.Regexp{},
 	},

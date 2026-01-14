@@ -14,30 +14,30 @@ type Stats struct {
 	// Indexed by prog.Syscall.ID + the last element for extra/remote.
 	Syscalls []SyscallStats
 
-	statCandidates          *stat.Val
-	statNewInputs           *stat.Val
-	statJobs                *stat.Val
-	statJobsTriage          *stat.Val
-	statJobsTriageCandidate *stat.Val
-	statJobsSmash           *stat.Val
-	statJobsFaultInjection  *stat.Val
-	statJobsHints           *stat.Val
-	statExecTime            *stat.Val
-	statExecGenerate        *stat.Val
-	statExecFuzz            *stat.Val
-	statExecCandidate       *stat.Val
-	statExecTriage          *stat.Val
-	statExecMinimize        *stat.Val
-	statExecSmash           *stat.Val
-	statExecFaultInject     *stat.Val
-	statExecHint            *stat.Val
-	statExecUAF             *stat.Val
-	statExecSeed            *stat.Val
-	statExecCollide         *stat.Val
-	statCoverOverflows      *stat.Val
-	statCompsOverflows      *stat.Val
-	statDdrdPairs           *stat.Val
-	statJobsThreePhase      *stat.Val
+	statCandidates               *stat.Val
+	statNewInputs                *stat.Val
+	statJobs                     *stat.Val
+	statJobsTriage               *stat.Val
+	statJobsTriageCandidate      *stat.Val
+	statJobsSmash                *stat.Val
+	statJobsFaultInjection       *stat.Val
+	statJobsHints                *stat.Val
+	statExecTime                 *stat.Val
+	statExecGenerate             *stat.Val
+	statExecFuzz                 *stat.Val
+	statExecCandidate            *stat.Val
+	statExecTriage               *stat.Val
+	statExecMinimize             *stat.Val
+	statExecSmash                *stat.Val
+	statExecFaultInject          *stat.Val
+	statExecHint                 *stat.Val
+	statExecUAF                  *stat.Val
+	statExecSeed                 *stat.Val
+	statExecCollide              *stat.Val
+	statCoverOverflows           *stat.Val
+	statCompsOverflows           *stat.Val
+	statDdrdPairs                *stat.Val
+	statJobsThreePhase           *stat.Val
 	statThreePhaseCrossProgPairs *stat.Val
 }
 
@@ -94,7 +94,7 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.NoGraph),
 		statDdrdPairs: stat.New("ddrd pairs", "Unique DDRD UAF pairs discovered",
 			stat.Graph("ddrd")),
-		statJobsThreePhase: stat.New("three-phase jobs", "Running 3-phase filter jobs", 
+		statJobsThreePhase: stat.New("three-phase jobs", "Running 3-phase filter jobs",
 			stat.StackedGraph("jobs")),
 		statThreePhaseCrossProgPairs: stat.New("cross-prog pairs", "Cross-program race pairs after 3-phase filter",
 			stat.Graph("ddrd")),

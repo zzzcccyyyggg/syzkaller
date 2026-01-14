@@ -110,8 +110,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
 {
-    const uint64_t TIME_THRESHOLD = 10000000;
-    const uint64_t FAST_THRESHOLD = 10000000;
+    const uint64_t TIME_THRESHOLD = 2000000;
+    const uint64_t FAST_THRESHOLD = 2000000;
     int pair_count = 0;
 
     for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {

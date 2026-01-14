@@ -206,10 +206,16 @@ table ExecRequestRaw {
 	// Optional may-UAF metadata propagated to executors for preloading UKC controller.
 	ukc_use_name	:uint64;
 	ukc_use_stack	:uint64;
+	ukc_use_sn	:int32;
+	ukc_use_tid	:int32;
 	ukc_free_name	:uint64;
 	ukc_free_stack	:uint64;
+	ukc_free_sn	:int32;
+	ukc_free_tid	:int32;
 	ukc_use_access_delay_time	:int32;
 	ukc_is_valid	:bool;
+	// Flag to use FINE_LOG/FINE_MONITOR modes instead of normal LOG/MONITOR (for validation mode)
+	ukc_use_fine_mode	:bool;
 }
 
 table SignalUpdateRaw {

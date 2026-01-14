@@ -707,10 +707,20 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 	if pair := req.UkcPair; ukcPairAvailable(pair) {
 		execReq.UkcUseName = pair.UseAccessName
 		execReq.UkcUseStack = pair.UseCallStack
+		execReq.UkcUseSn = pair.UseSN
+		execReq.UkcUseTid = pair.UseTid
 		execReq.UkcFreeName = pair.FreeAccessName
 		execReq.UkcFreeStack = pair.FreeCallStack
+		execReq.UkcFreeSn = pair.FreeSN
+		execReq.UkcFreeTid = pair.FreeTid
 		execReq.UkcUseAccessDelayTime = ukcDelayMicros(pair)
 		execReq.UkcIsValid = true
+	}
+	if req.IsValidationMode {
+		execReq.UkcUseFineMode = true
+		if runner.debug {
+			log.Logf(0, "rpcserver: setting UkcUseFineMode=true for validation request id=%d", id)
+		}
 	}
 	msg := &flatrpc.HostMessage{
 		Msg: &flatrpc.HostMessages{

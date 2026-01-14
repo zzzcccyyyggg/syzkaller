@@ -8,6 +8,8 @@ import (
 	"math/bits"
 	"net"
 	"strconv"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -21,10 +23,23 @@ import (
 	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/pkg/rpcserver"
 	"github.com/google/syzkaller/pkg/signal"
+	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/pkg/vminfo"
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/vm"
 )
+
+// isConnectionClosedError checks if the error is due to a closed network connection.
+// This typically happens during normal shutdown or snapshot restore.
+func isConnectionClosedError(err error) bool {
+	if err == nil {
+		return false
+	}
+	errStr := err.Error()
+	return strings.Contains(errStr, "use of closed network connection") ||
+		strings.Contains(errStr, "connection reset by peer") ||
+		strings.Contains(errStr, "broken pipe")
+}
 
 // ExecutorAdapter wraps an ExecProgInstance so it can be reused by the validator.
 type ExecutorAdapter struct {
@@ -124,6 +139,14 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	if participants < 2 {
 		return e.runSingle(parentCtx, execReq)
 	}
+	// Reset forward port after barrier execution completes.
+	// This allows multiple runBarrier calls on the same VM instance,
+	// each with its own RPC server and port forwarding.
+	defer func() {
+		if e.inst != nil && e.inst.VMInstance != nil {
+			e.inst.VMInstance.ResetForwardPort()
+		}
+	}()
 	vmIndex := -1
 	if e.inst.VMInstance != nil {
 		vmIndex = e.inst.VMInstance.Index()
@@ -192,11 +215,12 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	mask = (uint64(1) << participants) - 1
 
 	request := &queue.Request{
-		Prog:         baseProg,
-		ReturnOutput: true,
-		ReturnError:  true,
-		Important:    true,
-		DisableDdrd:  execReq.DisableDdrd,
+		Prog:             baseProg,
+		ReturnOutput:     true,
+		ReturnError:      true,
+		Important:        true,
+		DisableDdrd:      execReq.DisableDdrd,
+		IsValidationMode: true,
 	}
 	if execReq.RepeatTimes > 0 {
 		// For barrier mode, we can't easily use syz-execprog's -repeat flag because
@@ -474,14 +498,14 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 			return nil, fmt.Errorf("run barrier request: %w", runErr)
 		}
 	}
-	if runnerErr != nil && !errors.Is(runnerErr, context.Canceled) {
+	if runnerErr != nil && !errors.Is(runnerErr, context.Canceled) && !isConnectionClosedError(runnerErr) {
 		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
 			log.Logf(0, "uafvalidate: barrier request recovered crash result after runner error: %v", runnerErr)
 			return result, nil
 		}
 		return nil, fmt.Errorf("runner error: %w", runnerErr)
 	}
-	if serveErr != nil && !errors.Is(serveErr, context.Canceled) {
+	if serveErr != nil && !errors.Is(serveErr, context.Canceled) && !isConnectionClosedError(serveErr) {
 		if result := crashFallbackResult(execReq, reports, output, start); result != nil {
 			log.Logf(0, "uafvalidate: barrier request recovered crash result after rpc server error: %v", serveErr)
 			return result, nil
@@ -761,18 +785,26 @@ func calculateSweepDelay(iteration, totalIterations int, maxDelayUs int64, power
 
 func crashMatchesTargetPair(reports []*report.Report, target *ddrd.MayUAFPair) int {
 	if target == nil || len(reports) == 0 {
+		log.Logf(2, "crashMatchesTargetPair: no reports or target (reports=%d, target=%v)", len(reports), target != nil)
 		return 0
 	}
 	want := targetVarNames(target)
 	if len(want) == 0 {
+		log.Logf(2, "crashMatchesTargetPair: no target varnames")
 		return 0
 	}
+	log.Logf(2, "crashMatchesTargetPair: checking %d reports against target varnames=%v", len(reports), want)
 	matches := 0
-	for _, rep := range reports {
+	for i, rep := range reports {
+		if rep != nil {
+			log.Logf(2, "crashMatchesTargetPair: report[%d] title=%q reportLen=%d", i, rep.Title, len(rep.Report))
+		}
 		if reportMatchesVarNames(rep, want) {
 			matches++
+			log.Logf(1, "crashMatchesTargetPair: report[%d] MATCHED target", i)
 		}
 	}
+	log.Logf(2, "crashMatchesTargetPair: total matches=%d", matches)
 	return matches
 }
 
@@ -838,13 +870,17 @@ func reportMatchesVarNames(rep *report.Report, want map[string]struct{}) bool {
 		info = report.ParseCustomDataRace(rep.Report)
 	}
 	if info == nil || len(info.Entries) == 0 {
+		log.Logf(2, "reportMatchesVarNames: no CustomDataRace entries parsed from report")
 		return false
 	}
+	log.Logf(2, "reportMatchesVarNames: checking %d entries against want=%v", len(info.Entries), want)
 	for _, entry := range info.Entries {
 		if entry == nil {
 			continue
 		}
+		log.Logf(2, "reportMatchesVarNames: entry.VarName=%q", entry.VarName)
 		if _, ok := want[entry.VarName]; ok {
+			log.Logf(1, "reportMatchesVarNames: MATCHED entry.VarName=%s", entry.VarName)
 			return true
 		}
 	}
@@ -919,6 +955,406 @@ func (m *validationManager) MachineChecked(features flatrpc.Feature, syscalls ma
 			return m.request
 		}
 		return nil
+	})
+	return queue.DefaultOpts(source, opts), nil
+}
+
+// RunBatch executes multiple requests in a single RPC session.
+// This is more efficient than calling Run multiple times as it avoids
+// re-establishing SSH connections and RPC servers for each request.
+// All requests share the same runner process, which maintains kernel state
+// between executions (important for replay + validate workflow).
+func (e *ExecutorAdapter) RunBatch(ctx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	if e == nil || e.inst == nil {
+		return nil, fmt.Errorf("executor instance is nil")
+	}
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+
+	// Check if all requests require barrier mode
+	allBarrier := true
+	for _, req := range reqs {
+		if req == nil || req.Entry == nil {
+			continue
+		}
+		if !e.requiresBarrier(req.Entry) {
+			allBarrier = false
+			break
+		}
+	}
+
+	// For simplicity, if any request doesn't require barrier, fall back to sequential Run
+	if !allBarrier {
+		results := make([]*ExecutionResult, len(reqs))
+		for i, req := range reqs {
+			res, err := e.Run(ctx, req)
+			if err != nil {
+				return results, err
+			}
+			results[i] = res
+		}
+		return results, nil
+	}
+
+	return e.runBarrierBatch(ctx, reqs)
+}
+
+// runBarrierBatch executes multiple barrier requests in a single RPC session.
+func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+
+	// Reset forward port after batch execution completes
+	defer func() {
+		if e.inst != nil && e.inst.VMInstance != nil {
+			e.inst.VMInstance.ResetForwardPort()
+		}
+	}()
+
+	vmIndex := -1
+	if e.inst.VMInstance != nil {
+		vmIndex = e.inst.VMInstance.Index()
+	}
+
+	mgrCfg := e.inst.ManagerConfig()
+	if mgrCfg == nil {
+		return nil, fmt.Errorf("missing manager configuration for execprog instance")
+	}
+	cfgCopy := *mgrCfg
+
+	executorBin := e.inst.ExecutorBinary()
+	if executorBin == "" {
+		return nil, fmt.Errorf("executor binary path is empty")
+	}
+	reporter := e.inst.Reporter()
+	if reporter == nil {
+		return nil, fmt.Errorf("execprog reporter is not configured")
+	}
+
+	// Build queue requests for all execution requests
+	queueReqs := make([]*queue.Request, 0, len(reqs))
+	for i, execReq := range reqs {
+		if execReq == nil || execReq.Entry == nil {
+			continue
+		}
+		entry := execReq.Entry
+		mask := barrierMask(entry)
+		participants := bits.OnesCount64(mask)
+		if participants < 2 {
+			continue
+		}
+
+		programs := barrierPrograms(entry, mask)
+		if len(programs) < 2 {
+			continue
+		}
+
+		baseProg := entry.Prog
+		if baseProg == nil {
+			for _, p := range entry.Programs {
+				if p != nil {
+					baseProg = p
+					break
+				}
+			}
+		}
+		if baseProg == nil {
+			continue
+		}
+
+		request := &queue.Request{
+			Prog:             baseProg.Clone(),
+			Stat:             stat.New(fmt.Sprintf("batch-request-%d", i), "", stat.NoGraph),
+			ExecOpts:         flatrpc.ExecOpts{},
+			ReturnOutput:     true,
+			ReturnError:      true,
+			DisableDdrd:      execReq.DisableDdrd,
+			IsValidationMode: true,
+		}
+		// Note: We set DisableDdrd above; rpcserver/runner.go will handle ExecFlags
+		// based on that field when serializing for barrier execution.
+
+		// Set UkcPair for verification phase (TargetPair != nil means we're verifying a specific pair)
+		if execReq.TargetPair != nil {
+			request.UkcPair = execReq.TargetPair
+		}
+
+		request.SetBarrier(mask)
+		if err := request.SetBarrierPrograms(programs); err != nil {
+			continue
+		}
+		delays := barrierDelays(execReq.Delays, entry.ReplayPlan.DelaysMicros, len(programs))
+		if len(delays) != 0 {
+			request.SetBarrierStartDelays(delays)
+		}
+
+		queueReqs = append(queueReqs, request)
+	}
+
+	if len(queueReqs) == 0 {
+		return nil, fmt.Errorf("no valid barrier requests in batch")
+	}
+
+	log.Logf(0, "uafvalidate: vm=%d executing batch of %d barrier requests", vmIndex, len(queueReqs))
+
+	// Create multi-request manager
+	manager := newMultiRequestManager(&cfgCopy, queueReqs, e.cfg.Debug, e.cfg)
+
+	serv, err := rpcserver.New(&rpcserver.RemoteConfig{
+		Config:  &cfgCopy,
+		Manager: manager,
+		Stats:   rpcserver.NewNamedStats("uaf-validate-batch"),
+		Debug:   e.cfg.Debug,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create rpc server: %w", err)
+	}
+	defer serv.Close()
+
+	if err := serv.Listen(); err != nil {
+		return nil, fmt.Errorf("listen rpc server: %w", err)
+	}
+
+	addr, err := e.inst.VMInstance.Forward(serv.Port())
+	if err != nil {
+		return nil, fmt.Errorf("forward runner port: %w", err)
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("split forwarded address: %w", err)
+	}
+
+	command := fmt.Sprintf("%s runner 0 %s %s", executorBin, host, portStr)
+
+	ctx, cancel := context.WithTimeout(parentCtx, e.cfg.ExecutionTimeout*time.Duration(len(queueReqs)+1))
+	defer cancel()
+
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- serv.Serve(serveCtx)
+	}()
+	defer serveCancel()
+
+	connErr := serv.CreateInstance(0, nil, nil)
+	defer func() {
+		serv.StopFuzzing(0)
+		serv.ShutdownInstance(0, false)
+	}()
+
+	start := time.Now()
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	type runOutcome struct {
+		output  []byte
+		reports []*report.Report
+		err     error
+	}
+	runOutcomeCh := make(chan runOutcome, 1)
+	go func() {
+		output, reports, runErr := e.inst.VMInstance.Run(runCtx, reporter, command,
+			vm.WithExitCondition(vm.ExitNormal|vm.ExitError|vm.ExitTimeout))
+		runOutcomeCh <- runOutcome{output: output, reports: reports, err: runErr}
+	}()
+
+	// Collect results from all requests
+	results := make([]*ExecutionResult, len(queueReqs))
+	resultIdx := 0
+
+	resCh := make(chan *queue.Result, len(queueReqs))
+	for i := range queueReqs {
+		queueReqs[i].OnDone(func(_ *queue.Request, res *queue.Result) bool {
+			select {
+			case resCh <- res:
+			default:
+			}
+			return true
+		})
+	}
+
+	// Wait for all results or VM exit
+	// haveOutcome tracks whether we've received the final VM.Run outcome
+	haveOutcome := false
+	var finalOutcome runOutcome
+
+	for resultIdx < len(queueReqs) || !haveOutcome {
+		select {
+		case res := <-resCh:
+			if resultIdx < len(results) {
+				results[resultIdx] = &ExecutionResult{
+					Output:   append([]byte{}, res.Output...),
+					Duration: time.Since(start),
+				}
+				if res.Ddrd != nil {
+					results[resultIdx].Ddrd = res.Ddrd.Clone()
+				}
+				switch res.Status {
+				case queue.Crashed, queue.ExecFailure, queue.Hanged:
+					results[resultIdx].Crashed = true
+					if res.Err != nil {
+						results[resultIdx].CrashTitle = res.Err.Error()
+					}
+				}
+
+				// Check if this request has a TargetPair and if DDRD data matches
+				if resultIdx < len(reqs) && reqs[resultIdx].TargetPair != nil && res.Ddrd != nil {
+					target := reqs[resultIdx].TargetPair
+					for _, pair := range res.Ddrd.UAFPairs {
+						if pair.FreeAccessName == target.FreeAccessName &&
+							pair.UseAccessName == target.UseAccessName &&
+							pair.FreeCallStack == target.FreeCallStack &&
+							pair.UseCallStack == target.UseCallStack {
+							results[resultIdx].TriggeredCount++
+							break
+						}
+					}
+				}
+			}
+			resultIdx++
+			// Cancel VM.Run when all requests are done to trigger final output collection
+			if resultIdx >= len(queueReqs) {
+				runCancel()
+			}
+
+		case outcome := <-runOutcomeCh:
+			finalOutcome = outcome
+			haveOutcome = true
+			if outcome.err != nil && !errors.Is(outcome.err, context.Canceled) {
+				log.Logf(0, "uafvalidate: vm=%d batch run error: %v", vmIndex, outcome.err)
+			}
+			// Fill remaining results with crash info from VM exit
+			for i := resultIdx; i < len(results); i++ {
+				results[i] = &ExecutionResult{
+					Output:   outcome.output,
+					Duration: time.Since(start),
+					Crashed:  len(outcome.reports) > 0,
+				}
+				if len(outcome.reports) > 0 && outcome.reports[0] != nil {
+					results[i].CrashTitle = outcome.reports[0].Title
+					results[i].CrashReport = cloneReportBody(outcome.reports[0])
+
+					// Check if crash matches TargetPair for remaining verify requests
+					if i < len(reqs) && reqs[i].TargetPair != nil {
+						if matches := crashMatchesTargetPair(outcome.reports, reqs[i].TargetPair); matches > 0 {
+							results[i].TriggeredCount = matches
+							log.Logf(1, "uafvalidate: batch crash matched target pair for request %d, triggered=%d", i, matches)
+						}
+					}
+				}
+			}
+			// Force all requests complete since VM exited
+			if resultIdx < len(queueReqs) {
+				log.Logf(0, "uafvalidate: vm=%d exited early after %d/%d requests", vmIndex, resultIdx, len(queueReqs))
+				resultIdx = len(queueReqs)
+			}
+
+		case <-ctx.Done():
+			for i := resultIdx; i < len(results); i++ {
+				results[i] = &ExecutionResult{
+					Duration: time.Since(start),
+					Crashed:  true,
+				}
+			}
+			resultIdx = len(queueReqs)
+			// Still wait for runOutcomeCh to get final crash info
+			if !haveOutcome {
+				select {
+				case outcome := <-runOutcomeCh:
+					finalOutcome = outcome
+					haveOutcome = true
+				case <-time.After(5 * time.Second):
+					// Timeout waiting for VM.Run to finish
+					haveOutcome = true
+				}
+			}
+
+		case err := <-connErr:
+			if err != nil {
+				log.Logf(0, "uafvalidate: vm=%d batch connection error: %v", vmIndex, err)
+			}
+		}
+	}
+
+	// After loop: check if finalOutcome has crash reports that weren't applied to results
+	// This handles the case where all requests completed successfully but VM detected a crash afterward
+	if haveOutcome && len(finalOutcome.reports) > 0 {
+		for i := range results {
+			if results[i] == nil {
+				continue
+			}
+			// If this result doesn't have crash info but VM has crash reports, update it
+			if !results[i].Crashed && finalOutcome.reports[0] != nil {
+				results[i].Crashed = true
+				results[i].CrashTitle = finalOutcome.reports[0].Title
+				results[i].CrashReport = cloneReportBody(finalOutcome.reports[0])
+				results[i].Output = finalOutcome.output
+			}
+			// Check if crash matches TargetPair for verify requests
+			if i < len(reqs) && reqs[i].TargetPair != nil && results[i].TriggeredCount == 0 {
+				if matches := crashMatchesTargetPair(finalOutcome.reports, reqs[i].TargetPair); matches > 0 {
+					results[i].TriggeredCount = matches
+					log.Logf(0, "uafvalidate: batch final crash matched target pair for request %d, triggered=%d", i, matches)
+				}
+			}
+		}
+	}
+
+	log.Logf(0, "uafvalidate: vm=%d batch completed %d requests in %s", vmIndex, len(results), time.Since(start))
+	return results, nil
+}
+
+// multiRequestManager manages a queue of requests for batch execution.
+type multiRequestManager struct {
+	cfg      *mgrconfig.Config
+	requests []*queue.Request
+	debug    bool
+	valCfg   Config
+	mu       sync.Mutex
+	idx      int
+}
+
+func newMultiRequestManager(cfg *mgrconfig.Config, requests []*queue.Request, debug bool, valCfg Config) *multiRequestManager {
+	return &multiRequestManager{
+		cfg:      cfg,
+		requests: requests,
+		debug:    debug,
+		valCfg:   valCfg,
+	}
+}
+
+func (m *multiRequestManager) MaxSignal() signal.Signal { return nil }
+
+func (m *multiRequestManager) BugFrames() ([]string, []string) { return nil, nil }
+
+func (m *multiRequestManager) CoverageFilter(_ []*vminfo.KernelModule) ([]uint64, error) {
+	return nil, nil
+}
+
+func (m *multiRequestManager) MachineChecked(features flatrpc.Feature, syscalls map[*prog.Syscall]bool) (queue.Source, error) {
+	if len(syscalls) == 0 {
+		return nil, fmt.Errorf("all system calls are disabled")
+	}
+	opts := fuzzer.DefaultExecOpts(m.cfg, features, m.debug)
+	opts.ExecFlags &^= flatrpc.ExecFlagThreaded
+	// Note: Do NOT set ExecFlagCollectDdrdUaf here - each request has its own ExecFlags
+	// set in runBarrierBatch based on DisableDdrd field
+
+	source := queue.Callback(func() *queue.Request {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.idx >= len(m.requests) {
+			return nil
+		}
+		req := m.requests[m.idx]
+		m.idx++
+		if m.debug {
+			log.Logf(0, "uafvalidate: batch serving request %d/%d DisableDdrd=%v",
+				m.idx, len(m.requests), req.DisableDdrd)
+		}
+		return req
 	})
 	return queue.DefaultOpts(source, opts), nil
 }

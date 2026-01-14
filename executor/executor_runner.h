@@ -811,23 +811,36 @@ public:
 		if (req && req->ukc_is_valid) {
 			pair.use_name = req->ukc_use_name;
 			pair.use_stack = req->ukc_use_stack;
+			pair.use_sn = req->ukc_use_sn;
+			pair.use_tid = req->ukc_use_tid;
 			pair.free_name = req->ukc_free_name;
 			pair.free_stack = req->ukc_free_stack;
+			pair.free_sn = req->ukc_free_sn;
+			pair.free_tid = req->ukc_free_tid;
 			pair.use_access_delay_time = req->ukc_use_access_delay_time;
 			pair.is_valid = true;
 			set_pair = true;
 		} else if (collect_uaf && ukc_preload_valid) {
 			pair.use_name = ukc_preload_pair.use_name;
 			pair.use_stack = ukc_preload_pair.use_stack;
+			pair.use_sn = ukc_preload_pair.use_sn;
+			pair.use_tid = ukc_preload_pair.use_tid;
 			pair.free_name = ukc_preload_pair.free_name;
 			pair.free_stack = ukc_preload_pair.free_stack;
+			pair.free_sn = ukc_preload_pair.free_sn;
+			pair.free_tid = ukc_preload_pair.free_tid;
 			pair.use_access_delay_time = ukc_preload_pair.use_access_delay_time;
 			pair.is_valid = true;
 			set_pair = true;
 		}
 
 		if (set_pair) {
-			ukc_enter_monitor_mode();
+			// Verification phase: use FINE_MONITOR_MODE if validation mode
+			if (req && req->ukc_use_fine_mode) {
+				ukc_enter_fine_monitor_mode();
+			} else {
+				ukc_enter_monitor_mode();
+			}
 			ukc_set_may_uaf_pair(&pair);
 		} else if (collect_uaf) {
 			ukc_clear_may_uaf_pair();
@@ -854,10 +867,25 @@ public:
 
 		active_for_group_ = true;
 
-		// Switch to LOG mode
-		if (collect_uaf || collect_extended)
-			ukc_enter_log_mode();
-		// ukc_enter_monitor_mode();
+		// Collection phase: use FINE_LOG_MODE for validation, normal LOG_MODE for regular fuzzing
+		// Verification phase (target pair set): mode already set above
+		if (collect_uaf || collect_extended) {
+			if (!set_pair) {
+				// Collection phase
+				debug("ddrd: PrepareForGroup collection phase: req=%p ukc_use_fine_mode=%d\n",
+				      req, req ? req->ukc_use_fine_mode : -1);
+				if (req && req->ukc_use_fine_mode) {
+					// Validation mode: use FINE_LOG_MODE
+					debug("ddrd: entering FINE_LOG_MODE for validation\n");
+					ukc_enter_fine_log_mode();
+				} else {
+					// Normal fuzzing: use LOG_MODE
+					debug("ddrd: entering LOG_MODE for normal fuzzing\n");
+					ukc_enter_log_mode();
+				}
+			}
+			// If set_pair is true, we already entered MONITOR or FINE_MONITOR mode above
+		}
 		debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
 

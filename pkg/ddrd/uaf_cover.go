@@ -4,7 +4,6 @@
 package ddrd
 
 import (
-	"encoding/binary"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -19,58 +18,55 @@ import (
 // Core UAF Coverage Data Structures
 // ============================================================================
 
-// UAFPairID generates a unique identifier for a UAF pair
-// Uses the executor-generated signal as the primary identifier when available
-// And use the hash of all relevant fields if the signal is unavailable
+// UAFPairID generates a unique identifier for a UAF pair.
+// Always uses VarName+Stack based ID for consistency with VarNamePairRegistry.
+// This ensures the same VarName+Stack combination always produces the same ID,
+// regardless of any runtime variations in the executor-generated Signal.
 func (uaf *MayUAFPair) UAFPairID() uint64 {
 	if uaf == nil {
 		return 0
 	}
-	if uaf.Signal != 0 {
-		return uaf.Signal
-	}
-	return computeExecutorUAFSignal(uaf)
+	return computeVarNameStackID(uaf)
 }
 
 const (
-	fnv64OffsetBasis = 1469598103934665603
-	fnv64Prime       = 1099511628211
-	uafPairMixConst  = 1315423911
+	uafPairMixConst = 1315423911
 )
 
+// computeVarNameStackID computes a deterministic ID from VarName and Stack fields.
+// Uses direct uint64 arithmetic to ensure consistency - no string conversion.
+// This matches the logic used in VarNamePairRegistry for pair tracking.
+func computeVarNameStackID(uaf *MayUAFPair) uint64 {
+	if uaf == nil {
+		return 0
+	}
+	// Combine VarName pair and Stack pair into a single ID
+	// Use the same logic as varNamePairID and stackPairID in race_group.go
+	varPairID := uaf.FreeAccessName ^ rotateLeft64(uaf.UseAccessName, 32)
+	stkPairID := uaf.FreeCallStack ^ rotateLeft64(uaf.UseCallStack, 32)
+
+	// Mix the two IDs together
+	return varPairID ^ rotateLeft64(stkPairID, 17) ^ (stkPairID * uafPairMixConst)
+}
+
+// rotateLeft64 rotates x left by k bits.
+func rotateLeft64(x uint64, k int) uint64 {
+	return (x << k) | (x >> (64 - k))
+}
+
+// computeExecutorUAFSignal is kept for backward compatibility but not used by UAFPairID.
+// The executor-generated Signal may vary due to hash implementation issues.
 func computeExecutorUAFSignal(uaf *MayUAFPair) uint64 {
 	if uaf == nil {
 		return 0
 	}
-	freeName := hashUint64Bytes(uaf.FreeAccessName)
-	freeStack := hashUint64Bytes(uaf.FreeCallStack)
-	useName := hashUint64Bytes(uaf.UseAccessName)
-	useStack := hashUint64Bytes(uaf.UseCallStack)
-
-	pair1 := useName ^ (useStack << 1)
-	pair2 := freeName ^ (freeStack << 1)
+	// Use direct uint64 values, not byte-based hashing
+	pair1 := uaf.UseAccessName ^ (uaf.UseCallStack << 1)
+	pair2 := uaf.FreeAccessName ^ (uaf.FreeCallStack << 1)
 	if pair1 > pair2 {
 		pair1, pair2 = pair2, pair1
 	}
 	return pair1*uint64(uafPairMixConst) ^ pair2
-}
-
-func hashUint64Bytes(val uint64) uint64 {
-	var buf [8]byte
-	binary.LittleEndian.PutUint64(buf[:], val)
-	return hashCStringBytes(buf[:])
-}
-
-func hashCStringBytes(data []byte) uint64 {
-	h := uint64(fnv64OffsetBasis)
-	for _, b := range data {
-		if b == 0 {
-			break
-		}
-		h ^= uint64(b)
-		h *= fnv64Prime
-	}
-	return h
 }
 
 // String returns a human-readable representation of the UAF pair

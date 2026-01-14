@@ -2097,10 +2097,15 @@ type ExecRequestRawT struct {
 	BarrierStartDelayUs   []int64       `json:"barrier_start_delay_us"`
 	UkcUseName            uint64        `json:"ukc_use_name"`
 	UkcUseStack           uint64        `json:"ukc_use_stack"`
+	UkcUseSn              int32         `json:"ukc_use_sn"`
+	UkcUseTid             int32         `json:"ukc_use_tid"`
 	UkcFreeName           uint64        `json:"ukc_free_name"`
 	UkcFreeStack          uint64        `json:"ukc_free_stack"`
+	UkcFreeSn             int32         `json:"ukc_free_sn"`
+	UkcFreeTid            int32         `json:"ukc_free_tid"`
 	UkcUseAccessDelayTime int32         `json:"ukc_use_access_delay_time"`
 	UkcIsValid            bool          `json:"ukc_is_valid"`
+	UkcUseFineMode        bool          `json:"ukc_use_fine_mode"`
 }
 
 func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
@@ -2145,10 +2150,15 @@ func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffset
 	ExecRequestRawAddBarrierStartDelayUs(builder, barrierStartDelayUsOffset)
 	ExecRequestRawAddUkcUseName(builder, t.UkcUseName)
 	ExecRequestRawAddUkcUseStack(builder, t.UkcUseStack)
+	ExecRequestRawAddUkcUseSn(builder, t.UkcUseSn)
+	ExecRequestRawAddUkcUseTid(builder, t.UkcUseTid)
 	ExecRequestRawAddUkcFreeName(builder, t.UkcFreeName)
 	ExecRequestRawAddUkcFreeStack(builder, t.UkcFreeStack)
+	ExecRequestRawAddUkcFreeSn(builder, t.UkcFreeSn)
+	ExecRequestRawAddUkcFreeTid(builder, t.UkcFreeTid)
 	ExecRequestRawAddUkcUseAccessDelayTime(builder, t.UkcUseAccessDelayTime)
 	ExecRequestRawAddUkcIsValid(builder, t.UkcIsValid)
+	ExecRequestRawAddUkcUseFineMode(builder, t.UkcUseFineMode)
 	return ExecRequestRawEnd(builder)
 }
 
@@ -2175,10 +2185,15 @@ func (rcv *ExecRequestRaw) UnPackTo(t *ExecRequestRawT) {
 	}
 	t.UkcUseName = rcv.UkcUseName()
 	t.UkcUseStack = rcv.UkcUseStack()
+	t.UkcUseSn = rcv.UkcUseSn()
+	t.UkcUseTid = rcv.UkcUseTid()
 	t.UkcFreeName = rcv.UkcFreeName()
 	t.UkcFreeStack = rcv.UkcFreeStack()
+	t.UkcFreeSn = rcv.UkcFreeSn()
+	t.UkcFreeTid = rcv.UkcFreeTid()
 	t.UkcUseAccessDelayTime = rcv.UkcUseAccessDelayTime()
 	t.UkcIsValid = rcv.UkcIsValid()
+	t.UkcUseFineMode = rcv.UkcUseFineMode()
 }
 
 func (rcv *ExecRequestRaw) UnPack() *ExecRequestRawT {
@@ -2436,8 +2451,32 @@ func (rcv *ExecRequestRaw) MutateUkcUseStack(n uint64) bool {
 	return rcv._tab.MutateUint64Slot(30, n)
 }
 
-func (rcv *ExecRequestRaw) UkcFreeName() uint64 {
+func (rcv *ExecRequestRaw) UkcUseSn() int32 {
 	o := flatbuffers.UOffsetT(rcv._tab.Offset(32))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateUkcUseSn(n int32) bool {
+	return rcv._tab.MutateInt32Slot(32, n)
+}
+
+func (rcv *ExecRequestRaw) UkcUseTid() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateUkcUseTid(n int32) bool {
+	return rcv._tab.MutateInt32Slot(34, n)
+}
+
+func (rcv *ExecRequestRaw) UkcFreeName() uint64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
 	if o != 0 {
 		return rcv._tab.GetUint64(o + rcv._tab.Pos)
 	}
@@ -2445,11 +2484,11 @@ func (rcv *ExecRequestRaw) UkcFreeName() uint64 {
 }
 
 func (rcv *ExecRequestRaw) MutateUkcFreeName(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(32, n)
+	return rcv._tab.MutateUint64Slot(36, n)
 }
 
 func (rcv *ExecRequestRaw) UkcFreeStack() uint64 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(34))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
 	if o != 0 {
 		return rcv._tab.GetUint64(o + rcv._tab.Pos)
 	}
@@ -2457,11 +2496,35 @@ func (rcv *ExecRequestRaw) UkcFreeStack() uint64 {
 }
 
 func (rcv *ExecRequestRaw) MutateUkcFreeStack(n uint64) bool {
-	return rcv._tab.MutateUint64Slot(34, n)
+	return rcv._tab.MutateUint64Slot(38, n)
+}
+
+func (rcv *ExecRequestRaw) UkcFreeSn() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(40))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateUkcFreeSn(n int32) bool {
+	return rcv._tab.MutateInt32Slot(40, n)
+}
+
+func (rcv *ExecRequestRaw) UkcFreeTid() int32 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(42))
+	if o != 0 {
+		return rcv._tab.GetInt32(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateUkcFreeTid(n int32) bool {
+	return rcv._tab.MutateInt32Slot(42, n)
 }
 
 func (rcv *ExecRequestRaw) UkcUseAccessDelayTime() int32 {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(36))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(44))
 	if o != 0 {
 		return rcv._tab.GetInt32(o + rcv._tab.Pos)
 	}
@@ -2469,11 +2532,11 @@ func (rcv *ExecRequestRaw) UkcUseAccessDelayTime() int32 {
 }
 
 func (rcv *ExecRequestRaw) MutateUkcUseAccessDelayTime(n int32) bool {
-	return rcv._tab.MutateInt32Slot(36, n)
+	return rcv._tab.MutateInt32Slot(44, n)
 }
 
 func (rcv *ExecRequestRaw) UkcIsValid() bool {
-	o := flatbuffers.UOffsetT(rcv._tab.Offset(38))
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(46))
 	if o != 0 {
 		return rcv._tab.GetBool(o + rcv._tab.Pos)
 	}
@@ -2481,11 +2544,23 @@ func (rcv *ExecRequestRaw) UkcIsValid() bool {
 }
 
 func (rcv *ExecRequestRaw) MutateUkcIsValid(n bool) bool {
-	return rcv._tab.MutateBoolSlot(38, n)
+	return rcv._tab.MutateBoolSlot(46, n)
+}
+
+func (rcv *ExecRequestRaw) UkcUseFineMode() bool {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(48))
+	if o != 0 {
+		return rcv._tab.GetBool(o + rcv._tab.Pos)
+	}
+	return false
+}
+
+func (rcv *ExecRequestRaw) MutateUkcUseFineMode(n bool) bool {
+	return rcv._tab.MutateBoolSlot(48, n)
 }
 
 func ExecRequestRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(18)
+	builder.StartObject(23)
 }
 func ExecRequestRawAddId(builder *flatbuffers.Builder, id int64) {
 	builder.PrependInt64Slot(0, id, 0)
@@ -2538,17 +2613,32 @@ func ExecRequestRawAddUkcUseName(builder *flatbuffers.Builder, ukcUseName uint64
 func ExecRequestRawAddUkcUseStack(builder *flatbuffers.Builder, ukcUseStack uint64) {
 	builder.PrependUint64Slot(13, ukcUseStack, 0)
 }
+func ExecRequestRawAddUkcUseSn(builder *flatbuffers.Builder, ukcUseSn int32) {
+	builder.PrependInt32Slot(14, ukcUseSn, 0)
+}
+func ExecRequestRawAddUkcUseTid(builder *flatbuffers.Builder, ukcUseTid int32) {
+	builder.PrependInt32Slot(15, ukcUseTid, 0)
+}
 func ExecRequestRawAddUkcFreeName(builder *flatbuffers.Builder, ukcFreeName uint64) {
-	builder.PrependUint64Slot(14, ukcFreeName, 0)
+	builder.PrependUint64Slot(16, ukcFreeName, 0)
 }
 func ExecRequestRawAddUkcFreeStack(builder *flatbuffers.Builder, ukcFreeStack uint64) {
-	builder.PrependUint64Slot(15, ukcFreeStack, 0)
+	builder.PrependUint64Slot(17, ukcFreeStack, 0)
+}
+func ExecRequestRawAddUkcFreeSn(builder *flatbuffers.Builder, ukcFreeSn int32) {
+	builder.PrependInt32Slot(18, ukcFreeSn, 0)
+}
+func ExecRequestRawAddUkcFreeTid(builder *flatbuffers.Builder, ukcFreeTid int32) {
+	builder.PrependInt32Slot(19, ukcFreeTid, 0)
 }
 func ExecRequestRawAddUkcUseAccessDelayTime(builder *flatbuffers.Builder, ukcUseAccessDelayTime int32) {
-	builder.PrependInt32Slot(16, ukcUseAccessDelayTime, 0)
+	builder.PrependInt32Slot(20, ukcUseAccessDelayTime, 0)
 }
 func ExecRequestRawAddUkcIsValid(builder *flatbuffers.Builder, ukcIsValid bool) {
-	builder.PrependBoolSlot(17, ukcIsValid, false)
+	builder.PrependBoolSlot(21, ukcIsValid, false)
+}
+func ExecRequestRawAddUkcUseFineMode(builder *flatbuffers.Builder, ukcUseFineMode bool) {
+	builder.PrependBoolSlot(22, ukcUseFineMode, false)
 }
 func ExecRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()

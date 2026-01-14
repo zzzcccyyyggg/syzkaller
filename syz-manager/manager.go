@@ -1301,10 +1301,13 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				defer mgr.mu.Unlock()
 				return !mgr.saturatedCalls[call]
 			},
-			ModeKFuzzTest: mgr.cfg.Experimental.EnableKFuzzTest,
-			ModeUAF:       mgr.cfg.Experimental.UAFMode,
-			BarrierMode:   mgr.cfg.Experimental.BarrierMode,
-			BarrierMask:   mgr.cfg.BarrierMask,
+			ModeKFuzzTest:         mgr.cfg.Experimental.EnableKFuzzTest,
+			ModeUAF:               mgr.cfg.Experimental.UAFMode,
+			BarrierMode:           mgr.cfg.Experimental.BarrierMode,
+			BarrierMask:           mgr.cfg.BarrierMask,
+			HistoryBufferSize:     mgr.cfg.Experimental.HistoryBufferSize,
+			NewVarNamePairHistory: mgr.cfg.Experimental.NewVarNamePairHistory,
+			NewStackHistory:       mgr.cfg.Experimental.NewStackHistory,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)
@@ -1446,7 +1449,14 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 
 		// Update the state machine.
 		if fuzzer.CandidateTriageFinished() {
-			fuzzer.ActivateUAFMode()
+			if fuzzer.ActivateUAFMode() {
+				// Restart all VMs to ensure clean kernel state for UAF mode.
+				// This is important because corpus triage may have polluted the kernel state.
+				if mgr.pool != nil {
+					log.Logf(0, "uaf: restarting all VMs for clean kernel state")
+					mgr.pool.RestartAll()
+				}
+			}
 			if mgr.mode == ModeCorpusTriage {
 				mgr.exit("corpus triage")
 			}

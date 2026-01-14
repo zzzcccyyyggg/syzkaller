@@ -294,6 +294,21 @@ type Experimental struct {
 	// and keeps it running throughout fuzzing. This allows passive race detection
 	// without switching modes between tests.
 	DdrdMonitor bool `json:"ddrd_monitor,omitempty"`
+
+	// HistoryBufferSize specifies the size of the rolling buffer for barrier execution history.
+	// This buffer maintains the last N barrier program groups during fuzzing (per VM).
+	// Defaults to 1000 if unset or zero.
+	HistoryBufferSize int `json:"history_buffer_size,omitempty"`
+	// NewVarNamePairHistory specifies how many history records to save when a NEW VarName pair is discovered.
+	// When a completely new (FreeAccessName, UseAccessName) combination is found,
+	// all records up to this count are saved with the entry for replay during validation.
+	// Defaults to 1000 if unset or zero.
+	NewVarNamePairHistory int `json:"new_varname_pair_history,omitempty"`
+	// NewStackHistory specifies how many history records to save when a new stack is discovered for an existing VarName pair.
+	// When a new (FreeCallStack, UseCallStack) is found for an already-known VarName pair,
+	// this many records are saved with the entry.
+	// Defaults to 100 if unset or zero.
+	NewStackHistory int `json:"new_stack_history,omitempty"`
 }
 
 type UAFValidateConfig struct {
@@ -320,6 +335,11 @@ type UAFValidateConfig struct {
 	// When set, only entries containing this VarName pair are validated,
 	// and all skip logic (invalid/validated/HB) is bypassed for debugging purposes.
 	TargetVarNamePair string `json:"target_varname_pair,omitempty"`
+	// TargetCorpusKey specifies a specific corpus entry key to validate.
+	// Format: "sig0-sig1-sig2-sig3" (hex, e.g. "d9daa1d91920e5d5-7ae0c8d447027fda-b52a7fe3d5ed9139-027653b5437bc01a")
+	// When set, only this specific entry is loaded and validated.
+	// Can be combined with TargetVarNamePair to validate specific pairs within the entry.
+	TargetCorpusKey string `json:"target_corpus_key,omitempty"`
 	// DisableAsyncSplit disables the async call splitting during verification phase.
 	// By default (false), each program pair (2 programs) is expanded to 4 programs
 	// by duplicating each with async calls marked, maximizing race triggering.
@@ -330,6 +350,10 @@ type UAFValidateConfig struct {
 	// allowing natural timing to determine which pairs are stable.
 	// Delays are only applied during the verification phase.
 	DisableCollectionDelay bool `json:"disable_collection_delay,omitempty"`
+	// DisableVerifyDelay disables start_delay during the verification phase.
+	// When enabled (true), verification runs without barrier start delays,
+	// relying only on access_delay (kernel udelay) to create race windows.
+	DisableVerifyDelay bool `json:"disable_verify_delay,omitempty"`
 	// EnableVMSnapshot enables VM snapshot mode for faster validation.
 	// When enabled, the VM state is saved after initial boot and SSH setup,
 	// then restored (instead of full reboot) between validation tasks.
@@ -341,9 +365,12 @@ type UAFValidateConfig struct {
 	// Note: Each VM will create a copy of the disk image in the workdir.
 	EnableVMSnapshot bool `json:"enable_vm_snapshot,omitempty"`
 	// VerifyDelaySweep enables progressive start_delay sweep during verification.
-	// When enabled, start_delay increases from 0 to VerifyDelayMaxUs across repetitions
-	// using an exponential curve (slow start, fast end).
+	// When enabled, multiple verify requests are generated with different delays,
+	// from 0 to VerifyDelayMaxUs using an exponential curve.
 	VerifyDelaySweep bool `json:"verify_delay_sweep,omitempty"`
+	// VerifyDelaySteps specifies how many delay steps to try during sweep.
+	// Each step uses a different delay value. Defaults to 10 if unset or zero.
+	VerifyDelaySteps int `json:"verify_delay_steps,omitempty"`
 	// VerifyDelayMaxUs is the maximum start_delay in microseconds for delay sweep.
 	// Defaults to 800 if unset or zero.
 	VerifyDelayMaxUs int64 `json:"verify_delay_max_us,omitempty"`
@@ -351,6 +378,47 @@ type UAFValidateConfig struct {
 	// Higher values = slower start, faster end. Defaults to 2.0.
 	// Formula: delay(i) = maxDelay * (i/n)^power
 	VerifyDelayPower float64 `json:"verify_delay_power,omitempty"`
+
+	// EnableReplay enables the replay mechanism during validation.
+	// When enabled, before validating each entry, the saved execution history is replayed
+	// to reconstruct the system state that led to the pair's discovery.
+	// This improves reproducibility of race conditions.
+	EnableReplay bool `json:"enable_replay,omitempty"`
+	// ReplayCollectPairs controls whether to collect race pairs during replay.
+	// When false (default), replay runs in barrier mode but skips race pair collection
+	// to reduce performance overhead. When true, pairs are collected during replay as well.
+	ReplayCollectPairs bool `json:"replay_collect_pairs,omitempty"`
+	// SnapshotCorpusWarmup enables running all corpus programs before creating the VM snapshot.
+	// When enabled with EnableVMSnapshot, all programs from corpus.db are executed once
+	// before saving the snapshot. This "warms up" kernel state (caches, internal structures)
+	// so that subsequent tests start from a more realistic state rather than a fresh boot.
+	SnapshotCorpusWarmup bool `json:"snapshot_corpus_warmup,omitempty"`
+
+	// EnableVarNameScheduling enables VarName-based round-robin scheduling.
+	// When enabled, entries are grouped by their VarName pairs and scheduled
+	// in a round-robin fashion, prioritizing VarName pairs with fewer entries.
+	// This ensures fair resource distribution across different VarName pairs,
+	// preventing VarName pairs with many stacks from monopolizing validation.
+	EnableVarNameScheduling bool `json:"enable_varname_scheduling,omitempty"`
+
+	// PriorityLowHistory prioritizes entries with fewer replay history records.
+	// When enabled, entries are sorted by ascending history count within each
+	// scheduling group, so entries with less replay overhead are validated first.
+	// Can be combined with EnableVarNameScheduling for fine-grained control.
+	PriorityLowHistory bool `json:"priority_low_history,omitempty"`
+
+	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.
+	// When true (default), only runtime-discovered pairs that also exist in entry.Pairs are
+	// considered stable. When false, any runtime-discovered pair meeting the stability
+	// threshold is accepted, allowing discovery of new stack combinations.
+	RequireOriginMatch bool `json:"require_origin_match,omitempty"`
+
+	// DisableHBSkip disables all HB (Happens-Before) skip logic.
+	// When enabled (true), entries and pairs are never skipped based on HB probability,
+	// allowing all entries to be validated regardless of historical failure rates.
+	// This is useful when you want to retry entries that were previously skipped due to
+	// accumulated failure statistics.
+	DisableHBSkip bool `json:"disable_hb_skip,omitempty"`
 }
 
 type FocusArea struct {

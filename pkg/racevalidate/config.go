@@ -18,6 +18,10 @@ type Config struct {
 	// When set, only entries containing this VarName pair are validated,
 	// and all skip logic (invalid/validated/HB) is bypassed.
 	TargetVarNamePair string
+	// TargetCorpusKey specifies a specific corpus entry key to validate.
+	// Format: "sig0-sig1-sig2-sig3" (hex, e.g. "d9daa1d91920e5d5-...")
+	// When set, only this specific entry is loaded and validated.
+	TargetCorpusKey string
 	// DisableAsyncSplit disables the async call splitting during verification phase.
 	// By default (false), each program pair (2 programs) is expanded to 4 programs
 	// by duplicating each with async calls marked, maximizing race triggering.
@@ -28,10 +32,17 @@ type Config struct {
 	// allowing natural timing to determine which pairs are stable.
 	// Delays are only applied during the verification phase.
 	DisableCollectionDelay bool
+	// DisableVerifyDelay disables start_delay during the verification phase.
+	// When enabled (true), verification runs without barrier start delays,
+	// relying only on access_delay (kernel udelay) to create race windows.
+	DisableVerifyDelay bool
 	// VerifyDelaySweep enables progressive start_delay sweep during verification.
-	// When enabled, start_delay increases from 0 to VerifyDelayMaxUs across repetitions
-	// using an exponential curve (slow start, fast end).
+	// When enabled, multiple verify requests are generated with different delays,
+	// from 0 to VerifyDelayMaxUs using an exponential curve.
 	VerifyDelaySweep bool
+	// VerifyDelaySteps specifies how many delay steps to try during sweep.
+	// Each step uses a different delay value. Defaults to 10 if unset or zero.
+	VerifyDelaySteps int
 	// VerifyDelayMaxUs is the maximum start_delay in microseconds for delay sweep.
 	// Defaults to 800 if unset or zero.
 	VerifyDelayMaxUs int64
@@ -39,6 +50,34 @@ type Config struct {
 	// Higher values = slower start, faster end. Defaults to 2.0.
 	// delay(i) = maxDelay * (i/n)^power
 	VerifyDelayPower float64
+	// EnableReplay enables replay of execution history before validation.
+	// When enabled, the saved barrier execution history from fuzzing is replayed
+	// to reconstruct the system state before testing each entry.
+	EnableReplay bool
+	// ReplayCollectPairs controls whether to collect race pairs during replay.
+	// When false (default), replay runs in barrier mode but skips race pair collection
+	// to reduce overhead. When true, pairs are collected during replay as well.
+	ReplayCollectPairs bool
+
+	// EnableVarNameScheduling enables VarName-based round-robin scheduling.
+	// When enabled, entries are grouped by their VarName pairs and scheduled
+	// in a round-robin fashion, prioritizing VarName pairs with fewer entries.
+	EnableVarNameScheduling bool
+
+	// PriorityLowHistory prioritizes entries with fewer replay history records.
+	// Entries are sorted by ascending history count within each scheduling group.
+	PriorityLowHistory bool
+
+	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.
+	// When false (default), any runtime-discovered pair meeting the stability threshold is accepted.
+	// When true, only pairs that also exist in entry.Pairs are considered stable.
+	RequireOriginMatch bool
+
+	// DisableHBSkip disables all HB (Happens-Before) skip logic.
+	// When enabled (true), entries and pairs are never skipped based on HB probability,
+	// allowing all entries to be validated regardless of historical failure rates.
+	// This is useful when you want to retry entries that were previously skipped.
+	DisableHBSkip bool
 }
 
 func (cfg Config) withDefaults() Config {
@@ -56,6 +95,9 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.VerifyRepeatTimes <= 0 {
 		cfg.VerifyRepeatTimes = 10
+	}
+	if cfg.VerifyDelaySteps <= 0 {
+		cfg.VerifyDelaySteps = 10
 	}
 	if cfg.VerifyDelayMaxUs <= 0 {
 		cfg.VerifyDelayMaxUs = 800

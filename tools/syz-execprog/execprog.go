@@ -84,8 +84,10 @@ var (
 
 	flagUkcUseName            = flag.Uint64("ukc_use_name", 0, "UKC use access name")
 	flagUkcUseStack           = flag.Uint64("ukc_use_stack", 0, "UKC use access stack")
+	flagUkcUseSN              = flag.Int("ukc_use_sn", 0, "UKC use access sequence number")
 	flagUkcFreeName           = flag.Uint64("ukc_free_name", 0, "UKC free access name")
 	flagUkcFreeStack          = flag.Uint64("ukc_free_stack", 0, "UKC free access stack")
+	flagUkcFreeSN             = flag.Int("ukc_free_sn", 0, "UKC free access sequence number")
 	flagUkcUseAccessDelayTime = flag.Int("ukc_use_access_delay_time", 0, "UKC use access delay time")
 )
 
@@ -262,8 +264,10 @@ func (ctx *Context) Next() *queue.Request {
 		req.UkcPair = &ddrd.MayUAFPair{
 			UseAccessName:  *flagUkcUseName,
 			UseCallStack:   *flagUkcUseStack,
+			UseSN:          int32(*flagUkcUseSN),
 			FreeAccessName: *flagUkcFreeName,
 			FreeCallStack:  *flagUkcFreeStack,
+			FreeSN:         int32(*flagUkcFreeSN),
 			TimeDiff:       uint64(*flagUkcUseAccessDelayTime),
 		}
 	}

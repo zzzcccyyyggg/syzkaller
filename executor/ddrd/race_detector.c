@@ -158,6 +158,68 @@ ssize_t race_detector_read_trace_buffer(RaceDetector* detector, char* buffer, si
     return (ssize_t)total_read;
 }
 
+// 持续读取 trace buffer 直到日志稳定（没有新内容出现）
+// poll_interval_ms: 每次检查的间隔（毫秒）
+// max_stable_checks: 连续多少次大小不变才认为稳定
+// max_wait_ms: 最大等待时间（毫秒），防止无限等待
+ssize_t race_detector_read_trace_buffer_until_stable(RaceDetector* detector, 
+    char* buffer, size_t buffer_size,
+    int poll_interval_ms, int max_stable_checks, int max_wait_ms)
+{
+    if (!detector || !buffer || buffer_size == 0 || detector->trace_fd < 0)
+        return -1;
+
+    ssize_t last_size = -1;
+    int stable_count = 0;
+    int total_wait_ms = 0;
+    
+    debug("Starting stable trace read: poll=%dms, stable_threshold=%d, max_wait=%dms\n",
+          poll_interval_ms, max_stable_checks, max_wait_ms);
+    
+    while (stable_count < max_stable_checks && total_wait_ms < max_wait_ms) {
+        // Seek to beginning and read current content
+        if (lseek(detector->trace_fd, 0, SEEK_SET) == (off_t)-1) {
+            debug("Warning: trace file lseek failed during stable read\n");
+        }
+        
+        size_t current_size = 0;
+        while (current_size < buffer_size - 1) {
+            ssize_t bytes_read = read(detector->trace_fd, buffer + current_size, 
+                                      buffer_size - current_size - 1);
+            if (bytes_read <= 0)
+                break;
+            current_size += (size_t)bytes_read;
+        }
+        
+        if ((ssize_t)current_size == last_size) {
+            stable_count++;
+            debug("Trace size stable at %zu bytes (check %d/%d)\n", 
+                  current_size, stable_count, max_stable_checks);
+        } else {
+            if (last_size >= 0) {
+                debug("Trace size changed: %zd -> %zu bytes, resetting stable count\n",
+                      last_size, current_size);
+            }
+            stable_count = 0;
+            last_size = (ssize_t)current_size;
+        }
+        
+        if (stable_count < max_stable_checks) {
+            usleep(poll_interval_ms * 1000);
+            total_wait_ms += poll_interval_ms;
+        }
+    }
+    
+    if (total_wait_ms >= max_wait_ms) {
+        debug("Warning: max wait time reached (%dms), using current buffer\n", max_wait_ms);
+    } else {
+        debug("Trace buffer stabilized after %dms with %zd bytes\n", total_wait_ms, last_size);
+    }
+    
+    buffer[last_size >= 0 ? last_size : 0] = '\0';
+    return last_size >= 0 ? last_size : 0;
+}
+
 int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, int max_frees)
 {
     if (!detector)
@@ -211,6 +273,69 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
 
     free(buffer);
     debug("Parsed %d access records from trace buffer\n", result);
+    return result;
+}
+
+// 使用稳定读取模式解析 trace buffer（等待日志不再增长）
+int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_records, int max_frees)
+{
+    if (!detector)
+        return 0;
+
+    const size_t buffer_size = DDRD_TRACE_BUFFER_SIZE;
+    char* buffer = (char*)malloc(buffer_size);
+    if (!buffer)
+        return 0;
+
+    // 使用稳定读取：每 50ms 检查一次，连续 3 次不变则认为稳定，最多等待 2000ms
+    ssize_t bytes_read = race_detector_read_trace_buffer_until_stable(
+        detector, buffer, buffer_size,
+        50,    // poll_interval_ms
+        3,     // max_stable_checks
+        2000   // max_wait_ms
+    );
+    if (bytes_read <= 0) {
+        free(buffer);
+        return 0;
+    }
+
+    debug("Stable read got %zd bytes from trace buffer, parsing...\n", bytes_read);
+
+    if (!detector->context.records) {
+        detector->context.records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_records);
+        if (!detector->context.records) {
+            debug("Failed to allocate memory for records\n");
+            free(buffer);
+            return 0;
+        }
+        debug("Allocated memory for %d access records\n", max_records);
+    }
+
+    if (!detector->context.free_records) {
+        detector->context.free_records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_frees);
+        if (!detector->context.free_records) {
+            debug("Failed to allocate memory for free_records\n");
+            free(buffer);
+            return 0;
+        }
+        debug("Allocated memory for %d free records\n", max_frees);
+    }
+
+    if (!detector->context.thread_histories && detector->context.enable_history) {
+        detector->context.thread_histories = (ThreadAccessHistory*)calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
+        if (!detector->context.thread_histories) {
+            debug("Failed to allocate memory for thread_histories\n");
+            free(buffer);
+            return 0;
+        }
+        detector->context.max_threads = MAX_THREADS;
+        debug("Allocated memory for %d thread histories\n", MAX_THREADS);
+    }
+
+    int result = access_context_init_from_buffer(&detector->context, buffer, max_records, max_frees);
+
+    free(buffer);
+    debug("Parsed %d access records from trace buffer (stable mode)\n", result);
     return result;
 }
 
@@ -455,7 +580,7 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
     }
 
     // 1. 先从 trace 里解析出 AccessRecord，填充 detector->context
-    int parsed_count = race_detector_parse_trace_buffer(detector,
+    int parsed_count = race_detector_parse_trace_buffer_stable(detector,
         DDRD_MAX_RECORDS, DDRD_MAX_RECORDS / 16);
     if (parsed_count <= 0) {
         debug("Failed to parse trace buffer for combined race analysis\n");

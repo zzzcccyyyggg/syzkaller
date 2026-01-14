@@ -1953,10 +1953,15 @@ struct ExecRequestRawT : public flatbuffers::NativeTable {
   std::vector<int64_t> barrier_start_delay_us{};
   uint64_t ukc_use_name = 0;
   uint64_t ukc_use_stack = 0;
+  int32_t ukc_use_sn = 0;
+  int32_t ukc_use_tid = 0;
   uint64_t ukc_free_name = 0;
   uint64_t ukc_free_stack = 0;
+  int32_t ukc_free_sn = 0;
+  int32_t ukc_free_tid = 0;
   int32_t ukc_use_access_delay_time = 0;
   bool ukc_is_valid = false;
+  bool ukc_use_fine_mode = false;
   ExecRequestRawT() = default;
   ExecRequestRawT(const ExecRequestRawT &o);
   ExecRequestRawT(ExecRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -1981,10 +1986,15 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_BARRIER_START_DELAY_US = 26,
     VT_UKC_USE_NAME = 28,
     VT_UKC_USE_STACK = 30,
-    VT_UKC_FREE_NAME = 32,
-    VT_UKC_FREE_STACK = 34,
-    VT_UKC_USE_ACCESS_DELAY_TIME = 36,
-    VT_UKC_IS_VALID = 38
+    VT_UKC_USE_SN = 32,
+    VT_UKC_USE_TID = 34,
+    VT_UKC_FREE_NAME = 36,
+    VT_UKC_FREE_STACK = 38,
+    VT_UKC_FREE_SN = 40,
+    VT_UKC_FREE_TID = 42,
+    VT_UKC_USE_ACCESS_DELAY_TIME = 44,
+    VT_UKC_IS_VALID = 46,
+    VT_UKC_USE_FINE_MODE = 48
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -2028,17 +2038,32 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   uint64_t ukc_use_stack() const {
     return GetField<uint64_t>(VT_UKC_USE_STACK, 0);
   }
+  int32_t ukc_use_sn() const {
+    return GetField<int32_t>(VT_UKC_USE_SN, 0);
+  }
+  int32_t ukc_use_tid() const {
+    return GetField<int32_t>(VT_UKC_USE_TID, 0);
+  }
   uint64_t ukc_free_name() const {
     return GetField<uint64_t>(VT_UKC_FREE_NAME, 0);
   }
   uint64_t ukc_free_stack() const {
     return GetField<uint64_t>(VT_UKC_FREE_STACK, 0);
   }
+  int32_t ukc_free_sn() const {
+    return GetField<int32_t>(VT_UKC_FREE_SN, 0);
+  }
+  int32_t ukc_free_tid() const {
+    return GetField<int32_t>(VT_UKC_FREE_TID, 0);
+  }
   int32_t ukc_use_access_delay_time() const {
     return GetField<int32_t>(VT_UKC_USE_ACCESS_DELAY_TIME, 0);
   }
   bool ukc_is_valid() const {
     return GetField<uint8_t>(VT_UKC_IS_VALID, 0) != 0;
+  }
+  bool ukc_use_fine_mode() const {
+    return GetField<uint8_t>(VT_UKC_USE_FINE_MODE, 0) != 0;
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -2059,10 +2084,15 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            verifier.VerifyVector(barrier_start_delay_us()) &&
            VerifyField<uint64_t>(verifier, VT_UKC_USE_NAME, 8) &&
            VerifyField<uint64_t>(verifier, VT_UKC_USE_STACK, 8) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_SN, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_TID, 4) &&
            VerifyField<uint64_t>(verifier, VT_UKC_FREE_NAME, 8) &&
            VerifyField<uint64_t>(verifier, VT_UKC_FREE_STACK, 8) &&
+           VerifyField<int32_t>(verifier, VT_UKC_FREE_SN, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_FREE_TID, 4) &&
            VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME, 4) &&
            VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID, 1) &&
+           VerifyField<uint8_t>(verifier, VT_UKC_USE_FINE_MODE, 1) &&
            verifier.EndTable();
   }
   ExecRequestRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2116,17 +2146,32 @@ struct ExecRequestRawBuilder {
   void add_ukc_use_stack(uint64_t ukc_use_stack) {
     fbb_.AddElement<uint64_t>(ExecRequestRaw::VT_UKC_USE_STACK, ukc_use_stack, 0);
   }
+  void add_ukc_use_sn(int32_t ukc_use_sn) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_SN, ukc_use_sn, 0);
+  }
+  void add_ukc_use_tid(int32_t ukc_use_tid) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_TID, ukc_use_tid, 0);
+  }
   void add_ukc_free_name(uint64_t ukc_free_name) {
     fbb_.AddElement<uint64_t>(ExecRequestRaw::VT_UKC_FREE_NAME, ukc_free_name, 0);
   }
   void add_ukc_free_stack(uint64_t ukc_free_stack) {
     fbb_.AddElement<uint64_t>(ExecRequestRaw::VT_UKC_FREE_STACK, ukc_free_stack, 0);
   }
+  void add_ukc_free_sn(int32_t ukc_free_sn) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_FREE_SN, ukc_free_sn, 0);
+  }
+  void add_ukc_free_tid(int32_t ukc_free_tid) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_FREE_TID, ukc_free_tid, 0);
+  }
   void add_ukc_use_access_delay_time(int32_t ukc_use_access_delay_time) {
     fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_ACCESS_DELAY_TIME, ukc_use_access_delay_time, 0);
   }
   void add_ukc_is_valid(bool ukc_is_valid) {
     fbb_.AddElement<uint8_t>(ExecRequestRaw::VT_UKC_IS_VALID, static_cast<uint8_t>(ukc_is_valid), 0);
+  }
+  void add_ukc_use_fine_mode(bool ukc_use_fine_mode) {
+    fbb_.AddElement<uint8_t>(ExecRequestRaw::VT_UKC_USE_FINE_MODE, static_cast<uint8_t>(ukc_use_fine_mode), 0);
   }
   explicit ExecRequestRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -2155,10 +2200,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     flatbuffers::Offset<flatbuffers::Vector<int64_t>> barrier_start_delay_us = 0,
     uint64_t ukc_use_name = 0,
     uint64_t ukc_use_stack = 0,
+    int32_t ukc_use_sn = 0,
+    int32_t ukc_use_tid = 0,
     uint64_t ukc_free_name = 0,
     uint64_t ukc_free_stack = 0,
+    int32_t ukc_free_sn = 0,
+    int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
-    bool ukc_is_valid = false) {
+    bool ukc_is_valid = false,
+    bool ukc_use_fine_mode = false) {
   ExecRequestRawBuilder builder_(_fbb);
   builder_.add_ukc_free_stack(ukc_free_stack);
   builder_.add_ukc_free_name(ukc_free_name);
@@ -2171,12 +2221,17 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
   builder_.add_type(type);
   builder_.add_id(id);
   builder_.add_ukc_use_access_delay_time(ukc_use_access_delay_time);
+  builder_.add_ukc_free_tid(ukc_free_tid);
+  builder_.add_ukc_free_sn(ukc_free_sn);
+  builder_.add_ukc_use_tid(ukc_use_tid);
+  builder_.add_ukc_use_sn(ukc_use_sn);
   builder_.add_barrier_start_delay_us(barrier_start_delay_us);
   builder_.add_barrier_group_size(barrier_group_size);
   builder_.add_barrier_index(barrier_index);
   builder_.add_all_signal(all_signal);
   builder_.add_exec_opts(exec_opts);
   builder_.add_data(data);
+  builder_.add_ukc_use_fine_mode(ukc_use_fine_mode);
   builder_.add_ukc_is_valid(ukc_is_valid);
   return builder_.Finish();
 }
@@ -2197,10 +2252,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     const std::vector<int64_t> *barrier_start_delay_us = nullptr,
     uint64_t ukc_use_name = 0,
     uint64_t ukc_use_stack = 0,
+    int32_t ukc_use_sn = 0,
+    int32_t ukc_use_tid = 0,
     uint64_t ukc_free_name = 0,
     uint64_t ukc_free_stack = 0,
+    int32_t ukc_free_sn = 0,
+    int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
-    bool ukc_is_valid = false) {
+    bool ukc_is_valid = false,
+    bool ukc_use_fine_mode = false) {
   auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
   auto all_signal__ = all_signal ? _fbb.CreateVector<int32_t>(*all_signal) : 0;
   auto barrier_start_delay_us__ = barrier_start_delay_us ? _fbb.CreateVector<int64_t>(*barrier_start_delay_us) : 0;
@@ -2220,10 +2280,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
       barrier_start_delay_us__,
       ukc_use_name,
       ukc_use_stack,
+      ukc_use_sn,
+      ukc_use_tid,
       ukc_free_name,
       ukc_free_stack,
+      ukc_free_sn,
+      ukc_free_tid,
       ukc_use_access_delay_time,
-      ukc_is_valid);
+      ukc_is_valid,
+      ukc_use_fine_mode);
 }
 
 flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -4211,10 +4276,15 @@ inline ExecRequestRawT::ExecRequestRawT(const ExecRequestRawT &o)
         barrier_start_delay_us(o.barrier_start_delay_us),
         ukc_use_name(o.ukc_use_name),
         ukc_use_stack(o.ukc_use_stack),
+        ukc_use_sn(o.ukc_use_sn),
+        ukc_use_tid(o.ukc_use_tid),
         ukc_free_name(o.ukc_free_name),
         ukc_free_stack(o.ukc_free_stack),
+        ukc_free_sn(o.ukc_free_sn),
+        ukc_free_tid(o.ukc_free_tid),
         ukc_use_access_delay_time(o.ukc_use_access_delay_time),
-        ukc_is_valid(o.ukc_is_valid) {
+        ukc_is_valid(o.ukc_is_valid),
+        ukc_use_fine_mode(o.ukc_use_fine_mode) {
 }
 
 inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT {
@@ -4232,10 +4302,15 @@ inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFER
   std::swap(barrier_start_delay_us, o.barrier_start_delay_us);
   std::swap(ukc_use_name, o.ukc_use_name);
   std::swap(ukc_use_stack, o.ukc_use_stack);
+  std::swap(ukc_use_sn, o.ukc_use_sn);
+  std::swap(ukc_use_tid, o.ukc_use_tid);
   std::swap(ukc_free_name, o.ukc_free_name);
   std::swap(ukc_free_stack, o.ukc_free_stack);
+  std::swap(ukc_free_sn, o.ukc_free_sn);
+  std::swap(ukc_free_tid, o.ukc_free_tid);
   std::swap(ukc_use_access_delay_time, o.ukc_use_access_delay_time);
   std::swap(ukc_is_valid, o.ukc_is_valid);
+  std::swap(ukc_use_fine_mode, o.ukc_use_fine_mode);
   return *this;
 }
 
@@ -4262,10 +4337,15 @@ inline void ExecRequestRaw::UnPackTo(ExecRequestRawT *_o, const flatbuffers::res
   { auto _e = barrier_start_delay_us(); if (_e) { _o->barrier_start_delay_us.resize(_e->size()); for (flatbuffers::uoffset_t _i = 0; _i < _e->size(); _i++) { _o->barrier_start_delay_us[_i] = _e->Get(_i); } } }
   { auto _e = ukc_use_name(); _o->ukc_use_name = _e; }
   { auto _e = ukc_use_stack(); _o->ukc_use_stack = _e; }
+  { auto _e = ukc_use_sn(); _o->ukc_use_sn = _e; }
+  { auto _e = ukc_use_tid(); _o->ukc_use_tid = _e; }
   { auto _e = ukc_free_name(); _o->ukc_free_name = _e; }
   { auto _e = ukc_free_stack(); _o->ukc_free_stack = _e; }
+  { auto _e = ukc_free_sn(); _o->ukc_free_sn = _e; }
+  { auto _e = ukc_free_tid(); _o->ukc_free_tid = _e; }
   { auto _e = ukc_use_access_delay_time(); _o->ukc_use_access_delay_time = _e; }
   { auto _e = ukc_is_valid(); _o->ukc_is_valid = _e; }
+  { auto _e = ukc_use_fine_mode(); _o->ukc_use_fine_mode = _e; }
 }
 
 inline flatbuffers::Offset<ExecRequestRaw> ExecRequestRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -4290,10 +4370,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _barrier_start_delay_us = _o->barrier_start_delay_us.size() ? _fbb.CreateVector(_o->barrier_start_delay_us) : 0;
   auto _ukc_use_name = _o->ukc_use_name;
   auto _ukc_use_stack = _o->ukc_use_stack;
+  auto _ukc_use_sn = _o->ukc_use_sn;
+  auto _ukc_use_tid = _o->ukc_use_tid;
   auto _ukc_free_name = _o->ukc_free_name;
   auto _ukc_free_stack = _o->ukc_free_stack;
+  auto _ukc_free_sn = _o->ukc_free_sn;
+  auto _ukc_free_tid = _o->ukc_free_tid;
   auto _ukc_use_access_delay_time = _o->ukc_use_access_delay_time;
   auto _ukc_is_valid = _o->ukc_is_valid;
+  auto _ukc_use_fine_mode = _o->ukc_use_fine_mode;
   return rpc::CreateExecRequestRaw(
       _fbb,
       _id,
@@ -4310,10 +4395,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
       _barrier_start_delay_us,
       _ukc_use_name,
       _ukc_use_stack,
+      _ukc_use_sn,
+      _ukc_use_tid,
       _ukc_free_name,
       _ukc_free_stack,
+      _ukc_free_sn,
+      _ukc_free_tid,
       _ukc_use_access_delay_time,
-      _ukc_is_valid);
+      _ukc_is_valid,
+      _ukc_use_fine_mode);
 }
 
 inline SignalUpdateRawT *SignalUpdateRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

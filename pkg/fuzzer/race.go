@@ -28,12 +28,13 @@ const (
 )
 
 type uafMode struct {
-	fuzzer  *Fuzzer
-	queue   *queue.PlainQueue
-	mu      sync.Mutex
-	entries map[string]*barrierSeed
-	corpus  *uafCorpus
-	pairs   map[uint64]*ddrd.MayUAFPair
+	fuzzer        *Fuzzer
+	queue         *queue.PlainQueue
+	mu            sync.Mutex
+	entries       map[string]*barrierSeed
+	corpus        *uafCorpus
+	pairs         map[uint64]*ddrd.MayUAFPair
+	historyBuffer *VMHistoryBuffers // Per-VM rolling buffers of recent barrier executions
 }
 
 // MaxStacksPerVarnamePair limits how many unique (callstack1, callstack2) combinations
@@ -42,17 +43,18 @@ type uafMode struct {
 const MaxStacksPerVarnamePair = 20
 
 type uafCorpus struct {
-	mu                  sync.RWMutex
-	seeds               map[string]*UAFCorpusEntry
-	pairs               map[uint64]*ddrd.MayUAFPair
-	varnamePairs        map[uint64]struct{}        // unique (FreeAccessName, UseAccessName) pairs
-	varnameStackCounts  map[uint64]int             // count of stacks per varname pair
-	coverage            cover.Cover
-	statSeeds           *stat.Val
-	statCover           *stat.Val
-	statPairs           *stat.Val
-	statVarnames        *stat.Val
-	statSkippedByLimit  *stat.Val
+	mu                 sync.RWMutex
+	seeds              map[string]*UAFCorpusEntry
+	pairs              map[uint64]*ddrd.MayUAFPair
+	varnamePairs       map[uint64]struct{} // unique (FreeAccessName, UseAccessName) pairs
+	varnameStackCounts map[uint64]int      // count of stacks per varname pair
+	coverage           cover.Cover
+	statSeeds          *stat.Val
+	statSeedsWithHist  *stat.Val
+	statCover          *stat.Val
+	statPairs          *stat.Val
+	statVarnames       *stat.Val
+	statSkippedByLimit *stat.Val
 }
 
 type barrierSeed struct {
@@ -78,6 +80,9 @@ type UAFCorpusEntry struct {
 	Profile       UAFPairProfile
 	Timestamp     time.Time
 	Kind          barrierSeedKind
+	// ReplayHistory contains the execution history leading up to this pair's discovery.
+	// This is used during validation to replay the system state before testing.
+	ReplayHistory []*BarrierExecutionRecord
 }
 
 // BarrierSnapshot records the barrier configuration used when discovering a UAF pair.
@@ -132,11 +137,17 @@ func newUAFMode(f *Fuzzer) *uafMode {
 	if f == nil || !f.Config.ModeUAF {
 		return nil
 	}
+	// Use configured history buffer size or default
+	bufferSize := f.Config.HistoryBufferSize
+	if bufferSize <= 0 {
+		bufferSize = DefaultHistoryBufferSize
+	}
 	return &uafMode{
-		fuzzer:  f,
-		entries: make(map[string]*barrierSeed),
-		corpus:  newUAFCorpus(),
-		pairs:   make(map[uint64]*ddrd.MayUAFPair),
+		fuzzer:        f,
+		entries:       make(map[string]*barrierSeed),
+		corpus:        newUAFCorpus(),
+		pairs:         make(map[uint64]*ddrd.MayUAFPair),
+		historyBuffer: NewVMHistoryBuffers(bufferSize),
 	}
 }
 
@@ -147,11 +158,23 @@ func newUAFCorpus() *uafCorpus {
 		varnamePairs:       make(map[uint64]struct{}),
 		varnameStackCounts: make(map[uint64]int),
 	}
-	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer",
+	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer (total)",
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
 			return len(uc.seeds)
+		})
+	uc.statSeedsWithHist = stat.New("uaf corpus with history", "Number of UAF seeds with replay history",
+		stat.Console, stat.Graph("uaf"), func() int {
+			uc.mu.RLock()
+			defer uc.mu.RUnlock()
+			count := 0
+			for _, seed := range uc.seeds {
+				if seed != nil && len(seed.ReplayHistory) > 0 {
+					count++
+				}
+			}
+			return count
 		})
 	uc.statCover = stat.New("uaf coverage", "Source coverage attributed to UAF seeds",
 		stat.Console, stat.Graph("uaf"), func() int {
@@ -190,7 +213,7 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry) {
 		}
 		// Calculate varname pair ID first to check stack limit
 		varnameID := varnamePairID(pair.FreeAccessName, pair.UseAccessName)
-		
+
 		// Check if this varname pair has reached the stack limit
 		currentCount := uc.varnameStackCounts[varnameID]
 		if currentCount >= MaxStacksPerVarnamePair {
@@ -200,12 +223,12 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry) {
 			}
 			continue
 		}
-		
+
 		id := pair.UAFPairID()
 		if id == 0 {
 			continue
 		}
-		
+
 		// Only add if this is a new pair (avoid counting duplicates)
 		if _, exists := uc.pairs[id]; !exists {
 			uc.pairs[id] = pair
@@ -292,6 +315,14 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 		return
 	}
 
+	// IMPORTANT: Determine history count BEFORE recording pairs, because
+	// RecordRacePairs will register the pairs, and CheckPairNewness will
+	// then see them as "already recorded" instead of "new".
+	var historyCount int
+	if u.historyBuffer != nil && u.fuzzer.raceGroup != nil {
+		historyCount = u.determineHistoryCount(batch)
+	}
+
 	// M2: Record race yield for feedback-driven selection
 	// M1: Update namespace index for discovered programs
 	if u.fuzzer.raceGroup != nil {
@@ -304,6 +335,18 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 		entry.Programs = clonePrograms(groupTemplate)
 	}
 	entry.ReplayPlan = plan.clone()
+
+	// Use the VM index from the result to get the correct VM's history
+	// historyCount was calculated before RecordRacePairs to ensure pairs
+	// are checked for newness before being registered
+	if historyCount > 0 {
+		vmIndex := res.Executor.VM
+		entry.ReplayHistory = u.historyBuffer.GetLatest(vmIndex, historyCount)
+		// Debug logging disabled for production
+		// u.fuzzer.Logf(0, "[history] VM %d: new pairs detected, requested %d records, got %d records for replay",
+		//	vmIndex, historyCount, len(entry.ReplayHistory))
+	}
+
 	seed := &barrierSeed{
 		kind:       seedKindUAF,
 		entry:      entry,
@@ -323,7 +366,15 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	}
 	key := uafSeedKey(id)
 	u.mu.Lock()
-	if _, exists := u.entries[key]; exists {
+	if existingSeed, exists := u.entries[key]; exists {
+		// Entry already exists - check if we should update its ReplayHistory
+		// Only update if existing entry has no history but new entry does
+		if len(entry.ReplayHistory) > 0 && existingSeed.entry != nil && len(existingSeed.entry.ReplayHistory) == 0 {
+			existingSeed.entry.ReplayHistory = entry.ReplayHistory
+			existingSeed.synced = false // Mark for re-sync to save updated history
+			// Debug logging disabled for production
+			// u.fuzzer.Logf(0, "[history] updated existing entry with %d replay history records", len(entry.ReplayHistory))
+		}
 		u.mu.Unlock()
 		return
 	}
@@ -332,6 +383,44 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	u.mu.Unlock()
 
 	u.enqueueSeed(seed)
+}
+
+// determineHistoryCount determines how many history records to save based on pair newness.
+// If any pair is a new VarName pair, save NewVarNamePairHistory records (from config or default).
+// If any pair is a new stack for existing VarName pair, save NewStackHistory records (from config or default).
+// For known pairs (neither new VarName nor new stack), save a minimal history (1 record) to enable replay.
+// Returns the maximum count needed.
+func (u *uafMode) determineHistoryCount(pairs []*ddrd.MayUAFPair) int {
+	if u.fuzzer.raceGroup == nil || len(pairs) == 0 {
+		return 0
+	}
+	// Get configured values or use defaults
+	newVarNamePairHistory := u.fuzzer.Config.NewVarNamePairHistory
+	if newVarNamePairHistory <= 0 {
+		newVarNamePairHistory = DefaultNewVarNamePairHistory
+	}
+	newStackHistory := u.fuzzer.Config.NewStackHistory
+	if newStackHistory <= 0 {
+		newStackHistory = DefaultNewStackHistory
+	}
+
+	// Default: at least 1 history record for any UAF corpus entry with pairs
+	// This ensures replay is possible even for known pairs
+	maxCount := 1
+	for _, pair := range pairs {
+		if pair == nil {
+			continue
+		}
+		isNewVarNamePair, isNewStack := u.fuzzer.raceGroup.CheckPairNewness(pair)
+		if isNewVarNamePair {
+			// New VarName pair: save full history
+			return newVarNamePairHistory
+		}
+		if isNewStack && maxCount < newStackHistory {
+			maxCount = newStackHistory
+		}
+	}
+	return maxCount
 }
 
 func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage map[int]*triageCall) {
@@ -387,7 +476,29 @@ func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) {
 	if u.corpus != nil {
 		u.corpus.recordCoverage(res.Info)
 	}
+	// Record barrier execution history for replay (per-VM)
+	if u.historyBuffer != nil && len(req.BarrierPrograms) > 0 {
+		vmIndex := res.Executor.VM
+		u.historyBuffer.AddPrograms(vmIndex, req.BarrierPrograms, res.BarrierGroupID)
+		// Debug logging disabled for production (log every 500th record)
+		// if size := u.historyBuffer.Size(vmIndex); size%500 == 0 {
+		//	u.fuzzer.Logf(0, "[history] VM %d: history buffer has %d records",
+		//		vmIndex, size)
+		// }
+	}
 	// u.updateMainCorpusCoverage(req, res.Info)
+}
+
+// clearVMHistory clears the execution history for a specific VM.
+// This should be called when a VM is restarted.
+func (u *uafMode) clearVMHistory(vmIndex int) {
+	if u == nil || u.historyBuffer == nil {
+		return
+	}
+	_ = u.historyBuffer.Size(vmIndex) // unused, just for potential future use
+	u.historyBuffer.ClearVM(vmIndex)
+	// Debug logging disabled for production
+	// u.fuzzer.Logf(0, "[history] VM %d: cleared history buffer (was %d records)", vmIndex, oldSize)
 }
 
 func (u *uafMode) updateMainCorpusCoverage(req *queue.Request, info *flatrpc.ProgInfo) {
@@ -485,6 +596,7 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 	}
 	u.mu.Lock()
 	var seeds []*barrierSeed
+	var allPairs []*ddrd.MayUAFPair // Collect all pairs to register with varPairRegistry
 	for _, entry := range entries {
 		if entry == nil || entry.Prog == nil {
 			continue
@@ -508,6 +620,7 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		clone := entry.clone()
 		for _, pair := range clone.Pairs {
 			u.addPairLocked(pair)
+			allPairs = append(allPairs, pair)
 		}
 		seed := &barrierSeed{
 			kind:       clone.Kind,
@@ -525,6 +638,13 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		seeds = append(seeds, seed)
 	}
 	u.mu.Unlock()
+
+	// Register restored pairs with varPairRegistry to keep it in sync
+	// This ensures CheckPairNewness returns correct results for restored pairs
+	if len(allPairs) > 0 && u.fuzzer.raceGroup != nil {
+		u.fuzzer.raceGroup.RecordRacePairs(nil, allPairs)
+	}
+
 	for _, seed := range seeds {
 		u.enqueueSeed(seed)
 	}
@@ -668,6 +788,15 @@ func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
 	clone.Signals = cloneSignal(entry.Signals)
 	clone.Barrier = entry.Barrier.clone()
 	clone.ReplayPlan = entry.ReplayPlan.clone()
+	// Clone replay history
+	if len(entry.ReplayHistory) != 0 {
+		clone.ReplayHistory = make([]*BarrierExecutionRecord, len(entry.ReplayHistory))
+		for i, rec := range entry.ReplayHistory {
+			if rec != nil {
+				clone.ReplayHistory[i] = rec.Clone()
+			}
+		}
+	}
 	return &clone
 }
 

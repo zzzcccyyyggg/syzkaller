@@ -52,6 +52,8 @@ constexpr unsigned long kUkcStartOneSidedReproduce = _IO('c', 11);
 constexpr unsigned long kUkcSetOneSidedReproduceInfo = _IOW('c', 12, onesidedreproduce_info_t);
 constexpr unsigned long kUkcSetMayUafPair = _IOW('c', 13, may_uaf_pair_t);
 constexpr unsigned long kUkcClearMayUafPair = _IO('c', 14);
+constexpr unsigned long kUkcStartFineLogMode = _IO('c', 15);
+constexpr unsigned long kUkcStartFineMonitorMode = _IO('c', 16);
 
 // 小工具：打开 /dev，失败时打印日志
 static inline int ukc_open_dev()
@@ -139,6 +141,30 @@ static inline void ukc_enter_nolockreproduce_mode()
 
 	if (ioctl(fd, kUkcStartNoLockReproduce) != 0)
 		ukc_print("ukc: failed to switch to NOLOCK REPRODUCE mode (errno=%d)\n", errno);
+
+	close(fd);
+}
+
+static inline void ukc_enter_fine_log_mode()
+{
+	int fd = ukc_open_dev();
+	if (fd < 0)
+		return;
+
+	if (ioctl(fd, kUkcStartFineLogMode) != 0)
+		ukc_print("ukc: failed to switch to FINE_LOG mode (errno=%d)\n", errno);
+
+	close(fd);
+}
+
+static inline void ukc_enter_fine_monitor_mode()
+{
+	int fd = ukc_open_dev();
+	if (fd < 0)
+		return;
+
+	if (ioctl(fd, kUkcStartFineMonitorMode) != 0)
+		ukc_print("ukc: failed to switch to FINE_MONITOR mode (errno=%d)\n", errno);
 
 	close(fd);
 }

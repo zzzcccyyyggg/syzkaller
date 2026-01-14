@@ -88,7 +88,13 @@ void race_detector_reset(RaceDetector* detector);
 bool race_detector_is_available(RaceDetector* detector);
 
 ssize_t race_detector_read_trace_buffer(RaceDetector* detector, char* buffer, size_t buffer_size);
+// 持续读取 trace buffer 直到日志稳定（没有新内容出现）
+ssize_t race_detector_read_trace_buffer_until_stable(RaceDetector* detector, 
+    char* buffer, size_t buffer_size,
+    int poll_interval_ms, int max_stable_checks, int max_wait_ms);
 int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, int max_frees);
+// 使用稳定读取模式解析 trace buffer
+int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_records, int max_frees);
 
 int race_detector_analyze_race_pairs(RaceDetector* detector, RacePair* pairs, int max_pairs);
 int race_detector_analyze_uaf_pairs(RaceDetector* detector, UAFPair* pairs, int max_pairs);
