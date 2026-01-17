@@ -15,6 +15,7 @@ import (
 	"sync"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/prog"
 )
@@ -41,6 +42,17 @@ type RaceGroupConfig struct {
 	EnableRaceYieldFeedback bool    // Enable race-yield weighted selection
 	ExploitRate             float64 // Probability to exploit high-yield progs (0.0-1.0)
 	HighYieldThreshold      int     // Minimum race count to be considered high-yield
+
+	// Object-Level Linking
+	EnableObjectLinking bool // Enable object-level program linking
+
+	// Solo Execution Cache
+	EnableSoloCache bool // Enable solo execution result caching
+	SoloCacheSize   int  // Maximum cache size
+
+	// Syscall Affinity Table
+	EnableAffinityTable bool    // Enable syscall affinity learning
+	AffinityWeight      float64 // Weight for affinity-based selection
 }
 
 // DefaultRaceGroupConfig returns the default configuration.
@@ -60,6 +72,17 @@ func DefaultRaceGroupConfig() RaceGroupConfig {
 		EnableRaceYieldFeedback: true,
 		ExploitRate:             0.8, // 80% exploit, 20% explore
 		HighYieldThreshold:      3,   // At least 3 race pairs to be high-yield
+
+		// Object-Level Linking
+		EnableObjectLinking: true,
+
+		// Solo Execution Cache
+		EnableSoloCache: true,
+		SoloCacheSize:   10000,
+
+		// Syscall Affinity Table
+		EnableAffinityTable: true,
+		AffinityWeight:      0.2, // 20% weight for affinity
 	}
 }
 
@@ -82,6 +105,15 @@ type RaceGroupManager struct {
 
 	// VarName Pair Registry - limits stacks per VarName pair
 	varPairRegistry *VarNamePairRegistry
+
+	// Object-Level Program Linker
+	objectLinker *ObjectLinker
+
+	// Solo Execution Pair Cache
+	soloPairCache *SoloPairCache
+
+	// Syscall Affinity Table
+	affinityTable *SyscallAffinityTable
 
 	// Statistics
 	stats *RaceGroupStats
@@ -113,6 +145,22 @@ func NewRaceGroupManager(config RaceGroupConfig) *RaceGroupManager {
 		varPairRegistry: NewVarNamePairRegistry(),
 		stats:           newRaceGroupStats(),
 	}
+
+	// Initialize Object-Level Linker
+	if config.EnableObjectLinking {
+		mgr.objectLinker = NewObjectLinker()
+	}
+
+	// Initialize Solo Pair Cache
+	if config.EnableSoloCache {
+		mgr.soloPairCache = NewSoloPairCache(config.SoloCacheSize)
+	}
+
+	// Initialize Syscall Affinity Table
+	if config.EnableAffinityTable {
+		mgr.affinityTable = NewSyscallAffinityTable()
+	}
+
 	return mgr
 }
 
@@ -431,6 +479,13 @@ func (rpi *RacePriorIndex) GetRacePriorPartners(p *prog.Prog, maxResults int) []
 }
 
 // HasRacePrior checks if there's historical race data for the given program.
+// Size returns the number of programs with race prior history.
+func (rpi *RacePriorIndex) Size() int {
+	rpi.mu.RLock()
+	defer rpi.mu.RUnlock()
+	return len(rpi.pairHistory)
+}
+
 func (rpi *RacePriorIndex) HasRacePrior(p *prog.Prog) bool {
 	if p == nil {
 		return false
@@ -458,6 +513,14 @@ func (mgr *RaceGroupManager) SelectPartner(primary *prog.Prog, corpus []*prog.Pr
 
 	mgr.stats.StatPartnerSelections.Add(1)
 
+
+	// Debug log every 1000 selections
+	if mgr.stats.StatPartnerSelections.Val()%1000 == 0 {
+		racePriorSize := mgr.racePrior.Size()
+		highYieldCount := len(mgr.raceYield.GetHighYieldPrograms())
+		log.Logf(0, "[RACE-GROUP] partner_total=%d race_prior_size=%d high_yield_progs=%d", 
+			mgr.stats.StatPartnerSelections.Val(), racePriorSize, highYieldCount)
+	}
 	if !mgr.config.EnablePartnerSelection {
 		// Fallback to random selection with length filter
 		return mgr.selectRandomWithLengthFilter(primary, corpus, rnd)
@@ -1105,12 +1168,15 @@ func (mgr *RaceGroupManager) RecordRacePairs(p *prog.Prog, pairs []*ddrd.MayUAFP
 // This should be called when a (primary, partner) pair produces races.
 // Applies VarName pair stack limit (max 20 stacks per VarName pair).
 func (mgr *RaceGroupManager) RecordRacePairWithPartner(primary, partner *prog.Prog, pairs []*ddrd.MayUAFPair) {
+	log.Logf(1, "[RACE-PRIOR-DBG] RecordRacePairWithPartner called: pairs=%d partner=%v", len(pairs), partner != nil)
+
 	if len(pairs) == 0 {
 		return
 	}
 
 	// Filter pairs based on VarName pair stack limits
 	filtered := mgr.FilterRacePairs(pairs)
+	log.Logf(1, "[RACE-PRIOR-DBG] after filter: %d -> %d pairs", len(pairs), len(filtered))
 	if len(filtered) == 0 {
 		return
 	}
@@ -1128,6 +1194,8 @@ func (mgr *RaceGroupManager) RecordRacePairWithPartner(primary, partner *prog.Pr
 	// M1': Record race-producing pair for RacePrior
 	if partner != nil {
 		mgr.racePrior.RecordRacePair(primary, partner, len(filtered))
+		log.Logf(0, "[RACE-PRIOR] recorded: primary=%d partner=%d races=%d prior_size=%d",
+			len(primary.Calls), len(partner.Calls), len(filtered), mgr.racePrior.Size())
 	}
 }
 
@@ -1172,6 +1240,9 @@ func progSignature(p *prog.Prog) string {
 // ============================================================================
 
 // BuildBarrierProgramsWithRaceGuidance builds barrier programs using race-guided selection.
+// This method integrates:
+// 1. M1' Score-based partner selection
+// 2. Object-Level Linking to ensure programs access the same kernel objects
 func (mgr *RaceGroupManager) BuildBarrierProgramsWithRaceGuidance(
 	primary *prog.Prog, count int, corpus []*prog.Prog, rnd *rand.Rand) []*prog.Prog {
 
@@ -1192,7 +1263,14 @@ func (mgr *RaceGroupManager) BuildBarrierProgramsWithRaceGuidance(
 		if partner == nil {
 			programs[i] = primary.Clone()
 		} else {
-			programs[i] = partner.Clone()
+			// Apply Object-Level Linking to ensure shared kernel objects
+			if mgr.objectLinker != nil && mgr.config.EnableObjectLinking {
+				linkedPartner := mgr.objectLinker.LinkPrograms(primary, partner)
+				programs[i] = linkedPartner
+				// Note: ObjectLinker tracks its own stats internally
+			} else {
+				programs[i] = partner.Clone()
+			}
 		}
 	}
 
@@ -1206,8 +1284,23 @@ func (mgr *RaceGroupManager) BuildBarrierProgramsWithRaceGuidance(
 	return programs
 }
 
+// GetSoloPairCache returns the solo pair cache (for soloFilterJob).
+func (mgr *RaceGroupManager) GetSoloPairCache() *SoloPairCache {
+	return mgr.soloPairCache
+}
+
+// GetAffinityTable returns the syscall affinity table.
+func (mgr *RaceGroupManager) GetAffinityTable() *SyscallAffinityTable {
+	return mgr.affinityTable
+}
+
+// GetObjectLinker returns the object linker.
+func (mgr *RaceGroupManager) GetObjectLinker() *ObjectLinker {
+	return mgr.objectLinker
+}
+
 // ============================================================================
-// Three-Phase Execution for Cross-Program Race Pair Filtering
+// Solo Filter for Cross-Program Race Pair Filtering
 // ============================================================================
 
 // VarNamePair represents a unique (VarName1, VarName2) pair for race detection.
@@ -1281,24 +1374,12 @@ func (s *VarNamePairSet) Merge(other *VarNamePairSet) {
 	}
 }
 
-// ThreePhaseResult holds results from a three-phase execution.
-type ThreePhaseResult struct {
-	// Phase 1: prog1 solo execution pairs
-	Prog1SoloPairs *VarNamePairSet
-	// Phase 2: prog2 solo execution pairs
-	Prog2SoloPairs *VarNamePairSet
-	// Phase 3: combined barrier execution pairs (raw, before filtering)
-	CombinedRawPairs []*ddrd.MayRacePair
-	// Filtered cross-program pairs (only in combined, not in solo runs)
-	CrossProgramPairs []*ddrd.MayRacePair
-}
-
 // FilterCrossProgramPairs filters race pairs to keep only those that are
 // truly cross-program (appear in combined execution but not in solo executions).
-// This is the core of the 3-phase filtering approach:
-//   - Phase 1: Execute prog1 alone → collect pairs_prog1
-//   - Phase 2: Execute prog2 alone → collect pairs_prog2
-//   - Phase 3: Execute prog1+prog2 barrier → collect pairs_combined
+// This is the core of the solo filter approach:
+//   - Solo1: Execute prog1 alone → collect pairs_prog1
+//   - Solo2: Execute prog2 alone → collect pairs_prog2
+//   - Combined: Already executed during barrier → pairs_combined
 //   - Filter: cross_program = pairs_combined - pairs_prog1 - pairs_prog2
 func FilterCrossProgramPairs(
 	combinedPairs []*ddrd.MayRacePair,

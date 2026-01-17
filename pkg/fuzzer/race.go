@@ -385,6 +385,80 @@ func (u *uafMode) handleNewPairs(req *queue.Request, res *queue.Result, pairs []
 	u.enqueueSeed(seed)
 }
 
+// handleFilteredPairs handles cross-program pairs after solo filtering.
+// This is called from soloFilterJob after filtering out intra-program pairs.
+func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, prog1, prog2 *prog.Prog, pairs []*ddrd.MayUAFPair) {
+	if u == nil || len(pairs) == 0 || prog1 == nil || prog2 == nil {
+		return
+	}
+	now := time.Now()
+
+	u.mu.Lock()
+	var batch []*ddrd.MayUAFPair
+	for _, pair := range pairs {
+		cloned := u.addPairLocked(pair)
+		if cloned == nil {
+			continue
+		}
+		batch = append(batch, cloned)
+	}
+	u.mu.Unlock()
+	if len(batch) == 0 {
+		return
+	}
+
+	// Determine history count before recording pairs
+	var historyCount int
+	if u.historyBuffer != nil && u.fuzzer.raceGroup != nil {
+		historyCount = u.determineHistoryCount(batch)
+	}
+
+	// NOTE: M2 race yield recording is handled by processCrossProgramPairs in job.go
+	// to avoid double-recording which causes pairs to be filtered out.
+
+	// Create UAF corpus entry with both programs
+	programs := []*prog.Prog{prog1.Clone(), prog2.Clone()}
+	barrier := buildBarrierSnapshot(req, res)
+	plan := snapshotReplayPlan(req)
+
+	// Use newUAFCorpusEntry to properly set PairBasicInfo and other fields
+	entry := newUAFCorpusEntry(prog1, batch, barrier, now)
+	entry.Kind = seedKindUAF
+	entry.Programs = programs
+	entry.ReplayPlan = plan.clone()
+
+	// Get replay history if new pairs found
+	if historyCount > 0 && res != nil {
+		vmIndex := res.Executor.VM
+		entry.ReplayHistory = u.historyBuffer.GetLatest(vmIndex, historyCount)
+	}
+
+	id := entry.PairID()
+	if id == 0 {
+		return
+	}
+	key := uafSeedKey(id)
+	u.mu.Lock()
+	if _, exists := u.entries[key]; exists {
+		u.mu.Unlock()
+		return
+	}
+	seed := &barrierSeed{
+		kind:            seedKindUAF,
+		entry:           entry,
+		execOpts:        req.ExecOpts,
+		replayPlan:      plan.clone(),
+		barrierPrograms: programs,
+		syncable:        true,
+		synced:          false,
+	}
+	u.entries[key] = seed
+	u.corpus.addSeed(key, entry)
+	u.mu.Unlock()
+
+	u.enqueueSeed(seed)
+}
+
 // determineHistoryCount determines how many history records to save based on pair newness.
 // If any pair is a new VarName pair, save NewVarNamePairHistory records (from config or default).
 // If any pair is a new stack for existing VarName pair, save NewStackHistory records (from config or default).

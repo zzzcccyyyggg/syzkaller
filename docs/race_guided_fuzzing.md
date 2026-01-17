@@ -33,10 +33,10 @@
 │  └─────────────────────────────────────────────────────┘   │
 │                          ↓                                  │
 │  ┌─────────────────────────────────────────────────────┐   │
-│  │  Three-Phase Execution Verification                 │   │
-│  │  - Phase 1: prog1 单独执行                          │   │
-│  │  - Phase 2: prog2 单独执行                          │   │
-│  │  - Phase 3: prog1+prog2 barrier 执行               │   │
+│  │  Solo Filter (延迟过滤)                             │   │
+│  │  - Barrier 执行后发现新 pairs 时触发               │   │
+│  │  - prog1 单独执行 → 收集 solo pairs                │   │
+│  │  - prog2 单独执行 → 收集 solo pairs                │   │
 │  │  - Filter: 只保留真正的跨程序竞争对                │   │
 │  └─────────────────────────────────────────────────────┘   │
 │                                                             │
@@ -151,7 +151,7 @@ HighYieldThreshold:      3     // 至少 3 个 race pair 才算高产
 | 选择方式 | 累积分布 + 二分查找 | Beta 采样 + argmax |
 | 探索比例 | 5% 完全随机 | 通过方差自动调节 |
 
-## Three-Phase Execution Verification
+## Solo Filter (延迟过滤机制)
 
 ### 动机
 
@@ -160,16 +160,19 @@ HighYieldThreshold:      3     // 至少 3 个 race pair 才算高产
 
 ### 实现
 
-当发现新的 UAF pairs 时，触发 3 阶段执行验证：
+当 barrier 执行发现新的 UAF pairs 时，触发延迟 solo 过滤：
 
-Phase 1: prog1 单独执行 → prog1SoloPairs
-Phase 2: prog2 单独执行 → prog2SoloPairs
-Phase 3: prog1 + prog2 barrier 执行 → combinedPairs
-Filter: crossProgramPairs = combinedPairs - prog1SoloPairs - prog2SoloPairs
+1. Barrier 执行 → barrierPairs (已完成)
+2. prog1 单独执行 → prog1SoloPairs
+3. prog2 单独执行 → prog2SoloPairs
+4. Filter: crossProgramPairs = barrierPairs - prog1SoloPairs - prog2SoloPairs
+
+与原来的 3-phase 方案不同，延迟过滤只在发现新 pairs 时触发，
+并且 barrier 执行已经完成，只需要执行两次 solo 即可过滤。
 
 ### 统计指标
 
-- three-phase jobs: 运行的 3 阶段验证任务数
+- solo filter jobs: 运行的 solo 过滤任务数
 - cross-prog pairs: 过滤后的跨程序竞争对数量
 
 ## 文件结构
@@ -180,13 +183,13 @@ pkg/fuzzer/
 │   ├── NamespaceIndex         # M1' 命名空间索引
 │   ├── RacePriorIndex         # M1' 历史 race 对索引
 │   ├── BanditCorpusSelector   # M2 Thompson Sampling
-│   ├── VarNamePairSet         # 3-Phase VarName 对集合
-│   └── FilterCrossProgramPairs()  # 3-Phase 过滤
+│   ├── VarNamePairSet         # Solo Filter VarName 对集合
+│   └── FilterCrossProgramPairs()  # Solo Filter 过滤
 ├── fuzzer.go          # 集成点
 │   ├── buildBarrierPrograms() # 使用 M1'
-│   └── triggerThreePhaseVerification()  # 触发 3 阶段验证
+│   └── triggerSoloFilter()    # 触发 solo 过滤
 ├── job.go             # 集成点
 │   ├── mutateProgRequest()    # 使用 M2
-│   └── threePhaseJob          # 3 阶段执行 job
+│   └── soloFilterJob          # Solo 过滤执行 job
 └── race.go            # 集成点
-    └── handleNewPairs()       # 反馈 Race 产出
+    └── handleFilteredPairs()  # 保存过滤后的 Race 对

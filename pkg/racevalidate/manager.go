@@ -598,7 +598,7 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		if entryKey != sm.cfg.TargetCorpusKey {
 			return nil
 		}
-		log.Logf(0, "uafvalidate: [debug mode] entry matches target corpus key %s", sm.cfg.TargetCorpusKey)
+		log.Logf(1, "uafvalidate: [debug mode] entry matches target corpus key %s", sm.cfg.TargetCorpusKey)
 	}
 
 	// If TargetVarNamePair is set, only process entries containing that pair
@@ -606,7 +606,7 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		if !entryContainsTargetVarName(clone, sm.cfg.TargetVarNamePair) {
 			return nil
 		}
-		log.Logf(0, "uafvalidate: [debug mode] entry matches target VarName pair %s", sm.cfg.TargetVarNamePair)
+		log.Logf(1, "uafvalidate: [debug mode] entry matches target VarName pair %s", sm.cfg.TargetVarNamePair)
 	}
 
 	// Pre-check: if all pairs have high HB confidence, skip entire entry
@@ -1594,10 +1594,10 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
 	debugMode := sm.cfg.TargetVarNamePair != ""
 	if debugMode {
-		log.Logf(0, "uafvalidate: [debug mode] starting verification phase for key=%s pairs=%d target=%s",
+		log.Logf(1, "uafvalidate: [debug mode] starting verification phase for key=%s pairs=%d target=%s",
 			task.key, len(stablePairs), sm.cfg.TargetVarNamePair)
 	} else {
-		log.Logf(0, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
+		log.Logf(1, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
 	}
 
 	for i, spd := range stablePairs {
@@ -1615,19 +1615,19 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				log.Logf(1, "uafvalidate: [debug mode] skipping non-target pair %d/%d vnkey=%s", i+1, len(stablePairs), vnKey)
 				continue
 			}
-			log.Logf(0, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
+			log.Logf(1, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
 				i+1, len(stablePairs), vnKey, fullKey)
 		} else if !sm.cfg.DisableHBSkip {
 			// ========== Normal mode: Layer 1 & 2 skip checks ==========
 			// (Skipped when DisableHBSkip is enabled)
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
-				log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+				log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
 			if sm.isValidated(fullKey) {
-				log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+				log.Logf(1, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
@@ -1748,13 +1748,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 			// In debug mode, only log but don't update databases
 			if debugMode {
-				log.Logf(0, "uafvalidate: [debug mode] SUCCESS vnkey=%s triggered=%d/%d (not updating databases)",
+				log.Logf(1, "uafvalidate: [debug mode] SUCCESS vnkey=%s triggered=%d/%d (not updating databases)",
 					vnKey, execRes.TriggeredCount, totalAttempts)
 				reportPreview := string(reportData)
 				if len(reportPreview) > 2000 {
 					reportPreview = reportPreview[:2000] + "...[truncated]"
 				}
-				log.Logf(0, "uafvalidate: [debug mode] report:\n%s", reportPreview)
+				log.Logf(1, "uafvalidate: [debug mode] report:\n%s", reportPreview)
 				continue
 			}
 
@@ -1765,7 +1765,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			if sm.varNameHBStore != nil {
 				sm.varNameHBStore.RecordSuccessWithKey(&pair, task.key)
 				stats := sm.varNameHBStore.GetByPair(&pair)
-				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
+				log.Logf(1, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
 					vnKey, stats.HBConfidence(), stats.IsVerified())
 			}
 
@@ -1781,7 +1781,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		// ========== Failure: increase HB confidence ==========
 		// In debug mode, only log but don't update databases
 		if debugMode {
-			log.Logf(0, "uafvalidate: [debug mode] FAILED vnkey=%s triggered=0/%d (not updating databases)",
+			log.Logf(1, "uafvalidate: [debug mode] FAILED vnkey=%s triggered=0/%d (not updating databases)",
 				vnKey, req.RepeatTimes)
 			continue
 		}

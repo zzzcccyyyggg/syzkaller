@@ -3969,11 +3969,21 @@ static void sandbox_common_mount_tmpfs(void)
 	if (mount("/syz-inputs", "./syz-tmp/newroot/syz-inputs", NULL, bind_mount_flags | MS_RDONLY, NULL) && errno != ENOENT)
 		fail("mount(syz-inputs) failed");
 
+	if (mkdir("./syz-tmp/newroot/mnt", 0700))
+    	fail("mkdir(/mnt) failed");
+
+	if (mkdir("./syz-tmp/newroot/mnt/kccwf", 0700))
+		fail("mkdir(/mnt/kccwf) failed");
+
+	if (mount("/mnt/kccwf", "./syz-tmp/newroot/mnt/kccwf", NULL,
+			bind_mount_flags /* MS_BIND|MS_REC|MS_PRIVATE */, NULL) && errno != ENOENT)
+		fail("mount(/mnt/kccwf) failed");
+
 #if SYZ_EXECUTOR || SYZ_CGROUPS
 	initialize_cgroups();
 #endif
 	if (mkdir("./syz-tmp/pivot", 0777))
-		fail("mkdir failed");
+		fail("mkdir(pivot) failed");
 	if (syscall(SYS_pivot_root, "./syz-tmp", "./syz-tmp/pivot")) {
 		debug("pivot_root failed\n");
 		if (chdir("./syz-tmp"))
@@ -3989,6 +3999,9 @@ static void sandbox_common_mount_tmpfs(void)
 		fail("chroot failed");
 	if (chdir("/"))
 		fail("chdir failed");
+	// if (chdir("/mnt/kccwf")) {
+	// 	fail("chdir failed");
+	// }
 	setup_gadgetfs();
 	setup_binderfs();
 	setup_fusectl();

@@ -129,6 +129,8 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		ret.candidateQueue,
 	}
 	if fuzzer.uaf != nil {
+		// Set the smash queue for uaf mode to submit barrier requests
+		fuzzer.uaf.setQueue(ret.smashQueue)
 		sources = append(sources, ret.triageQueue)
 		sources = append(sources,
 			queue.Alternate(ret.smashQueue, skipQueue),
@@ -149,14 +151,14 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 
 func (fuzzer *Fuzzer) CandidatesToTriage() int {
 	count := fuzzer.statCandidates.Val() + fuzzer.statJobsTriageCandidate.Val()
-	log.Logf(0, "[DEBUG-TRIAGE] CandidatesToTriage: candidates=%d triageJobs=%d total=%d",
-		fuzzer.statCandidates.Val(), fuzzer.statJobsTriageCandidate.Val(), count)
+	// log.Logf(1, "[DEBUG-TRIAGE] CandidatesToTriage: candidates=%d triageJobs=%d total=%d",
+	// fuzzer.statCandidates.Val(), fuzzer.statJobsTriageCandidate.Val(), count)
 	return count
 }
 
 func (fuzzer *Fuzzer) CandidateTriageFinished() bool {
 	finished := fuzzer.CandidatesToTriage() == 0
-	log.Logf(0, "[DEBUG-TRIAGE] CandidateTriageFinished: %v", finished)
+	// log.Logf(1, "[DEBUG-TRIAGE] CandidateTriageFinished: %v", finished)
 	return finished
 }
 
@@ -191,47 +193,27 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			}
 		}
 	}
-	log.Logf(0, "[DEBUG-RESULT] processResult: flags=%d isCandidate=%v isBarrier=%v status=%v signalLen=%d coverLen=%d attempt=%d corpus=%d",
+	log.Logf(3, "[DEBUG-RESULT] processResult: flags=%d isCandidate=%v isBarrier=%v status=%v signalLen=%d coverLen=%d attempt=%d corpus=%d",
 		flags, flags&progCandidate != 0, flags == ProgBarrier, res.Status, signalLen, coverLen, attempt, len(fuzzer.Config.Corpus.Programs()))
 
 	// Check if VM was restarted and clear its history buffer
 	if res != nil && res.Status == queue.Restarted && fuzzer.uaf != nil {
-		fuzzer.Logf(0, "[history] VM %d restarted, clearing history buffer", res.Executor.VM)
+		fuzzer.Logf(1, "[history] VM %d restarted, clearing history buffer", res.Executor.VM)
 		fuzzer.uaf.clearVMHistory(res.Executor.VM)
 	}
 
 	if fuzzer.uaf != nil && flags == ProgBarrier {
-		// groupID := int64(0)
-		// participantMask := uint64(0)
-		// if res != nil {
-		// 	groupID = res.BarrierGroupID
-		// 	participantMask = res.BarrierParticipants
-		// }
-		// start := time.Now()
-		// fuzzer.Logf(0, "uaf: processResult start barrier_id=%d mask=%#x", groupID, participantMask)
-		// pairsStart := time.Now()
-		pairs := fuzzer.ddrd.Add(res.Ddrd)
-		// fuzzer.Logf(0, "uaf: ddrd.Add done barrier_id=%d pairs=%d duration=%s", groupID, len(pairs), time.Since(pairsStart))
-		if len(pairs) != 0 {
-			fuzzer.statDdrdPairs.Add(len(pairs))
-			// total := fuzzer.ddrd.Count()
-			// handleStart := time.Now()
-			// fuzzer.Logf(0, "uaf: handleNewPairs start barrier_id=%d seeds=%d total_pairs=%d", groupID, len(pairs), total)
-			fuzzer.uaf.handleNewPairs(req, res, pairs)
-			// fuzzer.Logf(0, "uaf: handleNewPairs done barrier_id=%d duration=%s", groupID, time.Since(handleStart))
-			// } else if req != nil {
-			// 	fuzzer.Logf(0, "uaf: handleNewPairs skipped barrier_id=%d no-new-pairs mask=%#x", groupID, req.BarrierParticipants)
-
-			// Strategy A: When new pairs are discovered, start 3-phase execution to verify
-			// This filters out same-program pairs and keeps only truly cross-program races
-			if fuzzer.raceGroup != nil && req != nil && len(req.BarrierPrograms) >= 2 {
-				fuzzer.triggerThreePhaseVerification(req, res)
+		// 先保存所有 barrier 执行收集到的 pairs
+		// 然后如果有新 pairs，触发 solo 过滤 job 来去除非跨程序的 pairs
+		if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
+			// 检查是否有新的 pairs（通过检查是否被添加到 ddrd store）
+			newPairs := fuzzer.ddrd.Add(res.Ddrd)
+			if len(newPairs) > 0 {
+				// 有新 pairs，触发 solo 过滤
+				fuzzer.triggerSoloFilter(req, res, newPairs)
 			}
 		}
-		// recordStart := time.Now()
 		fuzzer.uaf.recordExecution(req, res)
-		// fuzzer.Logf(0, "uaf: recordExecution done barrier_id=%d duration=%s", groupID, time.Since(recordStart))
-		// fuzzer.Logf(0, "uaf: processResult done barrier_id=%d total_duration=%s", groupID, time.Since(start))
 		return true
 	}
 
@@ -243,14 +225,14 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 	// it may result it concurrent modification of req.Prog.
 	var triage map[int]*triageCall
 	collectSignal := req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectSignal > 0
-	log.Logf(0, "[DEBUG-TRIAGE] checking triage: collectSignal=%v hasInfo=%v dontTriage=%v",
-		collectSignal, res.Info != nil, dontTriage)
+	// log.Logf(1, "[DEBUG-TRIAGE] checking triage: collectSignal=%v hasInfo=%v dontTriage=%v",
+	// collectSignal, res.Info != nil, dontTriage)
 	if collectSignal && res.Info != nil && !dontTriage {
 		for call, info := range res.Info.Calls {
 			fuzzer.triageProgCall(req.Prog, info, call, &triage)
 		}
 		fuzzer.triageProgCall(req.Prog, res.Info.Extra, -1, &triage)
-		log.Logf(0, "[DEBUG-TRIAGE] after triageProgCall: triageCalls=%d", len(triage))
+		// log.Logf(1, "[DEBUG-TRIAGE] after triageProgCall: triageCalls=%d", len(triage))
 
 		if len(triage) != 0 {
 
@@ -296,12 +278,12 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 		}
 	}
 	if len(triage) == 0 && flags&ProgFromCorpus != 0 && attempt < maxCandidateAttempts {
-		log.Logf(0, "[DEBUG-TRIAGE] no triage, retrying candidate attempt=%d/%d", attempt+1, maxCandidateAttempts)
+		// log.Logf(1, "[DEBUG-TRIAGE] no triage, retrying candidate attempt=%d/%d", attempt+1, maxCandidateAttempts)
 		fuzzer.enqueue(fuzzer.candidateQueue, req, flags, attempt+1)
 		return false
 	}
 	if flags&progCandidate != 0 {
-		log.Logf(0, "[DEBUG-TRIAGE] candidate done, decrementing count, triageCalls=%d", len(triage))
+		// log.Logf(1, "[DEBUG-TRIAGE] scandidate done, decrementing count, triageCalls=%d", len(triage))
 		fuzzer.statCandidates.Add(-1)
 	}
 	return true
@@ -336,17 +318,17 @@ func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call 
 		return
 	}
 	prio := signalPrio(p, info, call)
-	log.Logf(0, "[DEBUG-SIGNAL] triageProgCall call=%d signalLen=%d prio=%d", call, len(info.Signal), prio)
+	// log.Logf(1, "[DEBUG-SIGNAL] triageProgCall call=%d signalLen=%d prio=%d", call, len(info.Signal), prio)
 	newMaxSignal := fuzzer.Cover.addRawMaxSignal(info.Signal, prio)
 	if newMaxSignal.Empty() {
-		log.Logf(0, "[DEBUG-SIGNAL] call=%d newMaxSignal is EMPTY (no new coverage)", call)
+		// log.Logf(1, "[DEBUG-SIGNAL] call=%d newMaxSignal is EMPTY (no new coverage)", call)
 		return
 	}
 	if !fuzzer.Config.NewInputFilter(p.CallName(call)) {
-		log.Logf(0, "[DEBUG-SIGNAL] call=%d filtered out by NewInputFilter", call)
+		// log.Logf(1, "[DEBUG-SIGNAL] call=%d filtered out by NewInputFilter", call)
 		return
 	}
-	log.Logf(0, "[DEBUG-SIGNAL] call=%d found NEW signal, newMaxSignalLen=%d", call, newMaxSignal.Len())
+	// log.Logf(1, "[DEBUG-SIGNAL] call=%d found NEW signal, newMaxSignalLen=%d", call, newMaxSignal.Len())
 	if *triage == nil {
 		*triage = make(map[int]*triageCall)
 	}
@@ -361,7 +343,7 @@ func (fuzzer *Fuzzer) handleCallInfo(req *queue.Request, info *flatrpc.CallInfo,
 	if info == nil || info.Flags&flatrpc.CallFlagCoverageOverflow == 0 {
 		return
 	}
-	log.Logf(2, "flatrpc.CallFlagCoverageOverflow detected in call %d in %s", call, req.Prog)
+	log.Logf(3, "flatrpc.CallFlagCoverageOverflow detected in call %d in %s", call, req.Prog)
 	syscallIdx := len(fuzzer.Syscalls) - 1
 	if call != -1 {
 		syscallIdx = req.Prog.Calls[call].Meta.ID
@@ -392,7 +374,7 @@ func signalPrio(p *prog.Prog, info *flatrpc.CallInfo, call int) (prio uint8) {
 func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	corpusLen := len(fuzzer.Config.Corpus.Programs())
 	uafReady := fuzzer.uafReady()
-	log.Logf(0, "[DEBUG-GENFUZZ] genFuzz called: corpus=%d uafReady=%v candidatesToTriage=%d",
+	log.Logf(3, "[DEBUG-GENFUZZ] genFuzz called: corpus=%d uafReady=%v candidatesToTriage=%d",
 		corpusLen, uafReady, fuzzer.statCandidates.Val())
 
 	// Either generate a new input or mutate an existing one.
@@ -432,7 +414,7 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 			Stat:     fuzzer.statExecCollide,
 		}
 	}
-	log.Logf(2, "[test]: genFuzz")
+	log.Logf(3, "[test]: genFuzz")
 	if req != nil {
 		fuzzer.prepare(req, 0, 0)
 	}
@@ -474,7 +456,22 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 	if fuzzer.raceGroup != nil {
 		corpus := fuzzer.Config.Corpus.Programs()
 		rnd := fuzzer.rand()
-		return fuzzer.raceGroup.BuildBarrierProgramsWithRaceGuidance(req.Prog, count, corpus, rnd)
+		programs := fuzzer.raceGroup.BuildBarrierProgramsWithRaceGuidance(req.Prog, count, corpus, rnd)
+
+		// Sync ObjectLinker stats to Fuzzer stats
+		if ol := fuzzer.raceGroup.GetObjectLinker(); ol != nil {
+			_, successes, _ := ol.GetStats()
+			if successes > 0 {
+				// Update only the delta
+				currentVal := int(fuzzer.statObjectLinkings.Val())
+				delta := successes - currentVal
+				if delta > 0 {
+					fuzzer.statObjectLinkings.Add(delta)
+				}
+			}
+		}
+
+		return programs
 	}
 
 	// Fallback to original random selection
@@ -500,33 +497,11 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 	return programs
 }
 
-// startThreePhaseJob starts a 3-phase execution job for precise cross-program race detection.
-// This runs: prog1 solo → prog2 solo → prog1+prog2 barrier, then filters to keep only
-// truly cross-program race pairs.
-func (fuzzer *Fuzzer) startThreePhaseJob(executor queue.Executor, prog1, prog2 *prog.Prog, mask uint64) {
-	if prog1 == nil || prog2 == nil {
-		return
-	}
-	job := &threePhaseJob{
-		exec:   executor,
-		prog1:  prog1.Clone(),
-		prog2:  prog2.Clone(),
-		mask:   mask,
-		stat:   fuzzer.statExecUAF,
-		fuzzer: fuzzer,
-		info: &JobInfo{
-			Name: "three-phase-filter",
-			Type: "three-phase",
-		},
-	}
-	fuzzer.startJob(fuzzer.statJobsThreePhase, job)
-}
-
-// triggerThreePhaseVerification starts a 3-phase job to verify newly discovered pairs.
-// This is called when new UAF pairs are found during barrier execution.
-// The 3-phase execution will filter out same-program pairs and keep only cross-program races.
-func (fuzzer *Fuzzer) triggerThreePhaseVerification(req *queue.Request, res *queue.Result) {
-	if req == nil || len(req.BarrierPrograms) < 2 {
+// triggerSoloFilter starts a solo filter job to remove non-cross-program pairs.
+// This is called after barrier execution discovers new pairs.
+// The job executes prog1 solo and prog2 solo, then filters out pairs that also appear in solo runs.
+func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, newPairs []*ddrd.MayUAFPair) {
+	if req == nil || len(req.BarrierPrograms) < 2 || len(newPairs) == 0 {
 		return
 	}
 
@@ -536,16 +511,24 @@ func (fuzzer *Fuzzer) triggerThreePhaseVerification(req *queue.Request, res *que
 		return
 	}
 
-	mask := req.BarrierParticipants
-	if mask == 0 {
-		mask = 0x3 // default: proc 0 and 1
-	}
-
-	// Use smashQueue as executor (it implements queue.Executor)
+	// Use smashQueue as executor
 	executor := fuzzer.smashQueue
 
-	fuzzer.Logf(2, "triggering 3-phase verification for new pairs")
-	fuzzer.startThreePhaseJob(executor, prog1, prog2, mask)
+	job := &soloFilterJob{
+		exec:         executor,
+		prog1:        prog1.Clone(),
+		prog2:        prog2.Clone(),
+		barrierPairs: newPairs, // pairs discovered from barrier execution
+		req:          req,
+		res:          res,
+		stat:         fuzzer.statExecUAF,
+		fuzzer:       fuzzer,
+		info: &JobInfo{
+			Name: "solo-filter",
+			Type: "solo-filter",
+		},
+	}
+	fuzzer.startJob(fuzzer.statJobsSoloFilter, job)
 }
 
 func (fuzzer *Fuzzer) startJob(stat *stat.Val, newJob job) {
@@ -609,7 +592,7 @@ type Candidate struct {
 
 func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
 	fmt.Println("[SYNC-DEBUG] Entered AddCandidates, count=", len(candidates))
-	log.Logf(0, "[DEBUG-CANDIDATES] AddCandidates: adding %d candidates", len(candidates))
+	log.Logf(1, "[DEBUG-CANDIDATES] AddCandidates: adding %d candidates", len(candidates))
 	fuzzer.statCandidates.Add(len(candidates))
 	for _, candidate := range candidates {
 		req := &queue.Request{
@@ -621,7 +604,7 @@ func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
 		// fuzzer.applyBarrier(req)
 		fuzzer.enqueue(fuzzer.candidateQueue, req, candidate.Flags|progCandidate, 0)
 	}
-	log.Logf(0, "[DEBUG-CANDIDATES] AddCandidates done, total candidates=%d", fuzzer.statCandidates.Val())
+	log.Logf(1, "[DEBUG-CANDIDATES] AddCandidates done, total candidates=%d", fuzzer.statCandidates.Val())
 }
 
 func (fuzzer *Fuzzer) rand() *rand.Rand {
@@ -690,15 +673,15 @@ func (fuzzer *Fuzzer) EnqueueUAFCorpus(entries []*UAFCorpusEntry) int {
 
 func (fuzzer *Fuzzer) ActivateUAFMode() bool {
 	if fuzzer == nil || fuzzer.uaf == nil {
-		log.Logf(0, "[DEBUG-UAF] ActivateUAFMode: fuzzer or uaf is nil")
+		log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: fuzzer or uaf is nil")
 		return false
 	}
 	if !fuzzer.uafBootstrapDone.CompareAndSwap(false, true) {
-		log.Logf(0, "[DEBUG-UAF] ActivateUAFMode: already activated")
+		log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: already activated")
 		return false
 	}
-	log.Logf(0, "[DEBUG-UAF] ActivateUAFMode: enabling barrier fuzzing, corpus=%d", len(fuzzer.Config.Corpus.Programs()))
-	fuzzer.Logf(0, "uaf: enabling barrier fuzzing after corpus triage")
+	log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: enabling barrier fuzzing, corpus=%d", len(fuzzer.Config.Corpus.Programs()))
+	fuzzer.Logf(1, "uaf: enabling barrier fuzzing after corpus triage")
 	// Clear all history buffers to ensure replay history only contains UAF-mode executions.
 	// Executions during corpus triage phase should not be included in replay history.
 	if fuzzer.uaf.historyBuffer != nil {

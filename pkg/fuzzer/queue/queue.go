@@ -55,6 +55,10 @@ type Request struct {
 	// DisableDdrd prevents automatic DDRD collection even for barrier executions.
 	DisableDdrd bool
 
+	// IsSoloExecution marks requests that should run single-threaded for solo DDRD collection.
+	// When true, the queue will NOT merge the Threaded flag from default options.
+	IsSoloExecution bool
+
 	// IsValidationMode indicates this request is from validation framework (use FINE modes)
 	IsValidationMode bool
 
@@ -704,7 +708,14 @@ func (do *defaultOpts) Next() *Request {
 	if req == nil {
 		return nil
 	}
-	req.ExecOpts.ExecFlags |= do.opts.ExecFlags
+	// Solo执行（3-phase验证中的单程序执行）需要单线程运行
+	// 不能合并Threaded标志，否则会导致多线程执行
+	if req.IsSoloExecution {
+		// 只合并非Threaded的exec flags
+		req.ExecOpts.ExecFlags |= (do.opts.ExecFlags &^ flatrpc.ExecFlagThreaded)
+	} else {
+		req.ExecOpts.ExecFlags |= do.opts.ExecFlags
+	}
 	req.ExecOpts.EnvFlags |= do.opts.EnvFlags
 	req.ExecOpts.SandboxArg = do.opts.SandboxArg
 	return req

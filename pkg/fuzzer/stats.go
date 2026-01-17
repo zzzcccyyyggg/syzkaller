@@ -37,8 +37,11 @@ type Stats struct {
 	statCoverOverflows           *stat.Val
 	statCompsOverflows           *stat.Val
 	statDdrdPairs                *stat.Val
-	statJobsThreePhase           *stat.Val
-	statThreePhaseCrossProgPairs *stat.Val
+	statJobsSoloFilter           *stat.Val
+	statCrossProgPairs           *stat.Val
+	statSoloCacheHits            *stat.Val
+	statObjectLinkings           *stat.Val
+	statAffinityUpdates          *stat.Val
 }
 
 type SyscallStats struct {
@@ -94,9 +97,15 @@ func newStats(target *prog.Target) Stats {
 			stat.Rate{}, stat.NoGraph),
 		statDdrdPairs: stat.New("ddrd pairs", "Unique DDRD UAF pairs discovered",
 			stat.Graph("ddrd")),
-		statJobsThreePhase: stat.New("three-phase jobs", "Running 3-phase filter jobs",
-			stat.StackedGraph("jobs")),
-		statThreePhaseCrossProgPairs: stat.New("cross-prog pairs", "Cross-program race pairs after 3-phase filter",
-			stat.Graph("ddrd")),
+		statJobsSoloFilter: stat.New("solo filter jobs", "Running solo filter jobs",
+			stat.Console, stat.StackedGraph("jobs")),
+		statCrossProgPairs: stat.New("cross-prog pairs", "Cross-program race pairs after solo filter",
+			stat.Console, stat.Graph("ddrd")),
+		statSoloCacheHits: stat.New("solo cache hits", "Solo execution cache hits",
+			stat.Console, stat.Graph("race_group")),
+		statObjectLinkings: stat.New("object linkings", "Successful object-level program linkings",
+			stat.Console, stat.Graph("race_group")),
+		statAffinityUpdates: stat.New("affinity updates", "Syscall affinity table updates",
+			stat.Console, stat.Graph("race_group")),
 	}
 }

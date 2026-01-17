@@ -807,13 +807,34 @@ func (runner *Runner) finishBarrierGroup(group *barrierGroup) {
 	if primary != nil {
 		result.Executor = primary.Executor
 		result.Info = primary.Info
-		result.Ddrd = primary.Ddrd
 		result.Output = slices.Clone(primary.Output)
 	}
+	// Merge DDRD reports from all barrier members, not just primary
+	result.Ddrd = mergeDdrdReports(members)
 	// log.Logf(0, "runner %d: finishBarrierGroup dispatching result id=%d", runner.id, group.id)
 	group.req.Done(result)
 	// log.Logf(0, "runner %d: finishBarrierGroup result dispatched id=%d", runner.id, group.id)
 	// log.Logf(0, "runner %d: finishBarrierGroup done id=%d duration=%s", runner.id, group.id, time.Since(start))
+}
+
+// mergeDdrdReports combines DDRD reports from all barrier members into a single report.
+// This ensures that cross-program UAF pairs detected by any VM are not lost.
+func mergeDdrdReports(members []*queue.BarrierMemberResult) *ddrd.Report {
+	var merged *ddrd.Report
+	for _, member := range members {
+		if member == nil || member.Ddrd == nil {
+			continue
+		}
+		if merged == nil {
+			merged = &ddrd.Report{}
+		}
+		merged.UAFPairs = append(merged.UAFPairs, member.Ddrd.UAFPairs...)
+		merged.Extended = append(merged.Extended, member.Ddrd.Extended...)
+	}
+	if merged != nil && len(merged.UAFPairs) == 0 && len(merged.Extended) == 0 {
+		return nil
+	}
+	return merged
 }
 
 func summarizeDdrdResults(members []*queue.BarrierMemberResult) (int, int) {

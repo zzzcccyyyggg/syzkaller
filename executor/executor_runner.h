@@ -214,6 +214,18 @@ public:
 	{
 		barrier_handshake_cb_ = std::move(cb);
 	}
+	void SetSoloDdrdCollectCallback(std::function<void(Proc*)> cb)
+	{
+		solo_ddrd_collect_cb_ = std::move(cb);
+	}
+	void SetSoloDdrdPrepareCallback(std::function<void(Proc*, const rpc::ExecRequestRawT*)> cb)
+	{
+		solo_ddrd_prepare_cb_ = std::move(cb);
+	}
+	void SetSoloDdrdResetCallback(std::function<void()> cb)
+	{
+		solo_ddrd_reset_cb_ = std::move(cb);
+	}
 	void BeginBarrierExecution()
 	{
 		if (!waiting_barrier_release_ || state_ != State::Idle || !msg_)
@@ -353,6 +365,10 @@ private:
 	std::function<void(const StagedBarrierResult&)> stage_barrier_cb_; // late-bound callback set by Runner
 	std::function<void(Proc*, int64_t, int)> barrier_handshake_cb_;
 	bool waiting_barrier_release_ = false;
+	bool solo_ddrd_active_ = false; // Track if solo (non-barrier) DDRD collection is active
+	std::function<void(Proc*)> solo_ddrd_collect_cb_; // late-bound callback for solo DDRD collection
+	std::function<void(Proc*, const rpc::ExecRequestRawT*)> solo_ddrd_prepare_cb_; // late-bound callback for solo DDRD preparation
+	std::function<void()> solo_ddrd_reset_cb_; // late-bound callback to reset DDRD state after serialization
 
 	friend std::ostream& operator<<(std::ostream& ss, const Proc& proc)
 	{
@@ -517,6 +533,20 @@ private:
 		debug("proc slot %d (exec %d): start executing request %llu\n",
 		      slot_, id_, static_cast<uint64>(msg_->id));
 
+#if GOOS_linux
+		// Check if this is a non-barrier request with DDRD collection enabled
+		bool is_barrier = msg_->barrier_group_size > 0;
+		solo_ddrd_active_ = false;
+		if (!is_barrier && msg_->exec_opts &&
+		    IsSet(msg_->exec_opts->exec_flags(), rpc::ExecFlag::CollectDdrdUaf)) {
+			solo_ddrd_active_ = true;
+			// Call prepare callback NOW, right before execution starts
+			if (solo_ddrd_prepare_cb_) {
+				solo_ddrd_prepare_cb_(this, &(*msg_));
+			}
+		}
+#endif
+
 		rpc::ExecutingMessageRawT exec;
 		exec.id = msg_->id;
 		exec.proc_id = id_;
@@ -629,9 +659,25 @@ private:
 		}
 
 		// Non-barrier: build and send immediately
+#if GOOS_linux
+		// If solo DDRD collection was active, collect and set results before sending
+		if (solo_ddrd_active_ && solo_ddrd_collect_cb_) {
+			solo_ddrd_collect_cb_(this);
+		}
+#endif
 		auto data = finish_output(resp_mem_, id_, msg_->id, num_calls, elapsed, freshness_++, status, hanged, output,
 					  msg_->barrier_participants, msg_->barrier_group_id, msg_->barrier_index, msg_->barrier_group_size);
 		conn_.Send(data.data(), data.size());
+#if GOOS_linux
+		// Clear DDRD state after sending and reset controller
+		if (solo_ddrd_active_) {
+			ddrd_clear_runner_output();
+			if (solo_ddrd_reset_cb_) {
+				solo_ddrd_reset_cb_();
+			}
+			solo_ddrd_active_ = false;
+		}
+#endif
 		resp_mem_->Reset();
 		msg_.reset();
 		output_.clear();
@@ -846,8 +892,11 @@ public:
 			ukc_clear_may_uaf_pair();
 		}
 
-		if (!collect_uaf && !collect_extended)
+		if (!collect_uaf && !collect_extended) {
+			debug("ddrd: PrepareForGroup early return: no collection requested (collect_uaf=%d collect_extended=%d)\n",
+			      collect_uaf ? 1 : 0, collect_extended ? 1 : 0);
 			return;
+		}
 
 		// Lazy init
 		if (!initialized_) {
@@ -861,11 +910,13 @@ public:
 		}
 
 		if (!available_) {
+			debug("ddrd: PrepareForGroup early return: race detector not available\n");
 			ukc_enter_disable_mode();
 			return;
 		}
 
 		active_for_group_ = true;
+		debug("ddrd: PrepareForGroup active_for_group_=true, set_pair=%d\n", set_pair ? 1 : 0);
 
 		// Collection phase: use FINE_LOG_MODE for validation, normal LOG_MODE for regular fuzzing
 		// Verification phase (target pair set): mode already set above
@@ -1114,6 +1165,35 @@ public:
 			      (long long)active.group_id, staged.index, active.completed, active.group_size);
 		}
 	}
+
+#if GOOS_linux
+	// Solo DDRD collection methods - called by Proc for non-barrier DDRD requests
+	void PrepareSoloDdrd(bool collect_uaf, bool collect_extended, const rpc::ExecRequestRawT* req)
+	{
+		ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, req);
+	}
+
+	void CollectSoloDdrd(Proc** procs, int count)
+	{
+		ddrd_controller_.CollectResults(procs, count);
+	}
+
+	bool HasSoloDdrdResults() const
+	{
+		return ddrd_controller_.HasResults();
+	}
+
+	const DdrdOutputState& GetSoloDdrdOutput() const
+	{
+		return ddrd_controller_.GetOutput();
+	}
+
+	void ResetSoloDdrd()
+	{
+		ddrd_controller_.ResetAfterGroup();
+	}
+#endif
+
 	void BarrierMemberReady(Proc* proc, int64_t group_id, int index)
 	{
 		auto it = active_barriers_.find(group_id);
@@ -1161,6 +1241,33 @@ public:
 		for (auto& p : procs_) {
 			p->SetStageBarrierCallback([this](const StagedBarrierResult& r) { StageBarrierResult(r); });
 			p->SetBarrierHandshakeCallback([this](Proc* proc, int64_t group_id, int index) { BarrierMemberReady(proc, group_id, index); });
+#if GOOS_linux
+			// Install solo DDRD preparation callback (called before execution)
+			p->SetSoloDdrdPrepareCallback([this](Proc* proc, const rpc::ExecRequestRawT* req) {
+				bool collect_extended = req && req->exec_opts &&
+					IsSet(req->exec_opts->exec_flags(), rpc::ExecFlag::CollectDdrdExtended);
+				ddrd_controller_.PrepareForGroup(true, collect_extended, req);
+				debug("runner: prepared solo DDRD for proc slot %d req %llu\n",
+				      proc->Id(), req ? static_cast<uint64>(req->id) : 0);
+			});
+			// Install solo DDRD collection callback (called after execution)
+			p->SetSoloDdrdCollectCallback([this](Proc* proc) {
+				// Collect DDRD results and set the output pointer for finish_output
+				Proc* proc_ptr = proc;
+				ddrd_controller_.CollectResults(&proc_ptr, 1);
+				if (ddrd_controller_.HasResults()) {
+					ddrd_set_runner_output(&ddrd_controller_.GetOutput());
+					debug("runner: collected solo DDRD for proc slot %d, pairs=%zu\n",
+					      proc->Id(), ddrd_controller_.GetOutput().basic_pairs.size());
+				}
+				// NOTE: ResetAfterGroup is called AFTER finish_output in HandleCompletion
+				// to avoid clearing data before it's serialized
+			});
+			// Install solo DDRD reset callback (called after finish_output)
+			p->SetSoloDdrdResetCallback([this]() {
+				ddrd_controller_.ResetAfterGroup();
+			});
+#endif
 		}
 
 		for (;;)
@@ -1392,6 +1499,11 @@ private:
 			ExecuteBinary(msg);
 			return;
 		}
+
+		// Note: DDRD preparation is now done in Proc::Execute() via callback,
+		// right before the actual execution starts. This ensures correct timing
+		// even when requests are queued.
+
 		for (auto& proc : procs_) {
 			if (proc->Execute(msg))
 				return;
