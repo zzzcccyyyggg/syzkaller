@@ -144,7 +144,7 @@ Extend existing manager⇄fuzzer sync payloads:
 
 ## 11. Validation Mode
 - `syz-manager` exposes a dedicated `-mode uaf-validate` path that reuses the persisted UAF corpus to run deterministic validation cycles.
-- Validation orchestrates barrier-aware executions through `pkg/uafvalidate`, scheduling per-entry replay delays and isolating unique pair signatures.
+- Validation orchestrates barrier-aware executions through `pkg/racevalidate` (Go package `uafvalidate`), scheduling per-entry replay delays and isolating unique pair signatures.
 - A lightweight executor adapter wraps `instance.ExecProgInstance`, so validation VMs reuse the standard execprog/executor stack while honouring configured timeouts.
 - Results are persisted in `pkg/manager/uaf_validated_store.go`, tracking confirmation status, barrier metadata, and replay plans for each pair signature.
 - Fresh statistics (`uaf validated`, `uaf validation failures`) and logs surface progress through the existing HTTP/metrics pipeline.

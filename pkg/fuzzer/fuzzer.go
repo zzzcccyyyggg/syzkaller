@@ -15,6 +15,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/corpus"
+	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/csource"
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
@@ -83,7 +84,30 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	f.uaf = newUAFMode(f)
 	// Initialize Race-Guided Program-Group Manager
 	if cfg.ModeUAF {
-		f.raceGroup = NewRaceGroupManager(DefaultRaceGroupConfig())
+		raceConfig := DefaultRaceGroupConfig()
+		// Override with user-configured MaxStacksPerVarNamePair if set
+		if cfg.MaxStacksPerVarNamePair > 0 {
+			raceConfig.MaxStacksPerVarPair = cfg.MaxStacksPerVarNamePair
+		}
+		// Override PairCooldown configuration if set
+		if cfg.CooldownThreshold > 0 {
+			raceConfig.CooldownThreshold = cfg.CooldownThreshold
+		}
+		if cfg.NewStackPenalty > 0 {
+			raceConfig.NewStackPenalty = cfg.NewStackPenalty
+		}
+		if cfg.NoDiscoveryPenalty > 0 {
+			raceConfig.NoDiscoveryPenalty = cfg.NoDiscoveryPenalty
+		}
+		// Random Baseline Mode: disable all intelligent strategies
+		if cfg.RandomBaselineMode {
+			raceConfig.RandomBaselineMode = true
+			raceConfig.EnablePartnerSelection = false
+			raceConfig.EnableRaceYieldFeedback = false
+			raceConfig.EnableAffinityTable = false
+			log.Logf(0, "[RANDOM-BASELINE] Race-guided strategies DISABLED for A/B testing")
+		}
+		f.raceGroup = NewRaceGroupManager(raceConfig)
 	}
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
@@ -213,7 +237,12 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 				fuzzer.triggerSoloFilter(req, res, newPairs)
 			}
 		}
-		fuzzer.uaf.recordExecution(req, res)
+		// 记录执行并检测新覆盖率（pair 级别）
+		newCover := fuzzer.uaf.recordExecution(req, res)
+		if len(newCover) > 0 && len(req.BarrierPrograms) >= 2 {
+			// 有新覆盖率，触发 coverage triage job
+			fuzzer.triggerCoverageTriage(req, res, newCover)
+		}
 		return true
 	}
 
@@ -308,9 +337,18 @@ type Config struct {
 	BarrierMode    bool
 	BarrierMask    uint64
 	// History buffer configuration for UAF mode
-	HistoryBufferSize     int // Size of per-VM history buffer (default: 1000)
-	NewVarNamePairHistory int // Records to save for new VarName pair (default: 1000)
-	NewStackHistory       int // Records to save for new stack (default: 100)
+	HistoryBufferSize            int // Size of per-VM history buffer (default: 1000)
+	NewVarNamePairHistory        int // Records to save for new VarName pair (default: 1000)
+	NewStackHistory              int // Records to save for new stack (default: 100)
+	MaxStacksPerVarNamePair      int // Max unique stack pairs per VarName pair (default: 20)
+	NewVarNamePairAffinityWeight int // Affinity weight for new VarName pair (default: 5)
+	NewStackAffinityWeight       int // Affinity weight for new stack (default: 1)
+	// PairCooldown configuration
+	CooldownThreshold  int // Failure score threshold to enter cooldown (default: 20)
+	NewStackPenalty    int // Failure score penalty for new stack only (default: 1)
+	NoDiscoveryPenalty int // Failure score penalty for no discovery (default: 2)
+	// A/B Testing
+	RandomBaselineMode bool // Disable all race-guided strategies for baseline comparison
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -529,6 +567,42 @@ func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, n
 		},
 	}
 	fuzzer.startJob(fuzzer.statJobsSoloFilter, job)
+}
+
+// triggerCoverageTriage starts a coverage triage job when new coverage is discovered from a pair.
+// This job runs prog1 and prog2 solo to determine which program contributed the new coverage,
+// then boosts the Bandit scores for programs that brought new coverage.
+func (fuzzer *Fuzzer) triggerCoverageTriage(req *queue.Request, res *queue.Result, newCover cover.Cover) {
+	if req == nil || len(req.BarrierPrograms) < 2 || len(newCover) == 0 {
+		return
+	}
+
+	prog1 := req.BarrierPrograms[0]
+	prog2 := req.BarrierPrograms[1]
+	if prog1 == nil || prog2 == nil {
+		return
+	}
+
+	// Use smashQueue as executor
+	executor := fuzzer.smashQueue
+
+	// Record new coverage discovery
+	fuzzer.statNewCoverageFromPairs.Add(len(newCover))
+
+	job := &coverageTriageJob{
+		exec:     executor,
+		prog1:    prog1.Clone(),
+		prog2:    prog2.Clone(),
+		newCover: newCover,
+		req:      req,
+		res:      res,
+		fuzzer:   fuzzer,
+		info: &JobInfo{
+			Name: "coverage-triage",
+			Type: "coverage-triage",
+		},
+	}
+	fuzzer.startJob(fuzzer.statCoverageTriageJobs, job)
 }
 
 func (fuzzer *Fuzzer) startJob(stat *stat.Val, newJob job) {

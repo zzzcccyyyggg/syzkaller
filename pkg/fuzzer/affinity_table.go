@@ -21,6 +21,14 @@ import (
 // cross-program race conditions, enabling smarter partner selection.
 // ============================================================================
 
+// Default affinity weights for different discovery types.
+// New VarName pairs are weighted more heavily since they represent
+// completely new racing variable combinations.
+const (
+	DefaultNewVarNamePairAffinityWeight = 5 // Weight for discovering a NEW VarName pair
+	DefaultNewStackAffinityWeight       = 1 // Weight for discovering a new stack for existing VarName pair
+)
+
 // SyscallSignature uniquely identifies a syscall by its name.
 // We only use syscall name (not ObjectType/ObjectID) to prevent key explosion.
 // With ~500 syscall variants, pair count is manageable: C(500,2) ≈ 125,000 entries.
@@ -41,8 +49,8 @@ func (s SyscallSignature) IsEmpty() bool {
 // AffinityStats records interaction statistics for a syscall pair.
 type AffinityStats struct {
 	Executions   int       // Number of times this pair was executed
-	Interactions int       // Number of times this pair produced cross-program races
-	RaceYield    int       // Total number of race pairs discovered
+	Interactions float64   // Weighted interaction score (supports fractional weights)
+	RaceYield    float64   // Total weighted race yield
 	LastSeen     time.Time // Last update timestamp
 }
 
@@ -128,8 +136,31 @@ func (sat *SyscallAffinityTable) RecordInteraction(sig1, sig2 SyscallSignature, 
 		sat.affinities[key] = stats
 	}
 	stats.Executions++
-	stats.Interactions++
-	stats.RaceYield += raceCount
+	stats.Interactions += 1.0
+	stats.RaceYield += float64(raceCount)
+	stats.LastSeen = time.Now()
+}
+
+// RecordInteractionWithWeight records a successful interaction with a specified weight.
+// Uses float64 weight to support fractional weights from harmonic decay.
+// New VarName pairs get full BaseWeight, subsequent stacks get BaseWeight/stackCount.
+func (sat *SyscallAffinityTable) RecordInteractionWithWeight(sig1, sig2 SyscallSignature, weight float64) {
+	if sig1.IsEmpty() || sig2.IsEmpty() || weight <= 0 {
+		return
+	}
+
+	key := pairKey(sig1, sig2)
+	sat.mu.Lock()
+	defer sat.mu.Unlock()
+
+	stats := sat.affinities[key]
+	if stats == nil {
+		stats = &AffinityStats{}
+		sat.affinities[key] = stats
+	}
+	stats.Executions++
+	stats.Interactions += weight
+	stats.RaceYield += weight
 	stats.LastSeen = time.Now()
 }
 
@@ -198,7 +229,7 @@ func (sat *SyscallAffinityTable) GetTopAffinities(n int) []AffinityEntry {
 }
 
 // GetStats returns overall table statistics.
-func (sat *SyscallAffinityTable) GetStats() (pairCount int, totalExecs int, totalInteractions int) {
+func (sat *SyscallAffinityTable) GetStats() (pairCount int, totalExecs int, totalInteractions float64) {
 	sat.mu.RLock()
 	defer sat.mu.RUnlock()
 

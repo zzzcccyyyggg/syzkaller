@@ -1546,8 +1546,24 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves not HB relationship ==========
-			// Serialize the validated entry including triggering programs
-			reportData := serializeValidatedEntry(execRes, task.entry)
+
+			// Try to minimize history if enabled
+			var minimizedHistory []*fuzzer.BarrierExecutionRecord
+			if sm.cfg.EnableHistoryMinimization && len(task.entry.ReplayHistory) > 1 {
+				log.Logf(0, "uafvalidate: starting history minimization for key=%s", task.key)
+				minimizer := NewHistoryMinimizer(exec, sm.cfg, task.entry, &pairCopy, req.Delays)
+				minResult := minimizer.Minimize(ctx)
+				if minResult.Success && minResult.MinimalHistory != nil {
+					minimizedHistory = minResult.MinimalHistory
+					log.Logf(0, "uafvalidate: minimization complete: %d -> %d records",
+						minResult.OriginalCount, minResult.MinimalCount)
+				} else if minResult.Error != nil {
+					log.Logf(0, "uafvalidate: minimization failed: %v", minResult.Error)
+				}
+			}
+
+			// Serialize the validated entry including triggering programs and minimized history
+			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
 			sm.markValidated(fullKey, reportData)
 
 			// Update VarName HB statistics (success) and mark as verified
@@ -1743,8 +1759,24 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves not HB relationship ==========
-			// Serialize the validated entry including triggering programs
-			reportData := serializeValidatedEntry(execRes, task.entry)
+
+			// Try to minimize history if enabled
+			var minimizedHistory []*fuzzer.BarrierExecutionRecord
+			if sm.cfg.EnableHistoryMinimization && len(task.entry.ReplayHistory) > 1 {
+				log.Logf(0, "uafvalidate: starting history minimization for key=%s", task.key)
+				minimizer := NewHistoryMinimizer(exec, sm.cfg, task.entry, &pair, req.Delays)
+				minResult := minimizer.Minimize(ctx)
+				if minResult.Success && minResult.MinimalHistory != nil {
+					minimizedHistory = minResult.MinimalHistory
+					log.Logf(0, "uafvalidate: minimization complete: %d -> %d records",
+						minResult.OriginalCount, minResult.MinimalCount)
+				} else if minResult.Error != nil {
+					log.Logf(0, "uafvalidate: minimization failed: %v", minResult.Error)
+				}
+			}
+
+			// Serialize the validated entry including triggering programs and minimized history
+			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
 
 			// In debug mode, only log but don't update databases
 			if debugMode {
@@ -1903,7 +1935,21 @@ func serializeCrashReport(res *ExecutionResult) []byte {
 //	GroupSize: <size>
 //	=== REPLAY PLAN ===
 //	Delays: <delays>
+//	=== REPLAY HISTORY ===
+//	HistoryCount: <count>
+//	--- HISTORY 0 ---
+//	GroupID: <id>
+//	Timestamp: <time>
+//	-- HISTORY PROGRAM 0 --
+//	<program source>
+//	...
 func serializeValidatedEntry(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry) []byte {
+	return serializeValidatedEntryWithHistory(res, entry, nil)
+}
+
+// serializeValidatedEntryWithHistory serializes the validated entry with optional minimized history.
+// If minimizedHistory is nil, uses entry.ReplayHistory.
+func serializeValidatedEntryWithHistory(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry, minimizedHistory []*fuzzer.BarrierExecutionRecord) []byte {
 	var buf bytes.Buffer
 
 	// Section 1: Crash Report
@@ -1954,10 +2000,42 @@ func serializeValidatedEntry(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry)
 		buf.WriteString("Delays: <none>\n")
 	}
 
-	// Truncate if too large
+	// Section 5: Replay History
+	history := minimizedHistory
+	if history == nil {
+		history = entry.ReplayHistory
+	}
+	buf.WriteString("\n=== REPLAY HISTORY ===\n")
+	if len(history) > 0 {
+		buf.WriteString(fmt.Sprintf("HistoryCount: %d\n", len(history)))
+		if minimizedHistory != nil {
+			buf.WriteString(fmt.Sprintf("OriginalCount: %d\n", len(entry.ReplayHistory)))
+			buf.WriteString("Minimized: true\n")
+		}
+		for i, record := range history {
+			buf.WriteString(fmt.Sprintf("--- HISTORY %d ---\n", i))
+			buf.WriteString(fmt.Sprintf("GroupID: %d\n", record.GroupID))
+			buf.WriteString(fmt.Sprintf("Timestamp: %s\n", record.Timestamp.Format("2006-01-02T15:04:05.000000")))
+			buf.WriteString(fmt.Sprintf("VMIndex: %d\n", record.VMIndex))
+			for j, p := range record.Programs {
+				buf.WriteString(fmt.Sprintf("-- HISTORY PROGRAM %d --\n", j))
+				if p != nil {
+					buf.Write(p.Serialize())
+				} else {
+					buf.WriteString("<nil>\n")
+				}
+			}
+			buf.WriteString("\n")
+		}
+	} else {
+		buf.WriteString("HistoryCount: 0\n")
+	}
+
+	// Truncate if too large (increase limit to accommodate history)
 	result := buf.Bytes()
-	if len(result) > maxCrashReportSize*2 {
-		result = result[:maxCrashReportSize*2]
+	maxSize := maxCrashReportSize * 4 // Increase limit for history
+	if len(result) > maxSize {
+		result = result[:maxSize]
 	}
 	return result
 }

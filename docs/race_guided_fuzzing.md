@@ -1,195 +1,153 @@
 # Race-Guided Program-Group Fuzzing
 
-本文档描述了为提升 Race Pair 发现效率而实现的核心模块。
+本文档描述 DDRD-syzkaller 中的 **Race-Guided Program-Group Fuzzing** 机制，覆盖选择、链接、过滤、反馈等完整链路。
 
 ## 概述
 
-传统并发 fuzzing 面临两个核心问题：
+并发 fuzzing 的两个核心痛点：
 1. **组合盲区**：随机组合程序对，忽略共享资源前提
-2. **反馈盲区**：覆盖率反馈无法指导并发探索
+2. **反馈盲区**：覆盖率与 race 产出不一致，无法指导并发探索
 
-我们提出的 **Race-Guided Program-Group Fuzzing** 框架通过以下模块解决这些问题。
+本框架通过 M1'/M2、对象链接、冷却与亲和度学习、Solo 过滤与覆盖率归因来提高跨程序 race 发现效率。
 
 ## 模块架构
 
 ```
-┌─────────────────────────────────────────────────────────────┐
-│              Race-Guided Program-Group Fuzzing              │
-├─────────────────────────────────────────────────────────────┤
-│                                                             │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  M1': Score-Based Partner Selection                 │   │
-│  │  - ScoreBased (60%): 基于得分的加权选择             │   │
-│  │  - RacePrior (30%): 历史产生 race 的程序对          │   │
-│  │  - Explore (10%): 随机探索                          │   │
-│  │  - 约束: MaxLengthDiff=3, MinPairScore=0.1         │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                          ↓                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  M2: Race-Yield Weighted Selection (Thompson)       │   │
-│  │  - Thompson Sampling 选择高产程序                   │   │
-│  │  - Beta(α,β) 分布：α=成功次数, β=失败次数          │   │
-│  │  - 基于 VarName Pair 发现作为反馈                   │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                          ↓                                  │
-│  ┌─────────────────────────────────────────────────────┐   │
-│  │  Solo Filter (延迟过滤)                             │   │
-│  │  - Barrier 执行后发现新 pairs 时触发               │   │
-│  │  - prog1 单独执行 → 收集 solo pairs                │   │
-│  │  - prog2 单独执行 → 收集 solo pairs                │   │
-│  │  - Filter: 只保留真正的跨程序竞争对                │   │
-│  └─────────────────────────────────────────────────────┘   │
-│                                                             │
-└─────────────────────────────────────────────────────────────┘
+┌─────────────────────────────────────────────────────────────────────────┐
+│                    Race-Guided Program-Group Fuzzing                     │
+├─────────────────────────────────────────────────────────────────────────┤
+│   M2: Bandit Corpus Selection (Thompson Sampling)                         │
+│   └─ 以 VarName pair 产出为反馈，优先高产程序                              │
+│                             │                                            │
+│                             ▼                                            │
+│   M1': Hybrid Partner Selection                                           │
+│   ├─ ScoreBased (60%): Bandit×Len×Affinity×Cooldown                       │
+│   ├─ RacePrior  (30%): 历史 race 组合                                      │
+│   └─ Explore    (10%): 随机探索                                            │
+│                             │                                            │
+│                             ▼                                            │
+│   Object Linking V2: syscall 同型资源统一                                 │
+│                             │                                            │
+│                             ▼                                            │
+│   Barrier 执行 (prog1 || prog2)                                           │
+│        │                        │                                        │
+│        ▼                        ▼                                        │
+│   Solo Filter              Coverage Triage                               │
+│   └─ 过滤同程序对            └─ 归因覆盖 + Bandit Boost                   │
+└─────────────────────────────────────────────────────────────────────────┘
 ```
 
-## M1': Score-Based Partner Selection
+## M2: Bandit Corpus Selection (Thompson Sampling)
 
-### 动机
+### 核心思想
+每个程序维护 Beta(α,β)，以 **新 VarName pair 和新 Stack 的发现** 作为成功信号。
 
-当前 buildBarrierPrograms() 完全随机选择 partner，大量执行浪费在低效组合上。
+### 三档奖励机制
 
-### 核心约束
+| 发现类型 | Alpha 更新 | 说明 |
+|---------|------------|------|
+| 新 VarName pair | `α += 10` | 最高价值：完全新的 (FreeAccessName, UseAccessName) |
+| 新 Stack | `α += 2/(1+existingStackCount)` | 中等价值：已知 VarName pair 的新调用栈 |
+| 无新发现 | `β += 1` | 失败惩罚 |
 
-1. **长度差限制**: 两个程序的 syscall 数量差不能超过 3
-2. **最低得分阈值**: 组合得分必须 >= 0.1 才值得运行
+### 谐波衰减 (Harmonic Decay)
+新 Stack 奖励采用谐波衰减，体现边际价值递减：
+- 第1个 stack: +2.0
+- 第10个 stack: +0.2
+- 第100个 stack: +0.02
 
-### 得分计算
+**累计效果**：发现 100 个 stack 的总奖励 ≈ 10，等同于发现 1 个新 VarName pair。
 
+### 关键细节
+- **唯一性去重**：VarName pair 用顺序无关哈希去重，Stack 用 stackPairID 去重
+- **Coverage Boost**：若 barrier 发现新覆盖率，solo triage 后对贡献者执行 $α += 2$
+
+## M1': Hybrid Partner Selection
+
+### 三桶策略
+- **ScoreBased (60%)**：按得分加权随机
+- **RacePrior (30%)**：历史上产出 race 的组合
+- **Explore (10%)**：随机探索
+
+### 组合得分
 ```
-PairScore = BanditScore × LengthPenalty
+PairScore = BanditScore × LengthPenalty × AffinityScore × PairPenalty
 
-BanditScore = α / (α + β)  // M2 的 Beta 分布均值
-LengthPenalty = 1 / (1 + lenDiff × 0.3)  // 长度差越大惩罚越重
+BanditScore  = α / (α + β)
+LengthPenalty = 1 / (1 + 0.3 * |lenDiff|)
+AffinityScore = 0.5 + rawAffinity * AffinityWeight
+PairPenalty   = 1.0 (normal) or 0.01 (cooldown)
 ```
 
-### 三桶选择策略
+**约束**：
+- `MaxLengthDiff = 3`
+- `MinPairScore = 0.1`
 
-- **ScoreBased (60%)**: 基于得分的加权随机选择（类似 ChoiceTable）
-- **RacePrior (30%)**: 选择历史产生 race 的 partner  
-- **Explore (10%)**: 随机探索
+## Object Linking V2
+
+**目标**：提高共享内核对象的概率。
+
+做法：对 prog2 中与 prog1 同类型 syscall 的资源参数进行统一（如路径字符串），避免路径匹配带来的脆弱性。
+
+## Pair Cooldown
+
+当某对组合累计失败分数达到阈值时进入冷却，显著降低选择概率。
+
+### 三档惩罚机制
+
+| 发现类型 | 失败分数变化 | 理由 |
+|---------|--------------|------|
+| 新 VarName pair | 重置为 0 | 最高价值，pair 仍有潜力 |
+| 仅新 Stack | `+NewStackPenalty` (默认: 1) | 有一定价值，温和惩罚 |
+| 无新发现 | `+NoDiscoveryPenalty` (默认: 2) | 真正失败，更快进入 cooldown |
 
 ### 配置参数
+- `CooldownThreshold = 20`：触发 cooldown 的失败分数阈值
+- `CooldownDuration = 200`：cooldown 持续轮数
+- 冷却时 `PairPenalty = 0.01`
 
-```go
-ScoreBasedWeight: 0.6   // 60% 基于得分选择
-RacePriorWeight:  0.3   // 30% 历史 race 对
-ExploreWeight:    0.1   // 10% 随机探索
-MaxLengthDiff:    3     // 最大长度差
-MinPairScore:     0.1   // 最低组合得分
+### 行为示例
+- **只发现新 stack 的 pair**：需要 20 次执行才进入 cooldown
+- **什么都发现不了的 pair**：只需 10 次就进入 cooldown
+- **偶尔发现新 VarName pair**：分数重置，持续活跃
+
+## Syscall Affinity Table
+
+学习 syscall 组合的交互倾向：
 ```
-
-### 统计指标
-
-- score-based selections: 基于得分选择的次数
-- race prior selections: 从历史 race 对选择的次数
-- race random selections: 随机选择的次数
-
-## M2: Race-Yield Weighted Selection (Thompson Sampling)
-
-### 动机
-
-syzkaller 的 corpus 选择基于覆盖率信号，但覆盖率高 ≠ Race 产出高。
-我们需要一种机制来识别和优先选择"高产"程序（经常发现新 race 的程序）。
-
-### Thompson Sampling 原理
-
-**多臂老虎机问题**：面对 N 个老虎机，每个回报率未知，如何最大化总回报？
-
-**核心困境**：探索 (exploration) vs 利用 (exploitation)
-- 探索：尝试未知老虎机
-- 利用：选择已知高回报的老虎机
-
-**Thompson Sampling 解决方案**：
-
+Affinity = InteractionRate × Confidence
+InteractionRate = Interactions / Executions
+Confidence = min(Executions / 100, 1.0)
 ```
-1. 每个老虎机维护 Beta(α, β) 分布
-   - α = 成功次数 + 1 (发现新 VarName pair)
-   - β = 失败次数 + 1 (无新发现)
+在 M1' 中以 `AffinityWeight` 参与打分。
 
-2. 选择时:
-   - 从每个老虎机的 Beta 分布采样一个值
-   - 选择采样值最大的老虎机
+## Solo Filter（跨程序过滤）
 
-3. 执行后更新:
-   - 成功 (发现新 pair): α += 新pair数
-   - 失败 (无新发现): β += 1
-```
+Barrier 执行发现新 pairs 时触发：
+1. prog1 solo → pairs1
+2. prog2 solo → pairs2
+3. cross = combined - pairs1 - pairs2
 
-**为什么有效**：
-- 初始 Beta(1,1) = 均匀分布，完全不确定
-- 成功多：α 大，分布右移，采样值倾向于高 → 被选中概率增加
-- 不确定：方差大，偶尔采样值很高 → 保持探索机会
+只保留跨程序 pairs，避免同程序噪声。
 
-### 在 M2 中的应用
+## Coverage Triage Job（覆盖率归因）
 
-```
-老虎机 = 程序 (prog)
-回报 = 发现新的唯一 VarName pair
+当 barrier 执行发现新覆盖率：
+1. solo 执行 prog1/prog2 收集覆盖率
+2. 判断贡献者（新覆盖率匹配阈值 ≥ 10% 或至少 1 个 PC）
+3. 对贡献程序执行 Bandit Boost，并记录亲和度交互
 
-实现细节:
-- betaParams[progSig] = Beta(α, β)
-- knownVarPairs = 已发现的唯一 VarName pair 集合
-- 只有新发现的 pair 才算成功
-```
+## VarName Pair Registry
 
-### 配置
-
-```go
-EnableRaceYieldFeedback: true  // 启用 M2
-ExploitRate:             0.8   // 80% 利用高产程序，20% 探索
-HighYieldThreshold:      3     // 至少 3 个 race pair 才算高产
-```
-
-### 与 ChoiceTable 的关系
-
-| 概念 | ChoiceTable | M2 Thompson Sampling |
-|------|-------------|----------------------|
-| 目标 | 选择下一个 syscall | 选择程序 partner |
-| 静态信息 | 资源依赖 | 无 |
-| 动态反馈 | corpus 共现 | VarName pair 发现 |
-| 选择方式 | 累积分布 + 二分查找 | Beta 采样 + argmax |
-| 探索比例 | 5% 完全随机 | 通过方差自动调节 |
-
-## Solo Filter (延迟过滤机制)
-
-### 动机
-
-在 barrier 并发执行中，发现的 race pairs 可能包含同程序竞争和跨程序竞争。
-我们需要过滤掉同程序竞争，只保留真正的跨程序竞争对。
-
-### 实现
-
-当 barrier 执行发现新的 UAF pairs 时，触发延迟 solo 过滤：
-
-1. Barrier 执行 → barrierPairs (已完成)
-2. prog1 单独执行 → prog1SoloPairs
-3. prog2 单独执行 → prog2SoloPairs
-4. Filter: crossProgramPairs = barrierPairs - prog1SoloPairs - prog2SoloPairs
-
-与原来的 3-phase 方案不同，延迟过滤只在发现新 pairs 时触发，
-并且 barrier 执行已经完成，只需要执行两次 solo 即可过滤。
-
-### 统计指标
-
-- solo filter jobs: 运行的 solo 过滤任务数
-- cross-prog pairs: 过滤后的跨程序竞争对数量
+每个 VarName pair 仅保留最多 20 组不同的 stack pair，防止结果爆炸。
 
 ## 文件结构
 
+```
 pkg/fuzzer/
-├── race_group.go      # 核心模块实现
-│   ├── RaceGroupManager       # 中央协调器
-│   ├── NamespaceIndex         # M1' 命名空间索引
-│   ├── RacePriorIndex         # M1' 历史 race 对索引
-│   ├── BanditCorpusSelector   # M2 Thompson Sampling
-│   ├── VarNamePairSet         # Solo Filter VarName 对集合
-│   └── FilterCrossProgramPairs()  # Solo Filter 过滤
-├── fuzzer.go          # 集成点
-│   ├── buildBarrierPrograms() # 使用 M1'
-│   └── triggerSoloFilter()    # 触发 solo 过滤
-├── job.go             # 集成点
-│   ├── mutateProgRequest()    # 使用 M2
-│   └── soloFilterJob          # Solo 过滤执行 job
-└── race.go            # 集成点
-    └── handleFilteredPairs()  # 保存过滤后的 Race 对
+├── race_group.go          # M1'/M2/Registry/SoloFilter
+├── object_linking_v2.go   # Object Linking V2
+├── pair_cooldown.go       # Pair Cooldown
+├── affinity_table.go      # Syscall Affinity Table
+├── coverage_triage_job.go # Coverage Triage Job
+```

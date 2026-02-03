@@ -10,8 +10,10 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/instance"
 	"github.com/google/syzkaller/pkg/log"
+	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	uafvalidate "github.com/google/syzkaller/pkg/racevalidate"
@@ -19,11 +21,18 @@ import (
 )
 
 func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
+	cfg := mgr.cfg.Experimental.UAFValidate
+
+	// Check if streaming mode is enabled (bypasses uafStore requirement)
+	if cfg.StreamingLoad {
+		mgr.runUAFValidateModeStreaming(ctx)
+		return
+	}
+
+	// Non-streaming mode requires uafStore to be loaded
 	if mgr.uafStore == nil {
 		log.Fatalf("uaf validation requires persisted corpus store")
 	}
-
-	cfg := mgr.cfg.Experimental.UAFValidate
 
 	// Check if continuous mode is enabled
 	if cfg.ContinuousMode {
@@ -31,7 +40,7 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		return
 	}
 
-	// Original one-shot mode
+	// Original one-shot mode (load all entries at once)
 	entries, err := mgr.uafStore.Entries()
 	if err != nil {
 		log.Fatalf("failed to load persisted uaf entries: %v", err)
@@ -42,6 +51,12 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		return
 	}
 
+	// Apply max_entries limit if configured
+	if cfg.MaxEntries > 0 && len(entries) > cfg.MaxEntries {
+		log.Logf(0, "uaf validation: limiting entries from %d to %d", len(entries), cfg.MaxEntries)
+		entries = entries[:cfg.MaxEntries]
+	}
+
 	// Debug: check entries history after loading
 	for i, entry := range entries {
 		if entry != nil && len(entry.ReplayHistory) > 0 {
@@ -50,28 +65,31 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:           cfg.MaxConcurrent,
-		DelayRetryBudget:        cfg.DelayRetryBudget,
-		ExecutionTimeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:                   *flagDebug,
-		RepeatCount:             cfg.RepeatCount,
-		VerifyRepeatTimes:       cfg.VerifyRepeatTimes,
-		Workdir:                 mgr.cfg.Workdir,
-		TargetVarNamePair:       cfg.TargetVarNamePair,
-		TargetCorpusKey:         cfg.TargetCorpusKey,
-		DisableAsyncSplit:       cfg.DisableAsyncSplit,
-		DisableCollectionDelay:  cfg.DisableCollectionDelay,
-		DisableVerifyDelay:      cfg.DisableVerifyDelay,
-		VerifyDelaySweep:        cfg.VerifyDelaySweep,
-		VerifyDelaySteps:        cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:        cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:        cfg.VerifyDelayPower,
-		EnableReplay:            cfg.EnableReplay,
-		ReplayCollectPairs:      cfg.ReplayCollectPairs,
-		EnableVarNameScheduling: cfg.EnableVarNameScheduling,
-		PriorityLowHistory:      cfg.PriorityLowHistory,
-		RequireOriginMatch:      cfg.RequireOriginMatch,
-		DisableHBSkip:           cfg.DisableHBSkip,
+		MaxConcurrent:             cfg.MaxConcurrent,
+		DelayRetryBudget:          cfg.DelayRetryBudget,
+		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                     *flagDebug,
+		RepeatCount:               cfg.RepeatCount,
+		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
+		Workdir:                   mgr.cfg.Workdir,
+		TargetVarNamePair:         cfg.TargetVarNamePair,
+		TargetCorpusKey:           cfg.TargetCorpusKey,
+		DisableAsyncSplit:         cfg.DisableAsyncSplit,
+		DisableCollectionDelay:    cfg.DisableCollectionDelay,
+		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		VerifyDelaySweep:          cfg.VerifyDelaySweep,
+		VerifyDelaySteps:          cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:          cfg.VerifyDelayPower,
+		EnableReplay:              cfg.EnableReplay,
+		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
+		PriorityLowHistory:        cfg.PriorityLowHistory,
+		RequireOriginMatch:        cfg.RequireOriginMatch,
+		DisableHBSkip:             cfg.DisableHBSkip,
+		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:      cfg.MinimizationStrategy,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -641,28 +659,31 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:           cfg.MaxConcurrent,
-		DelayRetryBudget:        cfg.DelayRetryBudget,
-		ExecutionTimeout:        time.Duration(cfg.TimeoutSeconds) * time.Second,
-		Debug:                   *flagDebug,
-		RepeatCount:             cfg.RepeatCount,
-		VerifyRepeatTimes:       cfg.VerifyRepeatTimes,
-		Workdir:                 mgr.cfg.Workdir,
-		TargetVarNamePair:       cfg.TargetVarNamePair,
-		TargetCorpusKey:         cfg.TargetCorpusKey,
-		DisableAsyncSplit:       cfg.DisableAsyncSplit,
-		DisableCollectionDelay:  cfg.DisableCollectionDelay,
-		DisableVerifyDelay:      cfg.DisableVerifyDelay,
-		VerifyDelaySweep:        cfg.VerifyDelaySweep,
-		VerifyDelaySteps:        cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:        cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:        cfg.VerifyDelayPower,
-		EnableReplay:            cfg.EnableReplay,
-		ReplayCollectPairs:      cfg.ReplayCollectPairs,
-		EnableVarNameScheduling: cfg.EnableVarNameScheduling,
-		PriorityLowHistory:      cfg.PriorityLowHistory,
-		RequireOriginMatch:      cfg.RequireOriginMatch,
-		DisableHBSkip:           cfg.DisableHBSkip,
+		MaxConcurrent:             cfg.MaxConcurrent,
+		DelayRetryBudget:          cfg.DelayRetryBudget,
+		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                     *flagDebug,
+		RepeatCount:               cfg.RepeatCount,
+		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
+		Workdir:                   mgr.cfg.Workdir,
+		TargetVarNamePair:         cfg.TargetVarNamePair,
+		TargetCorpusKey:           cfg.TargetCorpusKey,
+		DisableAsyncSplit:         cfg.DisableAsyncSplit,
+		DisableCollectionDelay:    cfg.DisableCollectionDelay,
+		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		VerifyDelaySweep:          cfg.VerifyDelaySweep,
+		VerifyDelaySteps:          cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:          cfg.VerifyDelayPower,
+		EnableReplay:              cfg.EnableReplay,
+		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
+		PriorityLowHistory:        cfg.PriorityLowHistory,
+		RequireOriginMatch:        cfg.RequireOriginMatch,
+		DisableHBSkip:             cfg.DisableHBSkip,
+		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:      cfg.MinimizationStrategy,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -788,4 +809,147 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			}
 		}
 	}
+}
+
+// runUAFValidateModeStreaming runs validation with memory-efficient streaming load.
+// This is designed for large uaf-corpus.db files (>1GB) that would otherwise cause OOM.
+func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
+	cfg := mgr.cfg.Experimental.UAFValidate
+	log.Logf(0, "uaf validation: entering streaming mode...")
+
+	// Determine corpus path
+	corpusPath := filepath.Join(mgr.cfg.Workdir, "uaf-corpus.db")
+	log.Logf(0, "uaf validation: checking corpus file: %s", corpusPath)
+	if _, err := os.Stat(corpusPath); os.IsNotExist(err) {
+		log.Fatalf("uaf validation: corpus file not found: %s", corpusPath)
+	}
+
+	// Get file size for progress reporting
+	fi, err := os.Stat(corpusPath)
+	if err != nil {
+		log.Fatalf("uaf validation: failed to stat corpus file: %v", err)
+	}
+	fileSizeMB := fi.Size() / (1024 * 1024)
+	log.Logf(0, "uaf validation: streaming mode enabled for %s (%d MB)", corpusPath, fileSizeMB)
+
+	// Create streaming reader
+	log.Logf(0, "uaf validation: creating streaming reader...")
+	reader := manager.NewStreamingUAFCorpusReader(corpusPath, mgr.target)
+
+	// Skip counting for large files - it takes too long for 5GB+ files
+	// Instead, estimate based on file size (rough estimate: ~50KB per entry average)
+	estimatedCount := int(fi.Size() / (50 * 1024))
+	if estimatedCount < 100 {
+		estimatedCount = 100
+	}
+	log.Logf(0, "uaf validation: estimated ~%d entries based on file size (%d MB)", estimatedCount, fileSizeMB)
+
+	// Determine batch size
+	batchSize := cfg.StreamingBatchSize
+	if batchSize <= 0 {
+		batchSize = 500
+	}
+	log.Logf(0, "uaf validation: using batch size %d", batchSize)
+
+	// Setup validator
+	validatorCfg := uafvalidate.Config{
+		MaxConcurrent:             cfg.MaxConcurrent,
+		DelayRetryBudget:          cfg.DelayRetryBudget,
+		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                     *flagDebug,
+		RepeatCount:               cfg.RepeatCount,
+		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
+		Workdir:                   mgr.cfg.Workdir,
+		TargetVarNamePair:         cfg.TargetVarNamePair,
+		TargetCorpusKey:           cfg.TargetCorpusKey,
+		DisableAsyncSplit:         cfg.DisableAsyncSplit,
+		DisableCollectionDelay:    cfg.DisableCollectionDelay,
+		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		VerifyDelaySweep:          cfg.VerifyDelaySweep,
+		VerifyDelaySteps:          cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:          cfg.VerifyDelayPower,
+		EnableReplay:              cfg.EnableReplay,
+		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
+		PriorityLowHistory:        cfg.PriorityLowHistory,
+		RequireOriginMatch:        cfg.RequireOriginMatch,
+		DisableHBSkip:             cfg.DisableHBSkip,
+		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:      cfg.MinimizationStrategy,
+	}
+	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
+		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
+	}
+	if validatorCfg.MaxConcurrent <= 0 {
+		validatorCfg.MaxConcurrent = 1
+	}
+
+	stage := uafvalidate.NewStageManager(validatorCfg, mgr.selectExecutorFactory(cfg, validatorCfg))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	// Start result handler
+	resultsDone := make(chan struct{})
+	go func() {
+		for res := range stage.Results() {
+			mgr.handleValidationResult(res)
+		}
+		close(resultsDone)
+	}()
+
+	// Start workers
+	runDone := make(chan struct{})
+	go func() {
+		stage.Run(runCtx)
+		close(runDone)
+	}()
+
+	// Stream and enqueue entries in batches
+	enqueued := 0
+	skipped := 0
+	withHistory := 0
+	maxEntries := cfg.MaxEntries
+	lastBatchLog := time.Now()
+
+	log.Logf(0, "uaf validation: starting to stream entries...")
+
+	_, err = reader.IterateEntriesBatched(0, batchSize, func(entries []*fuzzer.UAFCorpusEntry, seqs []uint64) bool {
+		for _, entry := range entries {
+			// Check max_entries limit
+			if maxEntries > 0 && enqueued >= maxEntries {
+				log.Logf(0, "uaf validation: reached max_entries limit (%d)", maxEntries)
+				return false
+			}
+
+			if entry != nil && len(entry.ReplayHistory) > 0 {
+				withHistory++
+			}
+			stage.Enqueue(entry)
+			enqueued++
+		}
+
+		// Progress reporting every batch
+		if time.Since(lastBatchLog) > 3*time.Second || enqueued <= batchSize {
+			log.Logf(0, "uaf validation: enqueued %d entries (%d skipped, %d with history)",
+				enqueued, skipped, withHistory)
+			lastBatchLog = time.Now()
+		}
+
+		return true
+	})
+
+	if err != nil {
+		log.Logf(0, "uaf validation: streaming load error: %v", err)
+	}
+
+	log.Logf(0, "uaf validation: streaming load complete - enqueued %d entries, skipped %d, %d with history",
+		enqueued, skipped, withHistory)
+
+	stage.Close()
+	<-runDone
+	<-resultsDone
+	mgr.exit("uaf-validate")
 }

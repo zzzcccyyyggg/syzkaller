@@ -243,6 +243,7 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 	job.fuzzer.Config.Corpus.Save(input)
 
 	// M1: Update namespace index when new programs are added to corpus
+	// Note: BoostBanditForNewCoverage is now handled by coverageTriageJob for UAF mode pairs
 	if job.fuzzer.raceGroup != nil {
 		job.fuzzer.raceGroup.UpdateNamespaceIndex(p)
 	}
@@ -684,6 +685,10 @@ func (job *soloFilterJob) run(fuzzer *Fuzzer) {
 	log.Logf(1, "[SOLO-FILTER] filtered: %d cross-program pairs (from %d barrier pairs)",
 		len(crossProgramPairs), len(job.barrierPairs))
 
+	// Always update bandit and pair cooldown, regardless of whether we found new pairs
+	// This is critical for "exhausted pair cooling down"
+	job.updateBanditAndCooldown(crossProgramPairs)
+
 	// Save the filtered cross-program pairs
 	if len(crossProgramPairs) > 0 {
 		fuzzer.statCrossProgPairs.Add(len(crossProgramPairs))
@@ -694,10 +699,10 @@ func (job *soloFilterJob) run(fuzzer *Fuzzer) {
 			log.Logf(1, "[SOLO-FILTER] saved %d cross-program pairs", len(crossProgramPairs))
 		}
 
-		// Update M1' share scores and M2 feedback
+		// Update M1' share scores and race prior
 		job.processCrossProgramPairs(crossProgramPairs, prog1SoloPairs, prog2SoloPairs)
 
-		// Update Syscall Affinity Table
+		// Update Syscall Affinity Table (record interaction success)
 		job.updateAffinityTable(crossProgramPairs)
 		fuzzer.statAffinityUpdates.Add(len(crossProgramPairs))
 	}
@@ -795,7 +800,37 @@ func (job *soloFilterJob) filterCrossProgramPairs(
 	return crossProgram
 }
 
-// processCrossProgramPairs updates M1' share scores and M2 feedback.
+// updateBanditAndCooldown updates M2 bandit parameters and pair cooldown.
+// This is called for EVERY execution, regardless of whether new pairs were found.
+// This is critical for "exhausted pair cooling down".
+func (job *soloFilterJob) updateBanditAndCooldown(crossProgramPairs []*ddrd.MayUAFPair) {
+	if job.fuzzer.raceGroup == nil {
+		return
+	}
+
+	// Update M2 Bandit parameters for both programs
+	// Note: RecordBanditExecution handles both success (α++) and failure (β++)
+	// Returns both new VarName pair count and new stack count
+	newVarPairs1, newStacks1 := job.fuzzer.raceGroup.RecordBanditExecution(job.prog1, crossProgramPairs)
+	newVarPairs2, newStacks2 := job.fuzzer.raceGroup.RecordBanditExecution(job.prog2, crossProgramPairs)
+	totalNewVarPairs := newVarPairs1 + newVarPairs2
+	totalNewStacks := newStacks1 + newStacks2
+
+	// Update pair cooldown using three-tier penalty system:
+	// - New VarName pair: reset failure score
+	// - Only new stack: add NewStackPenalty (default: 1)
+	// - Nothing new: add NoDiscoveryPenalty (default: 2)
+	job.fuzzer.raceGroup.RecordPairExecution(job.prog1, job.prog2, totalNewVarPairs, totalNewStacks)
+
+	// Log bandit update info periodically
+	if totalNewVarPairs > 0 || totalNewStacks > 0 {
+		log.Logf(0, "[BANDIT-UPDATE] new_varname_pairs=%d new_stacks=%d (prog1: vp=%d s=%d, prog2: vp=%d s=%d)",
+			totalNewVarPairs, totalNewStacks, newVarPairs1, newStacks1, newVarPairs2, newStacks2)
+	}
+}
+
+// processCrossProgramPairs updates M1' share scores and race prior.
+// Only called when crossProgramPairs is non-empty.
 func (job *soloFilterJob) processCrossProgramPairs(
 	crossProgramPairs []*ddrd.MayUAFPair,
 	prog1SoloPairs *VarNamePairSet,
@@ -820,10 +855,8 @@ func (job *soloFilterJob) processCrossProgramPairs(
 		}
 	}
 
-	// Update M2 race yield feedback
-	if len(crossProgramPairs) > 0 {
-		job.fuzzer.raceGroup.RecordRacePairWithPartner(job.prog1, job.prog2, crossProgramPairs)
-	}
+	// Update race prior for M1' (tracks historically race-producing pairs)
+	job.fuzzer.raceGroup.RecordRacePairWithPartner(job.prog1, job.prog2, crossProgramPairs)
 }
 
 // updateShareScore updates M1' share score based on cross-program race.
@@ -861,6 +894,10 @@ func (job *soloFilterJob) getInfo() *JobInfo {
 }
 
 // updateAffinityTable records syscall pair interactions in the affinity table.
+// Uses harmonic decay based on existing stack count:
+// - New VarName pair (stack=0): full BaseWeight
+// - Subsequent stacks: BaseWeight / (1 + existingStackCount)
+// This ensures cumulative bonus from 100 stacks approaches BaseWeight.
 func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPair) {
 	if job.fuzzer.raceGroup == nil {
 		return
@@ -871,15 +908,40 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 		return
 	}
 
+	// Get configured base weight or use default
+	baseWeight := float64(job.fuzzer.Config.NewVarNamePairAffinityWeight)
+	if baseWeight <= 0 {
+		baseWeight = float64(DefaultNewVarNamePairAffinityWeight)
+	}
+
 	for _, pair := range crossProgramPairs {
 		if pair == nil {
 			continue
 		}
 
 		sig1, sig2 := ExtractSignaturesFromPair(job.prog1, job.prog2, pair)
-		if !sig1.IsEmpty() && !sig2.IsEmpty() {
-			affinityTable.RecordInteraction(sig1, sig2, 1)
+		if sig1.IsEmpty() || sig2.IsEmpty() {
+			continue
 		}
+
+		// Get newness info including existing stack count
+		isNewVarNamePair, isNewStack, existingStackCount := job.fuzzer.raceGroup.CheckPairNewness(pair)
+
+		var weight float64
+		if isNewVarNamePair {
+			// New VarName pair: full base weight
+			weight = baseWeight
+		} else if isNewStack {
+			// New stack for existing VarName pair: harmonic decay
+			// Weight = BaseWeight / (1 + existingStackCount)
+			// This ensures sum(weight) for stacks 2..100 approaches BaseWeight
+			weight = baseWeight / float64(1+existingStackCount)
+		} else {
+			// Already recorded pair, skip
+			continue
+		}
+
+		affinityTable.RecordInteractionWithWeight(sig1, sig2, weight)
 	}
 }
 

@@ -353,7 +353,7 @@ Main Program:
 
 ```bash
 # 清理验证状态，重新验证所有条目
-rm workdir/invalid_uaf.db workdir/varname_hb.db
+rm workdir/invalid_uaf.db workdir/varname_hb_stats.db
 
 # 然后重新运行 validate
 sudo ./bin/syz-manager --config=xxx.cfg --mode uaf-validate

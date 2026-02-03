@@ -7,13 +7,13 @@ The UAF validate mode replays persisted Use-After-Free candidates under controll
 
 ### One-Shot Mode (Default)
 1. **Corpus Load**: `syz-manager` opens the persisted UAF corpus (`uaf-corpus.db`) and queues every entry for validation.
-2. **Stage Manager**: `pkg/uafvalidate` spins up a `StageManager` with worker goroutines sized to the VM pool. Each worker:
+2. **Stage Manager**: `pkg/racevalidate` spins up a `StageManager` with worker goroutines sized to the VM pool. Each worker:
    - Allocates barrier delays via the delay manager.
    - Sets up a fresh executor instance via `validatorExecutorFactory`.
    - Runs the entry, capturing execution output, crash metadata, and DDRD reports.
 3. **Repeat Loop**: Every candidate runs `RepeatCount` times (default 1). Each repeat is attempted until it either succeeds, crashes, or hits the per-repeat retry budget; the final run's outcome determines the confirmation status.
 4. **Intersection Tracking**: On each successful repeat, DDRD pairs are intersected to identify those that appear at least `repeat/2 + 1` times. The last iteration publishes the stable set in the result payload and optionally kicks off pair verification.
-5. **Result Handling & Verification**: `syz-manager/uaf_validate.go` consumes `ValidationResult` objects, logs status per run, updates counters, triggers verification for stable pairs, and persists the consolidated outcome into `uaf-validated.db`.
+5. **Result Handling & Verification**: `syz-manager/uaf_validate.go` consumes `ValidationResult` objects, logs status per run, updates counters, triggers verification for stable pairs, and persists the consolidated outcome into `validated_uaf.db`.
 6. **Shutdown**: Once all tasks finish and channels drain, the manager exits cleanly using the guarded shutdown helper to avoid double-close panics.
 
 ### Continuous Mode (Incremental Reload)
@@ -28,7 +28,7 @@ When `continuous_mode` is enabled, the validator runs indefinitely and periodica
 This mode is ideal for long-running fuzzing sessions where new UAF candidates are continuously discovered and need validation without restarting the manager.
 
 ## Key Components
-- **`pkg/uafvalidate/StageManager`**
+- **`pkg/racevalidate/StageManager`** (Go package name is `uafvalidate`)
   - Handles task queuing, worker lifecycle, repeat scheduling, and intersection collection.
   - Guards against context cancellation (SIGINT, timeout) and aborts in-flight tasks gracefully.
   - Tracks `seenKeys` to prevent re-processing entries in continuous mode.
@@ -39,7 +39,7 @@ This mode is ideal for long-running fuzzing sessions where new UAF candidates ar
   - `EntriesSince(seq)`: Returns entries with sequence number greater than `seq` (used in continuous mode for incremental reads).
 - **`validatorExecutorFactory` (`syz-manager/uaf_validate.go`)**
   - Reuses the VM pool in round-robin fashion, setting up `instance.ExecProg` adapters for validation runs according to `uaf_validate.max_concurrent` (clamped to the VM count).
-- **Delay Management** (`pkg/uafvalidate/delay.go`)
+- **Delay Management** (`pkg/racevalidate/delay.go`)
   - Builds per-run barrier delays and retries within a configurable budget to tame flakiness.
   - When a corpus entry carries DDRD pairs, the first pair's `time_diff` seeds a leading delay so the free/use windows compress towards the observed overlap.
 
@@ -104,8 +104,9 @@ Additional runtime files:
 
 ## Persistence Artifacts
 - `uaf-corpus.db`: Source corpus entries (programs, barriers, replay plans, original DDRD metadata).
-- `uaf-validated.db`: Validation outcomes with attempts, notes, timestamps, last seen pairs, and stable intersections.
+- `validated_uaf.db`: Validation outcomes with attempts, notes, timestamps, last seen pairs, and stable intersections.
 - `invalid_uaf.db`: Cache of DDRD pairs that consistently fail verification, preventing repeat work.
+- `varname_hb_stats.db`: VarName-pair HB statistics and Verified markers used for probabilistic skipping.
 
 ## Error Handling
 - Executor errors and crashes trigger retries (bounded by the delay budget). Persistent failures mark the entry as `failed` with diagnostic notes.

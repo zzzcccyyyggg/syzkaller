@@ -23,9 +23,9 @@ import (
 type ObjectLinker struct {
 	mu sync.RWMutex
 	// Statistics
-	linkAttempts   int
-	linkSuccesses  int
-	pathsUnified   int
+	linkAttempts  int
+	linkSuccesses int
+	pathsUnified  int
 }
 
 // NewObjectLinker creates a new ObjectLinker instance.
@@ -224,14 +224,46 @@ func extractPathFromCall(call *prog.Call) string {
 	for i := 0; i < len(call.Args) && i < 3; i++ {
 		arg := call.Args[i]
 		if pathStr := extractStringFromArg(arg); pathStr != "" {
-			// Check if it looks like a file path
+			// Check if it looks like a file path:
+			// 1. Absolute path: starts with "/"
+			// 2. Relative path: starts with "./"
+			// 3. Syzkaller testfile pattern: contains "testfile" or similar patterns
+			//    (for syscalls like openat$kccwf which use relative paths like "testfile#")
 			if strings.HasPrefix(pathStr, "/") || strings.HasPrefix(pathStr, "./") {
+				return pathStr
+			}
+			// Also match relative filenames used in syzkaller descriptions
+			// Examples: "testfile#", "testdir", "hardlink#", "symlink#"
+			if isLikelyFilename(pathStr) {
 				return pathStr
 			}
 		}
 	}
 
 	return ""
+}
+
+// isLikelyFilename checks if a string looks like a filename used in syzkaller.
+func isLikelyFilename(s string) bool {
+	if len(s) == 0 || len(s) > 256 {
+		return false
+	}
+	// Common patterns in syzkaller test files
+	patterns := []string{"testfile", "testdir", "hardlink", "symlink", "target"}
+	for _, p := range patterns {
+		if strings.Contains(s, p) {
+			return true
+		}
+	}
+	// Also check for valid filename characters (letters, numbers, #, _, -, .)
+	for _, c := range s {
+		if !((c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') ||
+			(c >= '0' && c <= '9') || c == '#' || c == '_' || c == '-' || c == '.') {
+			return false
+		}
+	}
+	// If all characters are valid filename chars and length > 0, treat as filename
+	return len(s) > 0
 }
 
 // extractStringFromArg recursively extracts a string value from an argument.

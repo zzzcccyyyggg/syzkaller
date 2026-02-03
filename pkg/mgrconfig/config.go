@@ -309,6 +309,37 @@ type Experimental struct {
 	// this many records are saved with the entry.
 	// Defaults to 100 if unset or zero.
 	NewStackHistory int `json:"new_stack_history,omitempty"`
+	// MaxStacksPerVarNamePair limits how many unique (callstack1, callstack2) combinations
+	// are tracked for each (FreeAccessName, UseAccessName) pair.
+	// Once this limit is reached for a VarName pair, new stack combinations are ignored.
+	// Defaults to 20 if unset or zero.
+	MaxStacksPerVarNamePair int `json:"max_stacks_per_varname_pair,omitempty"`
+	// NewVarNamePairAffinityWeight is the affinity score weight for discovering a NEW VarName pair.
+	// When a syscall combination discovers a completely new (FreeAccessName, UseAccessName) pair,
+	// the interaction is recorded with this weight to prioritize such combinations.
+	// Defaults to 5 if unset or zero.
+	NewVarNamePairAffinityWeight int `json:"new_varname_pair_affinity_weight,omitempty"`
+	// NewStackAffinityWeight is the affinity score weight for discovering a new stack for existing VarName pair.
+	// When a syscall combination discovers a new callstack for an already-known VarName pair,
+	// the interaction is recorded with this weight.
+	// Defaults to 1 if unset or zero.
+	NewStackAffinityWeight int `json:"new_stack_affinity_weight,omitempty"`
+
+	// CooldownThreshold is the failure score threshold for entering cooldown.
+	// When FailureScore reaches this value, the (main, partner) pair enters cooldown.
+	// Defaults to 20 if unset or zero.
+	CooldownThreshold int `json:"cooldown_threshold,omitempty"`
+	// NewStackPenalty is the failure score penalty when only new stacks are discovered (no new VarName pairs).
+	// Defaults to 1 if unset or zero.
+	NewStackPenalty int `json:"new_stack_penalty,omitempty"`
+	// NoDiscoveryPenalty is the failure score penalty when nothing new is discovered.
+	// Defaults to 2 if unset or zero.
+	NoDiscoveryPenalty int `json:"no_discovery_penalty,omitempty"`
+
+	// RandomBaselineMode disables all race-guided fuzzing strategies for A/B testing.
+	// When enabled, program and partner selection becomes purely random.
+	// This is useful for comparing the effectiveness of race-guided strategies.
+	RandomBaselineMode bool `json:"random_baseline_mode,omitempty"`
 }
 
 type UAFValidateConfig struct {
@@ -419,6 +450,48 @@ type UAFValidateConfig struct {
 	// This is useful when you want to retry entries that were previously skipped due to
 	// accumulated failure statistics.
 	DisableHBSkip bool `json:"disable_hb_skip,omitempty"`
+
+	// StreamingLoad enables memory-efficient streaming load for large uaf-corpus.db files.
+	// When enabled, entries are loaded in batches instead of all at once,
+	// preventing OOM errors on large corpora (e.g., > 1GB).
+	// Recommended for corpora with 10k+ entries or > 1GB file size.
+	StreamingLoad bool `json:"streaming_load,omitempty"`
+
+	// StreamingBatchSize specifies how many entries to load per batch in streaming mode.
+	// Smaller batches use less memory but may increase I/O overhead.
+	// Defaults to 500 if unset or zero.
+	StreamingBatchSize int `json:"streaming_batch_size,omitempty"`
+
+	// SkipValidated skips entries that have already been validated (exist in validated_uaf.db).
+	// This avoids reprocessing already validated entries when restarting validation.
+	SkipValidated bool `json:"skip_validated,omitempty"`
+
+	// SkipInvalid skips entries that have been marked as invalid (exist in invalid_uaf.db).
+	// This avoids reprocessing known-bad entries.
+	SkipInvalid bool `json:"skip_invalid,omitempty"`
+
+	// MaxEntries limits the maximum number of entries to load.
+	// If set to 0 (default), all entries are loaded.
+	// Useful for debugging or testing with a subset of the corpus.
+	MaxEntries int `json:"max_entries,omitempty"`
+
+	// EnableHistoryMinimization enables replay history minimization after successful validation.
+	// When enabled, after a pair is validated successfully, the system will attempt to find
+	// the minimum subset of history records required to reproduce the race condition.
+	// This makes the reproducer smaller, easier to analyze, and faster to replay.
+	EnableHistoryMinimization bool `json:"enable_history_minimization,omitempty"`
+
+	// MinimizationMaxAttempts limits the number of execution attempts per minimization step.
+	// Each subset of history is tested this many times to account for race non-determinism.
+	// Higher values increase reliability but slow down minimization. Defaults to 3.
+	MinimizationMaxAttempts int `json:"minimization_max_attempts,omitempty"`
+
+	// MinimizationStrategy specifies the algorithm to use for history minimization.
+	// Supported values:
+	// - "binary" (default): Binary search - fast but may not find optimal minimum
+	// - "greedy": Greedy removal - slower but finds better minimum
+	// - "hybrid": Binary first, then greedy refinement
+	MinimizationStrategy string `json:"minimization_strategy,omitempty"`
 }
 
 type FocusArea struct {

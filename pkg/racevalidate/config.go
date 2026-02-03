@@ -78,6 +78,24 @@ type Config struct {
 	// allowing all entries to be validated regardless of historical failure rates.
 	// This is useful when you want to retry entries that were previously skipped.
 	DisableHBSkip bool
+
+	// EnableHistoryMinimization enables replay history minimization after successful validation.
+	// When enabled, after a pair is validated, the system will try to find the minimum
+	// subset of history records required to reproduce the race condition.
+	// This makes the reproducer smaller and easier to analyze.
+	EnableHistoryMinimization bool
+
+	// MinimizationMaxAttempts limits the number of execution attempts per minimization step.
+	// Each subset of history is tested this many times to account for race non-determinism.
+	// Higher values increase reliability but slow down minimization. Defaults to 3.
+	MinimizationMaxAttempts int
+
+	// MinimizationStrategy specifies the algorithm to use for history minimization.
+	// Supported values:
+	// - "binary" (default): Binary search - fast but may not find optimal minimum
+	// - "greedy": Greedy removal - slower but finds better minimum
+	// - "hybrid": Binary first, then greedy refinement
+	MinimizationStrategy string
 }
 
 func (cfg Config) withDefaults() Config {
@@ -104,6 +122,12 @@ func (cfg Config) withDefaults() Config {
 	}
 	if cfg.VerifyDelayPower <= 0 {
 		cfg.VerifyDelayPower = 2.0
+	}
+	if cfg.MinimizationMaxAttempts <= 0 {
+		cfg.MinimizationMaxAttempts = 3
+	}
+	if cfg.MinimizationStrategy == "" {
+		cfg.MinimizationStrategy = "binary"
 	}
 	return cfg
 }

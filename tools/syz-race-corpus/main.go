@@ -23,17 +23,18 @@ import (
 )
 
 var (
-	flagWorkdir  = flag.String("workdir", "", "path to workdir containing uaf-corpus.db")
-	flagConfig   = flag.String("config", "", "syzkaller config file to get workdir and target")
-	flagDBPath   = flag.String("db", "", "direct path to uaf-corpus.db file")
-	flagKey      = flag.String("key", "", "show only entry with this key")
-	flagSummary  = flag.Bool("summary", false, "show summary statistics only")
-	flagPrograms = flag.Bool("programs", true, "show program source code")
-	flagPairs    = flag.Bool("pairs", true, "show UAF pair details")
-	flagJSON     = flag.Bool("json", false, "output in JSON format")
-	flagLimit    = flag.Int("limit", 0, "limit number of entries to show (0 = all)")
-	flagSortTime = flag.Bool("sort-time", false, "sort entries by timestamp (newest first)")
-	flagVarNames = flag.Bool("varnames", false, "show distinct VarName pairs with counts")
+	flagWorkdir        = flag.String("workdir", "", "path to workdir containing uaf-corpus.db")
+	flagConfig         = flag.String("config", "", "syzkaller config file to get workdir and target")
+	flagDBPath         = flag.String("db", "", "direct path to uaf-corpus.db file")
+	flagKey            = flag.String("key", "", "show only entry with this key")
+	flagSummary        = flag.Bool("summary", false, "show summary statistics only")
+	flagPrograms       = flag.Bool("programs", true, "show program source code")
+	flagPairs          = flag.Bool("pairs", true, "show UAF pair details")
+	flagJSON           = flag.Bool("json", false, "output in JSON format")
+	flagLimit          = flag.Int("limit", 0, "limit number of entries to show (0 = all)")
+	flagSortTime       = flag.Bool("sort-time", false, "sort entries by timestamp (newest first)")
+	flagVarNames       = flag.Bool("varnames", false, "show distinct VarName pairs with counts")
+	flagVarNamesStacks = flag.Bool("varnames-stacks", false, "show distinct VarName pairs with unique callstack counts (sorted by stack count)")
 )
 
 type storedUAFCorpusEntry struct {
@@ -81,6 +82,8 @@ func main() {
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -summary\n\n")
 		fmt.Fprintf(os.Stderr, "  # Show distinct VarName pairs\n")
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -varnames\n\n")
+		fmt.Fprintf(os.Stderr, "  # Show distinct VarName pairs with unique callstack counts\n")
+		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -varnames-stacks\n\n")
 		fmt.Fprintf(os.Stderr, "  # Show specific entry by key\n")
 		fmt.Fprintf(os.Stderr, "  syz-uaf-corpus -config=wifi.cfg -key=abc123\n\n")
 		fmt.Fprintf(os.Stderr, "  # Export to JSON\n")
@@ -122,7 +125,19 @@ func main() {
 	}
 
 	var entries []entryInfo
+	totalRecords := len(corpusDB.Records)
+	processed := 0
+	lastProgress := 0
+	fmt.Fprintf(os.Stderr, "Loading %d entries from database...\n", totalRecords)
 	for key, rec := range corpusDB.Records {
+		processed++
+		// Show progress every 10%
+		progress := processed * 100 / totalRecords
+		if progress >= lastProgress+10 {
+			fmt.Fprintf(os.Stderr, "  Loading: %d%% (%d/%d)\n", progress, processed, totalRecords)
+			lastProgress = progress
+		}
+
 		if *flagKey != "" && key != *flagKey && !strings.Contains(key, *flagKey) {
 			continue
 		}
@@ -140,6 +155,7 @@ func main() {
 			Timestamp: stored.Timestamp,
 		})
 	}
+	fmt.Fprintf(os.Stderr, "Loaded %d entries.\n", len(entries))
 
 	if *flagSortTime {
 		sort.Slice(entries, func(i, j int) bool {
@@ -157,6 +173,11 @@ func main() {
 
 	if *flagJSON {
 		outputJSON(entries, target)
+		return
+	}
+
+	if *flagVarNamesStacks {
+		printVarNamesWithStacks(entries, dbPath)
 		return
 	}
 
@@ -236,6 +257,116 @@ func printVarNames(entries []entryInfo, dbPath string) {
 	}
 
 	fmt.Printf("\nTotal entries: %d\n", len(entries))
+}
+
+func printVarNamesWithStacks(entries []entryInfo, dbPath string) {
+	// VarNamePair represents a unique FreeAccessName-UseAccessName combination
+	type VarNamePair struct {
+		FreeAccessName uint64
+		UseAccessName  uint64
+	}
+
+	// Map: VarNamePair -> set of unique FreeCallStacks
+	varNameFreeStacks := make(map[VarNamePair]map[uint64]struct{})
+	// Map: VarNamePair -> set of unique UseCallStacks
+	varNameUseStacks := make(map[VarNamePair]map[uint64]struct{})
+	// Also count total entries for each VarNamePair
+	varNameEntries := make(map[VarNamePair]int)
+
+	addPair := func(p ddrd.MayUAFPair) {
+		if p.FreeAccessName == 0 && p.UseAccessName == 0 {
+			return
+		}
+		vnKey := VarNamePair{
+			FreeAccessName: p.FreeAccessName,
+			UseAccessName:  p.UseAccessName,
+		}
+
+		if varNameFreeStacks[vnKey] == nil {
+			varNameFreeStacks[vnKey] = make(map[uint64]struct{})
+		}
+		if varNameUseStacks[vnKey] == nil {
+			varNameUseStacks[vnKey] = make(map[uint64]struct{})
+		}
+		varNameFreeStacks[vnKey][p.FreeCallStack] = struct{}{}
+		varNameUseStacks[vnKey][p.UseCallStack] = struct{}{}
+		varNameEntries[vnKey]++
+	}
+
+	totalEntries := len(entries)
+	lastProgress := 0
+	fmt.Fprintf(os.Stderr, "Processing %d entries for stack analysis...\n", totalEntries)
+	for i, e := range entries {
+		// Show progress every 10%
+		progress := (i + 1) * 100 / totalEntries
+		if progress >= lastProgress+10 {
+			fmt.Fprintf(os.Stderr, "  Processing: %d%% (%d/%d)\n", progress, i+1, totalEntries)
+			lastProgress = progress
+		}
+
+		stored := e.Entry
+
+		// Process the main pair
+		addPair(stored.Pair)
+
+		// Process pairs from the Pairs slice
+		for _, p := range stored.Pairs {
+			addPair(p)
+		}
+	}
+	fmt.Fprintf(os.Stderr, "Processing complete. Sorting results...\n")
+
+	// Convert to slice for sorting
+	type pairWithStats struct {
+		Pair           VarNamePair
+		FreeStackCount int // Number of unique FreeCallStack
+		UseStackCount  int // Number of unique UseCallStack
+		EntryCount     int // Total number of entries
+	}
+	var sortedPairs []pairWithStats
+	for pair := range varNameFreeStacks {
+		sortedPairs = append(sortedPairs, pairWithStats{
+			Pair:           pair,
+			FreeStackCount: len(varNameFreeStacks[pair]),
+			UseStackCount:  len(varNameUseStacks[pair]),
+			EntryCount:     varNameEntries[pair],
+		})
+	}
+
+	// Sort by total stack count (FreeStackCount + UseStackCount) descending
+	sort.Slice(sortedPairs, func(i, j int) bool {
+		totalI := sortedPairs[i].FreeStackCount + sortedPairs[i].UseStackCount
+		totalJ := sortedPairs[j].FreeStackCount + sortedPairs[j].UseStackCount
+		if totalI != totalJ {
+			return totalI > totalJ
+		}
+		// Secondary sort by entry count
+		return sortedPairs[i].EntryCount > sortedPairs[j].EntryCount
+	})
+
+	fmt.Printf("UAF Corpus Database: %s\n", dbPath)
+	fmt.Printf("================================================================================\n\n")
+	fmt.Printf("Distinct VarName Pairs: %d\n\n", len(varNameFreeStacks))
+
+	fmt.Printf("%-18s  %-18s  %-12s  %-12s  %s\n", "FreeAccessName", "UseAccessName", "FreeStacks", "UseStacks", "Entries")
+	fmt.Printf("%-18s  %-18s  %-12s  %-12s  %s\n", strings.Repeat("-", 18), strings.Repeat("-", 18), strings.Repeat("-", 12), strings.Repeat("-", 12), "-------")
+
+	totalFreeStacks := 0
+	totalUseStacks := 0
+	for _, pc := range sortedPairs {
+		fmt.Printf("%016x  %016x  %-12d  %-12d  %d\n",
+			pc.Pair.FreeAccessName,
+			pc.Pair.UseAccessName,
+			pc.FreeStackCount,
+			pc.UseStackCount,
+			pc.EntryCount)
+		totalFreeStacks += pc.FreeStackCount
+		totalUseStacks += pc.UseStackCount
+	}
+
+	fmt.Printf("\nTotal entries: %d\n", len(entries))
+	fmt.Printf("Total unique FreeCallStacks: %d\n", totalFreeStacks)
+	fmt.Printf("Total unique UseCallStacks: %d\n", totalUseStacks)
 }
 
 func printSummary(entries []entryInfo, dbPath string) {

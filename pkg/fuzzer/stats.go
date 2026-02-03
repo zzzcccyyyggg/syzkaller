@@ -14,34 +14,37 @@ type Stats struct {
 	// Indexed by prog.Syscall.ID + the last element for extra/remote.
 	Syscalls []SyscallStats
 
-	statCandidates               *stat.Val
-	statNewInputs                *stat.Val
-	statJobs                     *stat.Val
-	statJobsTriage               *stat.Val
-	statJobsTriageCandidate      *stat.Val
-	statJobsSmash                *stat.Val
-	statJobsFaultInjection       *stat.Val
-	statJobsHints                *stat.Val
-	statExecTime                 *stat.Val
-	statExecGenerate             *stat.Val
-	statExecFuzz                 *stat.Val
-	statExecCandidate            *stat.Val
-	statExecTriage               *stat.Val
-	statExecMinimize             *stat.Val
-	statExecSmash                *stat.Val
-	statExecFaultInject          *stat.Val
-	statExecHint                 *stat.Val
-	statExecUAF                  *stat.Val
-	statExecSeed                 *stat.Val
-	statExecCollide              *stat.Val
-	statCoverOverflows           *stat.Val
-	statCompsOverflows           *stat.Val
-	statDdrdPairs                *stat.Val
-	statJobsSoloFilter           *stat.Val
-	statCrossProgPairs           *stat.Val
-	statSoloCacheHits            *stat.Val
-	statObjectLinkings           *stat.Val
-	statAffinityUpdates          *stat.Val
+	statCandidates           *stat.Val
+	statNewInputs            *stat.Val
+	statJobs                 *stat.Val
+	statJobsTriage           *stat.Val
+	statJobsTriageCandidate  *stat.Val
+	statJobsSmash            *stat.Val
+	statJobsFaultInjection   *stat.Val
+	statJobsHints            *stat.Val
+	statExecTime             *stat.Val
+	statExecGenerate         *stat.Val
+	statExecFuzz             *stat.Val
+	statExecCandidate        *stat.Val
+	statExecTriage           *stat.Val
+	statExecMinimize         *stat.Val
+	statExecSmash            *stat.Val
+	statExecFaultInject      *stat.Val
+	statExecHint             *stat.Val
+	statExecUAF              *stat.Val
+	statExecSeed             *stat.Val
+	statExecCollide          *stat.Val
+	statCoverOverflows       *stat.Val
+	statCompsOverflows       *stat.Val
+	statDdrdPairs            *stat.Val
+	statJobsSoloFilter       *stat.Val
+	statCrossProgPairs       *stat.Val
+	statSoloCacheHits        *stat.Val
+	statObjectLinkings       *stat.Val
+	statAffinityUpdates      *stat.Val
+	statCoverageTriageJobs   *stat.Val
+	statCoverageTriageBoosts *stat.Val
+	statNewCoverageFromPairs *stat.Val
 }
 
 type SyscallStats struct {
@@ -107,5 +110,11 @@ func newStats(target *prog.Target) Stats {
 			stat.Console, stat.Graph("race_group")),
 		statAffinityUpdates: stat.New("affinity updates", "Syscall affinity table updates",
 			stat.Console, stat.Graph("race_group")),
+		statCoverageTriageJobs: stat.New("coverage triage jobs", "Running coverage triage jobs for pairs",
+			stat.Console, stat.StackedGraph("jobs")),
+		statCoverageTriageBoosts: stat.New("coverage boosts", "Bandit boosts from pair coverage discovery",
+			stat.Console, stat.Graph("race_group")),
+		statNewCoverageFromPairs: stat.New("new coverage pairs", "New coverage discovered from barrier pairs",
+			stat.Console, stat.Graph("ddrd")),
 	}
 }

@@ -15,6 +15,8 @@
 │  │  设计与架构文档      │                                                │
 │  ├─────────────────────┤                                                │
 │  │ • uaf_barrier_fuzzing.md     ← UAF Barrier Fuzzing 整体设计          │
+│  │ • race_guided_fuzzing.md     ← Race-Guided Fuzzing 概览               │
+│  │ • race_guided_fuzzing_design.md ← 详细设计与实现说明                │
 │  │ • barrier_dispatch_flow.md   ← Barrier 派发与 DDRD 集成流程          │
 │  │ • ddrd_executor_flow.md      ← Executor/Runner 中的 DDRD 处理流程    │
 │  └─────────────────────┘                                                │
@@ -67,6 +69,30 @@
 
 ---
 
+#### [`race_guided_fuzzing.md`](race_guided_fuzzing.md)
+**定位**: Race-Guided Fuzzing 概览
+
+**内容**:
+- M1'/M2 选择策略、对象链接、冷却与亲和度学习
+- Solo Filter 与 Coverage Triage
+- 关键参数与文件结构
+
+**适合**: 快速理解 race-guided 的核心机制
+
+---
+
+#### [`race_guided_fuzzing_design.md`](race_guided_fuzzing_design.md)
+**定位**: 详细设计与实现
+
+**内容**:
+- 选择、链接、过滤与反馈全链路设计
+- Bandit 更新细节与覆盖率归因
+- 亲和度表、冷却、VarName Registry 细节
+
+**适合**: 深入理解实现细节与扩展方向
+
+---
+
 #### [`barrier_dispatch_flow.md`](barrier_dispatch_flow.md)
 **定位**: Runner 层实现文档
 
@@ -115,7 +141,7 @@
   - `ContinuousMode`, `IncrementalReloadMinutes`
 - Delay 策略（`StartDelayUs`, `AccessDelayUs`）
 - 日志与诊断
-- 持久化文件说明（`uaf-corpus.db`, `uaf-validated.db`, `invalid_uaf.db`）
+- 持久化文件说明（`uaf-corpus.db`, `validated_uaf.db`, `invalid_uaf.db`）
 
 **适合**: 配置和运行 UAF 验证模式
 
@@ -224,8 +250,8 @@
 | UKC 控制 | `executor/ukc.h` |
 | Race Detector | `executor/ddrd/race_detector.{h,c}` |
 | UAF Store (Go) | `pkg/manager/uaf_store.go` |
-| Validate Manager | `pkg/uafvalidate/manager.go` |
-| Executor Adapter | `pkg/uafvalidate/executor.go` |
+| Validate Manager | `pkg/racevalidate/manager.go` (package `uafvalidate`) |
+| Executor Adapter | `pkg/racevalidate/executor.go` (package `uafvalidate`) |
 
 ---
 
@@ -235,4 +261,4 @@
 - 新功能需在本索引中添加条目
 - 过时内容应标记或删除，避免误导
 
-**最后更新**: 2025-12-30
+**最后更新**: 2026-01-19

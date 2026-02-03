@@ -16,11 +16,13 @@ import (
 )
 
 var (
-	dbPath     = flag.String("db", "validated_uaf.db", "path to validated_uaf.db")
-	summary    = flag.Bool("summary", false, "only print record metadata, skip report bodies")
-	format     = flag.Bool("format", false, "prettify report output for easier reading")
-	manager    = flag.String("manager_cfg", "", "optional syz-manager config for symbolization")
-	groupByVar = flag.Bool("group_by_var", false, "group reports by VarName pairs")
+	dbPath       = flag.String("db", "validated_uaf.db", "path to validated_uaf.db")
+	summary      = flag.Bool("summary", false, "only print record metadata, skip report bodies")
+	format       = flag.Bool("format", false, "prettify report output for easier reading")
+	manager      = flag.String("manager_cfg", "", "optional syz-manager config for symbolization")
+	groupByVar   = flag.Bool("group_by_var", false, "group reports by VarName pairs")
+	showHistory  = flag.Bool("show_history", false, "show replay history details")
+	historyStats = flag.Bool("history_stats", false, "show only history statistics without full content")
 )
 
 type VarNamePair struct {
@@ -71,12 +73,61 @@ func main() {
 
 	fmt.Printf("validated records: %d\n", len(records))
 
+	// Print overall history statistics
+	if *historyStats || *showHistory {
+		printHistoryStatistics(records)
+	}
+
 	if *groupByVar {
 		printGroupedByVarName(records, reporter)
 	} else {
 		printSequential(records, reporter)
 	}
 }
+
+func printHistoryStatistics(records []*RecordInfo) {
+	totalWithHistory := 0
+	totalMinimized := 0
+	totalHistoryRecords := 0
+	totalOriginalRecords := 0
+	maxHistory := 0
+	maxReduction := 0.0
+
+	for _, info := range records {
+		histInfo := extractHistoryInfo(info.Record.Val)
+		if histInfo.HistoryCount > 0 {
+			totalWithHistory++
+			totalHistoryRecords += histInfo.HistoryCount
+			if histInfo.HistoryCount > maxHistory {
+				maxHistory = histInfo.HistoryCount
+			}
+		}
+		if histInfo.Minimized {
+			totalMinimized++
+			totalOriginalRecords += histInfo.OriginalCount
+			if histInfo.OriginalCount > 0 {
+				reduction := 1.0 - float64(histInfo.HistoryCount)/float64(histInfo.OriginalCount)
+				if reduction > maxReduction {
+					maxReduction = reduction
+				}
+			}
+		}
+	}
+
+	fmt.Printf("\n=== REPLAY HISTORY STATISTICS ===\n")
+	fmt.Printf("Records with history: %d / %d (%.1f%%)\n",
+		totalWithHistory, len(records), float64(totalWithHistory)*100/float64(len(records)))
+	if totalWithHistory > 0 {
+		fmt.Printf("Total history records: %d (avg %.1f per entry)\n",
+			totalHistoryRecords, float64(totalHistoryRecords)/float64(totalWithHistory))
+		fmt.Printf("Max history in single entry: %d\n", maxHistory)
+	}
+	if totalMinimized > 0 {
+		fmt.Printf("Minimized entries: %d\n", totalMinimized)
+		fmt.Printf("Original total before minimization: %d\n", totalOriginalRecords)
+		fmt.Printf("Max reduction ratio: %.1f%%\n", maxReduction*100)
+	}
+	fmt.Printf("=================================\n\n")
 
 func initReporter(path string) (*report.Reporter, error) {
 	if path == "" {
@@ -141,6 +192,40 @@ func extractVarNames(body []byte) *VarNamePair {
 	return &VarNamePair{VarName1: var1, VarName2: var2}
 }
 
+// HistoryInfo contains parsed replay history information
+type HistoryInfo struct {
+	HistoryCount  int
+	OriginalCount int
+	Minimized     bool
+}
+
+// extractHistoryInfo parses the REPLAY HISTORY section from the record
+func extractHistoryInfo(body []byte) *HistoryInfo {
+	info := &HistoryInfo{}
+
+	// Find HistoryCount
+	reCount := regexp.MustCompile(`HistoryCount:\s*(\d+)`)
+	if match := reCount.FindSubmatch(body); match != nil {
+		if count, err := strconv.Atoi(string(match[1])); err == nil {
+			info.HistoryCount = count
+		}
+	}
+
+	// Find OriginalCount (only present if minimized)
+	reOriginal := regexp.MustCompile(`OriginalCount:\s*(\d+)`)
+	if match := reOriginal.FindSubmatch(body); match != nil {
+		if count, err := strconv.Atoi(string(match[1])); err == nil {
+			info.OriginalCount = count
+		}
+	}
+
+	// Check if minimized
+	reMinimized := regexp.MustCompile(`Minimized:\s*true`)
+	info.Minimized = reMinimized.Match(body)
+
+	return info
+}
+
 func printSequential(records []*RecordInfo, reporter *report.Reporter) {
 	for _, info := range records {
 		printRecord(info, reporter)
@@ -193,13 +278,31 @@ func printGroupedByVarName(records []*RecordInfo, reporter *report.Reporter) {
 }
 
 func printRecord(info *RecordInfo, reporter *report.Reporter) {
-	fmt.Printf("[%d] key=%s seq=%d size=%d bytes\n",
-		info.Index, info.Key, info.Record.Seq, len(info.Record.Val))
-	if *summary || len(info.Record.Val) == 0 {
+	body := info.Record.Val
+
+	// Extract history info for display
+	histInfo := extractHistoryInfo(body)
+	historyDesc := ""
+	if histInfo.HistoryCount > 0 {
+		if histInfo.Minimized {
+			historyDesc = fmt.Sprintf(" history=%d (minimized from %d)", histInfo.HistoryCount, histInfo.OriginalCount)
+		} else {
+			historyDesc = fmt.Sprintf(" history=%d", histInfo.HistoryCount)
+		}
+	}
+
+	fmt.Printf("[%d] key=%s seq=%d size=%d bytes%s\n",
+		info.Index, info.Key, info.Record.Seq, len(body), historyDesc)
+
+	if *historyStats {
+		// Only show history stats, not full content
+		return
+	}
+
+	if *summary || len(body) == 0 {
 		return
 	}
 	fmt.Println("-----BEGIN REPORT-----")
-	body := info.Record.Val
 	if reporter != nil {
 		if symBody, err := symbolizeBody(reporter, body); err != nil {
 			log.Printf("warn: failed to symbolize key=%s: %v", info.Key, err)
@@ -207,6 +310,14 @@ func printRecord(info *RecordInfo, reporter *report.Reporter) {
 			body = symBody
 		}
 	}
+
+	// If not showing history, truncate output before REPLAY HISTORY section
+	if !*showHistory {
+		if idx := bytes.Index(body, []byte("\n=== REPLAY HISTORY ===")); idx > 0 {
+			body = append(body[:idx], []byte("\n=== REPLAY HISTORY ===\n[use -show_history to see details]\n")...)
+		}
+	}
+
 	if *format {
 		body = formatReport(body)
 	}

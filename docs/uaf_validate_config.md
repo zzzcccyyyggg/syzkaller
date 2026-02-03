@@ -63,6 +63,75 @@
 
 ---
 
+## 大规模语料库配置（Streaming Load）
+
+当 `uaf-corpus.db` 文件过大（例如 > 1GB）时，一次性加载可能导致内存溢出（OOM）或加载极慢。以下配置项支持流式加载，分批处理语料库。
+
+### `streaming_load`
+- **类型**: `bool`
+- **默认值**: `false`
+- **说明**: 启用内存高效的流式加载。
+  - `false`: 传统模式，一次性加载所有 entries 到内存（适用于小型语料库 < 500MB）。
+  - `true`: 流式加载，分批读取和处理 entries，避免 OOM。
+
+**推荐场景**:
+- 语料库包含 10,000+ entries
+- `uaf-corpus.db` 文件大小 > 1GB
+- 每个 entry 包含大量 ReplayHistory 记录
+
+### `streaming_batch_size`
+- **类型**: `int`
+- **默认值**: 500
+- **说明**: 流式加载时每批处理的 entry 数量。
+  - 较小的值（100-200）: 内存占用更低，但 I/O 开销略高。
+  - 较大的值（500-1000）: I/O 效率更高，但内存峰值更高。
+
+**建议**: 根据可用内存调整。8GB RAM 建议 300-500，16GB RAM 可用 500-1000。
+
+### `skip_validated`
+- **类型**: `bool`
+- **默认值**: `false`
+- **说明**: 跳过已验证成功的 entries（存在于 `validated_uaf.db` 中）。
+  - `false`: 处理所有 entries，包括已验证的。
+  - `true`: 跳过已验证的 entries，避免重复工作。
+
+**使用场景**: 验证中断后重新启动时，避免重复处理已成功的 entries。
+
+### `skip_invalid`
+- **类型**: `bool`
+- **默认值**: `false`
+- **说明**: 跳过已标记为无效的 entries（存在于 `invalid_uaf.db` 中）。
+  - `false`: 处理所有 entries，包括已失败的。
+  - `true`: 跳过已知无效的 entries。
+
+**使用场景**: 避免重复尝试已知失败的 entries，节省资源。
+
+### `max_entries`
+- **类型**: `int`
+- **默认值**: 0（无限制）
+- **说明**: 限制加载的最大 entry 数量。
+  - `0`: 加载所有 entries。
+  - `> 0`: 仅加载前 N 个 entries。
+
+**使用场景**: 测试或调试时使用小规模子集。
+
+**示例配置**:
+```json
+{
+  "experimental": {
+    "uaf_validate": {
+      "streaming_load": true,
+      "streaming_batch_size": 300,
+      "skip_validated": true,
+      "skip_invalid": true,
+      "max_entries": 0
+    }
+  }
+}
+```
+
+---
+
 ## 调度策略
 
 ### `enable_varname_scheduling`
@@ -327,7 +396,7 @@
 | 文件 | 说明 |
 |------|------|
 | `uaf-corpus.db` | 源 corpus entries（来自 fuzzer） |
-| `uaf-validated.db` | 验证成功的 pairs 及详细信息 |
+| `validated_uaf.db` | 验证成功的 pairs 及详细信息 |
 | `invalid_uaf.db` | 验证失败的 pairs（用于跳过） |
 | `varname_hb_stats.db` | VarName pair 的 HB 统计信息 |
 

@@ -37,24 +37,26 @@ type uafMode struct {
 	historyBuffer *VMHistoryBuffers // Per-VM rolling buffers of recent barrier executions
 }
 
-// MaxStacksPerVarnamePair limits how many unique (callstack1, callstack2) combinations
-// are tracked for each (FreeAccessName, UseAccessName) pair.
+// DefaultMaxStacksPerVarnamePair is the default limit for unique (callstack1, callstack2)
+// combinations tracked for each (FreeAccessName, UseAccessName) pair.
 // This matches the M1'/M2/M3 framework design in dedup_races.py.
-const MaxStacksPerVarnamePair = 20
+// Can be overridden by config.MaxStacksPerVarNamePair.
+const DefaultMaxStacksPerVarnamePair = 20
 
 type uafCorpus struct {
-	mu                 sync.RWMutex
-	seeds              map[string]*UAFCorpusEntry
-	pairs              map[uint64]*ddrd.MayUAFPair
-	varnamePairs       map[uint64]struct{} // unique (FreeAccessName, UseAccessName) pairs
-	varnameStackCounts map[uint64]int      // count of stacks per varname pair
-	coverage           cover.Cover
-	statSeeds          *stat.Val
-	statSeedsWithHist  *stat.Val
-	statCover          *stat.Val
-	statPairs          *stat.Val
-	statVarnames       *stat.Val
-	statSkippedByLimit *stat.Val
+	mu                  sync.RWMutex
+	seeds               map[string]*UAFCorpusEntry
+	pairs               map[uint64]*ddrd.MayUAFPair
+	varnamePairs        map[uint64]struct{} // unique (FreeAccessName, UseAccessName) pairs
+	varnameStackCounts  map[uint64]int      // count of stacks per varname pair
+	maxStacksPerVarName int                 // configurable limit per varname pair
+	coverage            cover.Cover
+	statSeeds           *stat.Val
+	statSeedsWithHist   *stat.Val
+	statCover           *stat.Val
+	statPairs           *stat.Val
+	statVarnames        *stat.Val
+	statSkippedByLimit  *stat.Val
 }
 
 type barrierSeed struct {
@@ -142,21 +144,30 @@ func newUAFMode(f *Fuzzer) *uafMode {
 	if bufferSize <= 0 {
 		bufferSize = DefaultHistoryBufferSize
 	}
+	// Use configured max stacks per varname pair or default
+	maxStacksPerVarName := f.Config.MaxStacksPerVarNamePair
+	if maxStacksPerVarName <= 0 {
+		maxStacksPerVarName = DefaultMaxStacksPerVarnamePair
+	}
 	return &uafMode{
 		fuzzer:        f,
 		entries:       make(map[string]*barrierSeed),
-		corpus:        newUAFCorpus(),
+		corpus:        newUAFCorpus(maxStacksPerVarName),
 		pairs:         make(map[uint64]*ddrd.MayUAFPair),
 		historyBuffer: NewVMHistoryBuffers(bufferSize),
 	}
 }
 
-func newUAFCorpus() *uafCorpus {
+func newUAFCorpus(maxStacksPerVarName int) *uafCorpus {
+	if maxStacksPerVarName <= 0 {
+		maxStacksPerVarName = DefaultMaxStacksPerVarnamePair
+	}
 	uc := &uafCorpus{
-		seeds:              make(map[string]*UAFCorpusEntry),
-		pairs:              make(map[uint64]*ddrd.MayUAFPair),
-		varnamePairs:       make(map[uint64]struct{}),
-		varnameStackCounts: make(map[uint64]int),
+		seeds:               make(map[string]*UAFCorpusEntry),
+		pairs:               make(map[uint64]*ddrd.MayUAFPair),
+		varnamePairs:        make(map[uint64]struct{}),
+		varnameStackCounts:  make(map[uint64]int),
+		maxStacksPerVarName: maxStacksPerVarName,
 	}
 	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer (total)",
 		stat.Console, stat.Graph("uaf"), func() int {
@@ -216,7 +227,7 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry) {
 
 		// Check if this varname pair has reached the stack limit
 		currentCount := uc.varnameStackCounts[varnameID]
-		if currentCount >= MaxStacksPerVarnamePair {
+		if currentCount >= uc.maxStacksPerVarName {
 			// Skip this pair - already have enough stacks for this varname pair
 			if uc.statSkippedByLimit != nil {
 				uc.statSkippedByLimit.Add(1)
@@ -257,6 +268,26 @@ func (uc *uafCorpus) recordCoverage(info *flatrpc.ProgInfo) {
 	uc.mu.Lock()
 	uc.coverage.Merge(raw)
 	uc.mu.Unlock()
+}
+
+// recordCoverageWithDiff records coverage and returns newly discovered PCs.
+// Returns a Cover containing only the new PCs (empty if no new coverage).
+func (uc *uafCorpus) recordCoverageWithDiff(info *flatrpc.ProgInfo) cover.Cover {
+	if uc == nil {
+		return nil
+	}
+	raw := collectAllCoverage(info)
+	if len(raw) == 0 {
+		return nil
+	}
+	uc.mu.Lock()
+	newPCs := uc.coverage.MergeDiff(raw)
+	uc.mu.Unlock()
+
+	if len(newPCs) == 0 {
+		return nil
+	}
+	return cover.FromRaw(newPCs)
 }
 
 func (uc *uafCorpus) mergeCoverage(raw []uint64) {
@@ -485,7 +516,7 @@ func (u *uafMode) determineHistoryCount(pairs []*ddrd.MayUAFPair) int {
 		if pair == nil {
 			continue
 		}
-		isNewVarNamePair, isNewStack := u.fuzzer.raceGroup.CheckPairNewness(pair)
+		isNewVarNamePair, isNewStack, _ := u.fuzzer.raceGroup.CheckPairNewness(pair)
 		if isNewVarNamePair {
 			// New VarName pair: save full history
 			return newVarNamePairHistory
@@ -543,12 +574,13 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	// u.fuzzer.Logf(0, "uaf: queued coverage seed %s (total=%d)", key, u.count())
 }
 
-func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) {
+func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) cover.Cover {
 	if u == nil || res == nil || res.Info == nil || req == nil {
-		return
+		return nil
 	}
+	var newCover cover.Cover
 	if u.corpus != nil {
-		u.corpus.recordCoverage(res.Info)
+		newCover = u.corpus.recordCoverageWithDiff(res.Info)
 	}
 	// Record barrier execution history for replay (per-VM)
 	if u.historyBuffer != nil && len(req.BarrierPrograms) > 0 {
@@ -561,6 +593,7 @@ func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) {
 		// }
 	}
 	// u.updateMainCorpusCoverage(req, res.Info)
+	return newCover
 }
 
 // clearVMHistory clears the execution history for a specific VM.

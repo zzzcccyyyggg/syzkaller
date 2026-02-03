@@ -320,16 +320,29 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		mgr.reportedDataRaceCombinations = make(map[string]struct{})
 	}
 	if cfg.Experimental.UAFMode || cfg.Experimental.UAFValidate != nil {
-		store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
-		if err != nil {
-			log.Fatalf("failed to initialize uaf corpus store: %v", err)
-		}
-		mgr.uafStore = store
-		defer func() {
-			if err := store.Close(); err != nil {
-				log.Errorf("uaf corpus store close failed: %v", err)
+		// In streaming_load mode for uaf-validate, skip loading the full database at startup
+		// The streaming reader will load entries directly from the file later
+		validateCfg := cfg.Experimental.UAFValidate
+		skipFullLoad := validateCfg != nil && validateCfg.StreamingLoad
+
+		if skipFullLoad {
+			log.Logf(0, "uaf validation: streaming_load enabled, skipping full corpus load at startup")
+			// Create a placeholder store without loading the full database
+			mgr.uafStore = nil // Will use streaming reader directly
+		} else {
+			log.Logf(0, "uaf corpus: loading database (this may take a while for large files)...")
+			store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
+			if err != nil {
+				log.Fatalf("failed to initialize uaf corpus store: %v", err)
 			}
-		}()
+			mgr.uafStore = store
+			log.Logf(0, "uaf corpus: loaded %d entries", store.Count())
+			defer func() {
+				if err := store.Close(); err != nil {
+					log.Errorf("uaf corpus store close failed: %v", err)
+				}
+			}()
+		}
 	}
 	if *flagDebug {
 		mgr.cfg.Procs = mgr.cfg.Procs
@@ -1301,13 +1314,20 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				defer mgr.mu.Unlock()
 				return !mgr.saturatedCalls[call]
 			},
-			ModeKFuzzTest:         mgr.cfg.Experimental.EnableKFuzzTest,
-			ModeUAF:               mgr.cfg.Experimental.UAFMode,
-			BarrierMode:           mgr.cfg.Experimental.BarrierMode,
-			BarrierMask:           mgr.cfg.BarrierMask,
-			HistoryBufferSize:     mgr.cfg.Experimental.HistoryBufferSize,
-			NewVarNamePairHistory: mgr.cfg.Experimental.NewVarNamePairHistory,
-			NewStackHistory:       mgr.cfg.Experimental.NewStackHistory,
+			ModeKFuzzTest:                mgr.cfg.Experimental.EnableKFuzzTest,
+			ModeUAF:                      mgr.cfg.Experimental.UAFMode,
+			BarrierMode:                  mgr.cfg.Experimental.BarrierMode,
+			BarrierMask:                  mgr.cfg.BarrierMask,
+			HistoryBufferSize:            mgr.cfg.Experimental.HistoryBufferSize,
+			NewVarNamePairHistory:        mgr.cfg.Experimental.NewVarNamePairHistory,
+			NewStackHistory:              mgr.cfg.Experimental.NewStackHistory,
+			MaxStacksPerVarNamePair:      mgr.cfg.Experimental.MaxStacksPerVarNamePair,
+			NewVarNamePairAffinityWeight: mgr.cfg.Experimental.NewVarNamePairAffinityWeight,
+			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
+			CooldownThreshold:            mgr.cfg.Experimental.CooldownThreshold,
+			NewStackPenalty:              mgr.cfg.Experimental.NewStackPenalty,
+			NoDiscoveryPenalty:           mgr.cfg.Experimental.NoDiscoveryPenalty,
+			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)

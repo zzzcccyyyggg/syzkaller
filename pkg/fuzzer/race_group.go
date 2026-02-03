@@ -53,6 +53,22 @@ type RaceGroupConfig struct {
 	// Syscall Affinity Table
 	EnableAffinityTable bool    // Enable syscall affinity learning
 	AffinityWeight      float64 // Weight for affinity-based selection
+
+	// VarName Pair Registry
+	MaxStacksPerVarPair int // Max unique stack pairs per VarName pair (default: 100)
+
+	// Pair Cooldown Configuration
+	CooldownThreshold  int // Failure score threshold to enter cooldown (default: 20)
+	NewStackPenalty    int // Failure score penalty for new stack only (default: 1)
+	NoDiscoveryPenalty int // Failure score penalty for no discovery (default: 2)
+
+	// A/B Testing: Random Baseline Mode
+	// When enabled, disables all intelligent selection strategies:
+	// - M2 Bandit corpus selection → random
+	// - M1' Partner selection → random
+	// - Pair cooldown → disabled
+	// - Affinity learning → disabled
+	RandomBaselineMode bool
 }
 
 // DefaultRaceGroupConfig returns the default configuration.
@@ -74,7 +90,7 @@ func DefaultRaceGroupConfig() RaceGroupConfig {
 		HighYieldThreshold:      3,   // At least 3 race pairs to be high-yield
 
 		// Object-Level Linking
-		EnableObjectLinking: true,
+		EnableObjectLinking: true, // V2: Syscall variant unification (more effective)
 
 		// Solo Execution Cache
 		EnableSoloCache: true,
@@ -83,6 +99,9 @@ func DefaultRaceGroupConfig() RaceGroupConfig {
 		// Syscall Affinity Table
 		EnableAffinityTable: true,
 		AffinityWeight:      0.2, // 20% weight for affinity
+
+		// VarName Pair Registry
+		MaxStacksPerVarPair: DefaultMaxStacksPerVarPair, // 100 stacks per VarName pair
 	}
 }
 
@@ -115,6 +134,9 @@ type RaceGroupManager struct {
 	// Syscall Affinity Table
 	affinityTable *SyscallAffinityTable
 
+	// Pair Cooldown - prevents exhausted pairs from being re-selected
+	pairCooldown *PairCooldown
+
 	// Statistics
 	stats *RaceGroupStats
 }
@@ -142,7 +164,7 @@ func NewRaceGroupManager(config RaceGroupConfig) *RaceGroupManager {
 		racePrior:       NewRacePriorIndex(),
 		raceYield:       NewRaceYieldTracker(config.HighYieldThreshold),
 		bandit:          NewBanditCorpusSelector(),
-		varPairRegistry: NewVarNamePairRegistry(),
+		varPairRegistry: NewVarNamePairRegistry(config.MaxStacksPerVarPair),
 		stats:           newRaceGroupStats(),
 	}
 
@@ -160,6 +182,14 @@ func NewRaceGroupManager(config RaceGroupConfig) *RaceGroupManager {
 	if config.EnableAffinityTable {
 		mgr.affinityTable = NewSyscallAffinityTable()
 	}
+
+	// Initialize Pair Cooldown with configuration
+	cooldownConfig := PairCooldownConfig{
+		CooldownThreshold:  config.CooldownThreshold,
+		NewStackPenalty:    config.NewStackPenalty,
+		NoDiscoveryPenalty: config.NoDiscoveryPenalty,
+	}
+	mgr.pairCooldown = NewPairCooldownWithConfig(cooldownConfig)
 
 	return mgr
 }
@@ -196,9 +226,57 @@ func (mgr *RaceGroupManager) SelectProgramWithBandit(corpus []*prog.Prog, rnd *r
 }
 
 // RecordBanditExecution records execution result for bandit learning.
-// Returns the number of NEW unique VarName pairs discovered.
-func (mgr *RaceGroupManager) RecordBanditExecution(p *prog.Prog, pairs []*ddrd.MayUAFPair) int {
+// Returns:
+//   - newVarNamePairCount: number of NEW unique (FreeAccessName, UseAccessName) pairs discovered
+//   - newStackCount: number of new stacks discovered for existing VarName pairs
+func (mgr *RaceGroupManager) RecordBanditExecution(p *prog.Prog, pairs []*ddrd.MayUAFPair) (newVarNamePairCount, newStackCount int) {
+	// In random baseline mode, skip bandit feedback updates
+	if mgr.config.RandomBaselineMode {
+		return 0, 0
+	}
 	return mgr.bandit.RecordExecution(p, pairs)
+}
+
+// BoostBanditForNewCoverage gives an exploration bonus to programs that discovered new code coverage.
+// New coverage suggests the program triggers unexplored code paths, worth exploring for race detection.
+func (mgr *RaceGroupManager) BoostBanditForNewCoverage(p *prog.Prog) {
+	// In random baseline mode, skip bandit boost
+	if mgr.config.RandomBaselineMode {
+		return
+	}
+	if p == nil || mgr.bandit == nil {
+		return
+	}
+
+	sig := progSignature(p)
+	mgr.bandit.mu.Lock()
+	defer mgr.bandit.mu.Unlock()
+
+	params := mgr.bandit.getOrCreateParams(sig)
+	// Boost Alpha to give exploration priority
+	// New coverage = new code paths = potential for new VarName pairs
+	const explorationBonus = 2.0
+	params.Alpha += explorationBonus
+
+	log.Logf(0, "[BANDIT-BOOST] new coverage program boosted: alpha=%.1f beta=%.1f",
+		params.Alpha, params.Beta)
+}
+
+// RecordPairExecution records a (main, partner) execution result for cooldown tracking.
+// Uses three-tier penalty system based on discovery type.
+func (mgr *RaceGroupManager) RecordPairExecution(main, partner *prog.Prog, newVarNamePairCount, newStackCount int) {
+	// In random baseline mode, skip cooldown tracking
+	if mgr.config.RandomBaselineMode {
+		return
+	}
+	if mgr.pairCooldown != nil {
+		mgr.pairCooldown.RecordExecution(main, partner, newVarNamePairCount, newStackCount)
+	}
+}
+
+// GetPairCooldown returns the pair cooldown manager.
+func (mgr *RaceGroupManager) GetPairCooldown() *PairCooldown {
+	return mgr.pairCooldown
 }
 
 // GetKnownVarPairCount returns total unique VarName pairs discovered.
@@ -513,13 +591,21 @@ func (mgr *RaceGroupManager) SelectPartner(primary *prog.Prog, corpus []*prog.Pr
 
 	mgr.stats.StatPartnerSelections.Add(1)
 
-
-	// Debug log every 1000 selections
+	// Debug log every 1000 selections with key metrics
 	if mgr.stats.StatPartnerSelections.Val()%1000 == 0 {
 		racePriorSize := mgr.racePrior.Size()
 		highYieldCount := len(mgr.raceYield.GetHighYieldPrograms())
-		log.Logf(0, "[RACE-GROUP] partner_total=%d race_prior_size=%d high_yield_progs=%d", 
-			mgr.stats.StatPartnerSelections.Val(), racePriorSize, highYieldCount)
+		knownVarPairs := mgr.bandit.GetKnownVarPairCount()
+
+		// Pair cooldown stats
+		pairCount, totalCooldowns, activeCooldowns := 0, 0, 0
+		if mgr.pairCooldown != nil {
+			pairCount, totalCooldowns, activeCooldowns = mgr.pairCooldown.GetStats()
+		}
+
+		log.Logf(0, "[RACE-GROUP] partner_total=%d race_prior=%d high_yield=%d known_varnames=%d pair_tracked=%d cooldowns=%d/%d",
+			mgr.stats.StatPartnerSelections.Val(), racePriorSize, highYieldCount,
+			knownVarPairs, pairCount, activeCooldowns, totalCooldowns)
 	}
 	if !mgr.config.EnablePartnerSelection {
 		// Fallback to random selection with length filter
@@ -595,15 +681,22 @@ func (mgr *RaceGroupManager) selectRandomWithLengthFilter(primary *prog.Prog, co
 }
 
 // selectByScore uses weighted random selection based on pair scores.
-// Score = banditScore * lengthPenalty
+// Score = banditScore * lengthPenalty * affinityScore * pairPenalty
 // - banditScore: from M2 Thompson Sampling (higher = more race-productive)
 // - lengthPenalty: 1.0 for same length, decreases with length difference
+// - affinityScore: from SyscallAffinityTable (higher = more likely to interact)
+// - pairPenalty: from PairCooldown (0.01 if exhausted, 1.0 otherwise)
 func (mgr *RaceGroupManager) selectByScore(primary *prog.Prog, candidates []*prog.Prog, rnd *rand.Rand) *prog.Prog {
 	if len(candidates) == 0 {
 		return nil
 	}
 
 	primaryLen := len(primary.Calls)
+
+	// Decrement cooldown counters (once per selection round)
+	if mgr.pairCooldown != nil {
+		mgr.pairCooldown.DecrementCooldowns()
+	}
 
 	// Calculate scores for all candidates
 	type scoredProg struct {
@@ -630,8 +723,23 @@ func (mgr *RaceGroupManager) selectByScore(primary *prog.Prog, candidates []*pro
 			mgr.bandit.mu.RUnlock()
 		}
 
+		// Affinity score from SyscallAffinityTable (if available)
+		affinityScore := 1.0
+		if mgr.affinityTable != nil && mgr.config.EnableAffinityTable {
+			// Get affinity score: 0.5 (neutral) to 1.0 (high affinity)
+			rawAffinity := mgr.affinityTable.GetProgramAffinityScore(primary, p)
+			// Scale: 0.5 + rawAffinity * weight (so neutral programs get 0.5 + 0.5*0.2 = 0.6)
+			affinityScore = 0.5 + rawAffinity*mgr.config.AffinityWeight
+		}
+
+		// Pair penalty from PairCooldown (0.01 if in cooldown, 1.0 otherwise)
+		pairPenalty := 1.0
+		if mgr.pairCooldown != nil {
+			pairPenalty = mgr.pairCooldown.GetPenalty(primary, p)
+		}
+
 		// Combined score
-		score := banditScore * lengthPenalty
+		score := banditScore * lengthPenalty * affinityScore * pairPenalty
 		if score < mgr.config.MinPairScore {
 			continue // Skip low-scoring pairs
 		}
@@ -713,8 +821,10 @@ type BanditCorpusSelector struct {
 	betaParams map[string]*BetaParams
 	// prog signature -> the actual prog
 	progCache map[string]*prog.Prog
-	// Set of known VarName pairs (for uniqueness check)
+	// Set of known VarName pairs (for uniqueness check) - used for Alpha boost
 	knownVarPairs map[uint64]bool
+	// Set of known (VarName pair + stack pair) for stack tracking
+	knownStackPairs map[uint64]map[uint64]bool // varPairID -> set of stackPairID
 	// Initial prior: Beta(1, 1) = uniform
 	initialAlpha float64
 	initialBeta  float64
@@ -723,11 +833,12 @@ type BanditCorpusSelector struct {
 // NewBanditCorpusSelector creates a new bandit corpus selector.
 func NewBanditCorpusSelector() *BanditCorpusSelector {
 	return &BanditCorpusSelector{
-		betaParams:    make(map[string]*BetaParams),
-		progCache:     make(map[string]*prog.Prog),
-		knownVarPairs: make(map[uint64]bool),
-		initialAlpha:  1.0, // Beta(1,1) = uniform prior
-		initialBeta:   1.0,
+		betaParams:      make(map[string]*BetaParams),
+		progCache:       make(map[string]*prog.Prog),
+		knownVarPairs:   make(map[uint64]bool),
+		knownStackPairs: make(map[uint64]map[uint64]bool),
+		initialAlpha:    1.0, // Beta(1,1) = uniform prior
+		initialBeta:     1.0,
 	}
 }
 
@@ -755,10 +866,12 @@ func varNamePairID(varName1, varName2 uint64) uint64 {
 
 // RecordExecution records an execution result and updates Beta params.
 // pairs: the race pairs discovered in this execution (may be empty).
-// Returns the number of NEW unique VarName pairs discovered.
-func (bcs *BanditCorpusSelector) RecordExecution(p *prog.Prog, pairs []*ddrd.MayUAFPair) int {
+// Returns:
+//   - newVarNamePairCount: number of NEW unique (FreeAccessName, UseAccessName) pairs discovered
+//   - newStackCount: number of new stacks discovered for existing VarName pairs
+func (bcs *BanditCorpusSelector) RecordExecution(p *prog.Prog, pairs []*ddrd.MayUAFPair) (newVarNamePairCount, newStackCount int) {
 	if p == nil {
-		return 0
+		return 0, 0
 	}
 	sig := progSignature(p)
 
@@ -772,31 +885,59 @@ func (bcs *BanditCorpusSelector) RecordExecution(p *prog.Prog, pairs []*ddrd.May
 		bcs.progCache[sig] = p.Clone()
 	}
 
-	// Count NEW unique VarName pairs
-	newPairCount := 0
+	// Track Alpha boost from new stacks with harmonic decay
+	var stackAlphaBoost float64
+
+	// Count NEW unique VarName pairs and new stacks
 	for _, pair := range pairs {
 		if pair == nil {
 			continue
 		}
-		pairID := varNamePairID(pair.FreeAccessName, pair.UseAccessName)
-		if !bcs.knownVarPairs[pairID] {
-			bcs.knownVarPairs[pairID] = true
-			newPairCount++
+		varPairID := varNamePairID(pair.FreeAccessName, pair.UseAccessName)
+		stkPairID := stackPairID(pair.FreeCallStack, pair.UseCallStack)
+
+		if !bcs.knownVarPairs[varPairID] {
+			// New VarName pair (highest value)
+			bcs.knownVarPairs[varPairID] = true
+			// Also initialize stack tracking for this VarName pair
+			bcs.knownStackPairs[varPairID] = map[uint64]bool{stkPairID: true}
+			newVarNamePairCount++
+		} else {
+			// Existing VarName pair - check if stack is new
+			stacks := bcs.knownStackPairs[varPairID]
+			if stacks == nil {
+				stacks = make(map[uint64]bool)
+				bcs.knownStackPairs[varPairID] = stacks
+			}
+			if !stacks[stkPairID] {
+				// Calculate harmonic decay boost based on existing stack count
+				// Formula: 2.0 / (1 + existingStackCount)
+				// Cumulative: sum of 100 stacks ≈ 2 * ln(100) ≈ 10 (same as new VarName pair)
+				existingStackCount := len(stacks)
+				stackAlphaBoost += 2.0 / float64(1+existingStackCount)
+				stacks[stkPairID] = true
+				newStackCount++
+			}
 		}
 	}
 
-	// Update Beta distribution
-	if newPairCount > 0 {
-		// Success: discovered new unique pairs
-		params.Alpha += float64(newPairCount)
-		// log.Logf(0, "[M2-BANDIT] New VarName pairs discovered: %d, updated Alpha=%.1f Beta=%.1f, total known pairs=%d",
-		// 	newPairCount, params.Alpha, params.Beta, len(bcs.knownVarPairs))
+	// Update Beta distribution based on discovery type
+	if newVarNamePairCount > 0 {
+		// Highest value: discovered new VarName pairs
+		// Give significant Alpha boost (10 per new VarName pair)
+		params.Alpha += float64(newVarNamePairCount) * 10.0
+		// Also add any stack boost from the same execution
+		params.Alpha += stackAlphaBoost
+	} else if newStackCount > 0 {
+		// Medium value: discovered new stacks for existing VarName pairs
+		// Apply harmonic decay boost (already calculated above)
+		params.Alpha += stackAlphaBoost
 	} else {
-		// Failure: no new pairs discovered
+		// No new discovery: failure
 		params.Beta += 1.0
 	}
 
-	return newPairCount
+	return newVarNamePairCount, newStackCount
 }
 
 // sampleBeta samples from Beta(alpha, beta) distribution.
@@ -885,9 +1026,11 @@ func (bcs *BanditCorpusSelector) GetKnownVarPairCount() int {
 // VarName Pair Registry - Limits stacks per VarName pair (max 20)
 // ============================================================================
 
-// MaxStacksPerVarPair is the maximum number of different stack pairs to record
-// for each (VarName1, VarName2) combination.
-const MaxStacksPerVarPair = 20
+// DefaultMaxStacksPerVarPair is the default maximum number of different stack pairs
+// to record for each (VarName1, VarName2) combination.
+// With 100 stacks, the cumulative affinity bonus approaches BaseWeight
+// (using harmonic series: sum(1/n) for n=2..100 ≈ 4.6, scaled to match BaseWeight).
+const DefaultMaxStacksPerVarPair = 100
 
 // VarNamePairRegistry limits the number of stack pairs recorded per VarName pair.
 // This prevents unbounded growth while keeping diverse stack information.
@@ -895,12 +1038,20 @@ type VarNamePairRegistry struct {
 	mu sync.RWMutex
 	// varNamePairID -> set of stack pair IDs recorded for this VarName pair
 	stacksPerPair map[uint64]map[uint64]bool
+	// maxStacks is the maximum number of different stacks per VarName pair
+	maxStacks int
 }
 
 // NewVarNamePairRegistry creates a new VarName pair registry.
-func NewVarNamePairRegistry() *VarNamePairRegistry {
+// maxStacks specifies the maximum number of different stack pairs per VarName pair.
+// If maxStacks <= 0, DefaultMaxStacksPerVarPair (100) is used.
+func NewVarNamePairRegistry(maxStacks int) *VarNamePairRegistry {
+	if maxStacks <= 0 {
+		maxStacks = DefaultMaxStacksPerVarPair
+	}
 	return &VarNamePairRegistry{
 		stacksPerPair: make(map[uint64]map[uint64]bool),
+		maxStacks:     maxStacks,
 	}
 }
 
@@ -936,7 +1087,7 @@ func (reg *VarNamePairRegistry) ShouldRecord(pair *ddrd.MayUAFPair) bool {
 	count := len(stacks)
 	reg.mu.RUnlock()
 
-	return count < MaxStacksPerVarPair
+	return count < reg.maxStacks
 }
 
 // Record records a race pair. Returns true if it was recorded (new or under limit).
@@ -962,9 +1113,9 @@ func (reg *VarNamePairRegistry) Record(pair *ddrd.MayUAFPair) bool {
 		return false // Already recorded
 	}
 
-	if len(stacks) >= MaxStacksPerVarPair {
+	if len(stacks) >= reg.maxStacks {
 		// log.Logf(0, "[VARNAME-REG] Limit reached for VarName pair var1=0x%x var2=0x%x (max %d stacks)",
-		// 	pair.FreeAccessName, pair.UseAccessName, MaxStacksPerVarPair)
+		// 	pair.FreeAccessName, pair.UseAccessName, reg.maxStacks)
 		return false // At limit
 	}
 
@@ -990,14 +1141,15 @@ func (reg *VarNamePairRegistry) GetStats() (varPairCount, totalStackPairs int) {
 }
 
 // CheckNewness checks if a pair represents a new VarName pair or a new stack for an existing VarName pair.
-// Returns (isNewVarNamePair, isNewStack):
+// Returns (isNewVarNamePair, isNewStack, existingStackCount):
 //   - isNewVarNamePair: true if this is the first time seeing this (FreeAccessName, UseAccessName) combination
 //   - isNewStack: true if the VarName pair exists but this (FreeCallStack, UseCallStack) is new
+//   - existingStackCount: number of existing stacks for this VarName pair (0 if new VarName pair)
 //
-// Both return false if the exact pair (including stacks) has already been recorded.
-func (reg *VarNamePairRegistry) CheckNewness(pair *ddrd.MayUAFPair) (isNewVarNamePair, isNewStack bool) {
+// Both booleans return false if the exact pair (including stacks) has already been recorded.
+func (reg *VarNamePairRegistry) CheckNewness(pair *ddrd.MayUAFPair) (isNewVarNamePair, isNewStack bool, existingStackCount int) {
 	if reg == nil || pair == nil {
-		return false, false
+		return false, false, 0
 	}
 
 	varPairID := varNamePairID(pair.FreeAccessName, pair.UseAccessName)
@@ -1008,12 +1160,13 @@ func (reg *VarNamePairRegistry) CheckNewness(pair *ddrd.MayUAFPair) (isNewVarNam
 
 	stacks, exists := reg.stacksPerPair[varPairID]
 	if !exists {
-		return true, false // New VarName pair
+		return true, false, 0 // New VarName pair
 	}
+	existingStackCount = len(stacks)
 	if !stacks[stkPairID] {
-		return false, true // Existing VarName pair, new stack
+		return false, true, existingStackCount // Existing VarName pair, new stack
 	}
-	return false, false // Already recorded
+	return false, false, existingStackCount // Already recorded
 }
 
 // RaceYieldTracker tracks race pair yield per program for feedback-driven selection.
@@ -1205,10 +1358,10 @@ func (mgr *RaceGroupManager) GetVarPairStats() (varPairCount, totalStackPairs in
 }
 
 // CheckPairNewness checks if a pair is a new VarName pair or a new stack for existing VarName pair.
-// Returns (isNewVarNamePair, isNewStack).
-func (mgr *RaceGroupManager) CheckPairNewness(pair *ddrd.MayUAFPair) (bool, bool) {
+// Returns (isNewVarNamePair, isNewStack, existingStackCount).
+func (mgr *RaceGroupManager) CheckPairNewness(pair *ddrd.MayUAFPair) (bool, bool, int) {
 	if mgr == nil || mgr.varPairRegistry == nil {
-		return false, false
+		return false, false, 0
 	}
 	return mgr.varPairRegistry.CheckNewness(pair)
 }
@@ -1263,9 +1416,9 @@ func (mgr *RaceGroupManager) BuildBarrierProgramsWithRaceGuidance(
 		if partner == nil {
 			programs[i] = primary.Clone()
 		} else {
-			// Apply Object-Level Linking to ensure shared kernel objects
+			// Apply Object-Level Linking V2 to ensure shared kernel objects
 			if mgr.objectLinker != nil && mgr.config.EnableObjectLinking {
-				linkedPartner := mgr.objectLinker.LinkPrograms(primary, partner)
+				linkedPartner := mgr.objectLinker.LinkProgramsV2(primary, partner)
 				programs[i] = linkedPartner
 				// Note: ObjectLinker tracks its own stats internally
 			} else {
