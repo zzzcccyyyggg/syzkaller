@@ -3,6 +3,22 @@
 
 # Description of syscall arguments. See README.md for details.
 
+# ============================================================================
+# syz_delay - Timing control pseudo-syscall for race detection
+# ============================================================================
+# Introduces a controlled delay between syscalls to explore timing windows.
+# Used by the timing exploration queue to optimize race triggering.
+#
+# This syscall is inserted by the fuzzer's timing mutator to control
+# the relative timing of Free and Use operations in race conditions.
+#
+# Parameters:
+#   microseconds: delay duration in microseconds (0 to 10000000, i.e., 0-10s)
+#
+# Returns: 0 on success
+# ============================================================================
+syz_delay(microseconds intptr[0:10000000])
+
 include <linux/socket.h>
 include <linux/ptrace.h>
 include <linux/resource.h>

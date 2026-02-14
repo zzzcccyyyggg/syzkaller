@@ -108,11 +108,19 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
     return record_count;
 }
 
-int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
+// Default threshold in nanoseconds (2ms)
+#define DEFAULT_TIME_THRESHOLD_NS 2000000
+
+int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {
-    const uint64_t TIME_THRESHOLD = 2000000;
-    const uint64_t FAST_THRESHOLD = 2000000;
+    // Convert threshold from microseconds to nanoseconds
+    // If threshold_us is 0, use default 2ms threshold
+    const uint64_t TIME_THRESHOLD = (threshold_us > 0) ? (threshold_us * 1000) : DEFAULT_TIME_THRESHOLD_NS;
+    const uint64_t FAST_THRESHOLD = TIME_THRESHOLD; // Use same threshold for W-W pairs
     int pair_count = 0;
+
+    debug("[RACE-ANALYZE] Using threshold: %llu ns (%llu us)\n", 
+          (unsigned long long)TIME_THRESHOLD, (unsigned long long)(TIME_THRESHOLD / 1000));
 
     for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {
         for (int j = i + 1; j < record_ctx->record_count && pair_count < max_pairs; j++) {
@@ -196,6 +204,12 @@ int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs
     }
 
     return pair_count;
+}
+
+// Backward-compatible wrapper: uses default 2ms threshold
+int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
+{
+    return access_context_analyze_race_pairs_with_threshold(record_ctx, pairs, max_pairs, 0);
 }
 
 int access_context_analyze_uaf_pairs(AccessContext* record_ctx, UAFPair* uaf_pairs, int max_pairs)

@@ -216,6 +216,10 @@ table ExecRequestRaw {
 	ukc_is_valid	:bool;
 	// Flag to use FINE_LOG/FINE_MONITOR modes instead of normal LOG/MONITOR (for validation mode)
 	ukc_use_fine_mode	:bool;
+	// Dynamic timing threshold in microseconds for race pair detection.
+	// If > 0, overrides the hardcoded 2ms threshold in executor.
+	// Used by timing exploration queue to use widened threshold (e.g., 500ms).
+	timing_threshold_us	:int64;
 }
 
 table SignalUpdateRaw {

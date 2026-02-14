@@ -35,6 +35,7 @@ var (
 	flagSortTime       = flag.Bool("sort-time", false, "sort entries by timestamp (newest first)")
 	flagVarNames       = flag.Bool("varnames", false, "show distinct VarName pairs with counts")
 	flagVarNamesStacks = flag.Bool("varnames-stacks", false, "show distinct VarName pairs with unique callstack counts (sorted by stack count)")
+	flagSource         = flag.String("source", "", "filter by source: 'fuzz', 'timing', or '' for all")
 )
 
 type storedUAFCorpusEntry struct {
@@ -48,6 +49,7 @@ type storedUAFCorpusEntry struct {
 	ReplayPlan *storedReplayPlan      `json:"replay_plan,omitempty"`
 	Profile    *storedPairProfile     `json:"profile,omitempty"`
 	Timestamp  time.Time              `json:"timestamp"`
+	Source     int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
 }
 
 type storedReplayPlan struct {
@@ -156,6 +158,27 @@ func main() {
 		})
 	}
 	fmt.Fprintf(os.Stderr, "Loaded %d entries.\n", len(entries))
+
+	// Filter by source if requested
+	if *flagSource != "" {
+		var sourceFilter int
+		switch strings.ToLower(*flagSource) {
+		case "fuzz", "0":
+			sourceFilter = 0
+		case "timing", "1":
+			sourceFilter = 1
+		default:
+			tool.Failf("invalid -source value %q, use 'fuzz' or 'timing'", *flagSource)
+		}
+		var filtered []entryInfo
+		for _, e := range entries {
+			if e.Entry.Source == sourceFilter {
+				filtered = append(filtered, e)
+			}
+		}
+		fmt.Fprintf(os.Stderr, "Filtered to %d entries (source=%s).\n", len(filtered), *flagSource)
+		entries = filtered
+	}
 
 	if *flagSortTime {
 		sort.Slice(entries, func(i, j int) bool {
@@ -385,6 +408,7 @@ func printSummary(entries []entryInfo, dbPath string) {
 		withReplayPlan int
 		barrierSizes   = make(map[int]int)
 		accessTypes    = make(map[uint32]int)
+		sourceCounts   = make(map[int]int) // 0=fuzz, 1=timing
 	)
 
 	var earliest, latest time.Time
@@ -406,6 +430,7 @@ func printSummary(entries []entryInfo, dbPath string) {
 			withReplayPlan++
 		}
 		accessTypes[stored.Pair.UseAccessType]++
+		sourceCounts[stored.Source]++
 
 		if earliest.IsZero() || stored.Timestamp.Before(earliest) {
 			earliest = stored.Timestamp
@@ -426,6 +451,10 @@ func printSummary(entries []entryInfo, dbPath string) {
 	fmt.Printf("  With barrier:    %d (%.1f%%)\n", withBarrier, float64(withBarrier)*100/float64(len(entries)))
 	fmt.Printf("  With replay:     %d (%.1f%%)\n", withReplayPlan, float64(withReplayPlan)*100/float64(len(entries)))
 
+	fmt.Printf("\nSource breakdown:\n")
+	fmt.Printf("  Fuzz:   %d (%.1f%%)\n", sourceCounts[0], float64(sourceCounts[0])*100/float64(len(entries)))
+	fmt.Printf("  Timing: %d (%.1f%%)\n", sourceCounts[1], float64(sourceCounts[1])*100/float64(len(entries)))
+
 	fmt.Printf("\nBarrier group sizes:\n")
 	for size, count := range barrierSizes {
 		fmt.Printf("  Size %d: %d entries\n", size, count)
@@ -444,6 +473,17 @@ func printSummary(entries []entryInfo, dbPath string) {
 	}
 }
 
+func sourceName(source int) string {
+	switch source {
+	case 0:
+		return "fuzz"
+	case 1:
+		return "timing"
+	default:
+		return fmt.Sprintf("unknown(%d)", source)
+	}
+}
+
 func printEntries(entries []entryInfo, target *prog.Target) {
 	fmt.Printf("UAF Corpus Entries (%d total)\n", len(entries))
 	fmt.Printf("================================================================================\n\n")
@@ -455,6 +495,7 @@ func printEntries(entries []entryInfo, target *prog.Target) {
 		fmt.Printf("Key:       %s\n", e.Key)
 		fmt.Printf("Seq:       %d\n", e.Seq)
 		fmt.Printf("Timestamp: %s\n", stored.Timestamp.Format(time.RFC3339))
+		fmt.Printf("Source:    %s\n", sourceName(stored.Source))
 		fmt.Printf("CallIdx:   %d\n", stored.CallIdx)
 
 		if stored.Barrier.Participants != 0 || stored.Barrier.GroupSize > 0 {
@@ -571,6 +612,7 @@ func outputJSON(entries []entryInfo, target *prog.Target) {
 		Key        string                 `json:"key"`
 		Seq        uint64                 `json:"seq"`
 		Timestamp  string                 `json:"timestamp"`
+		Source     string                 `json:"source"`
 		CallIdx    int                    `json:"call_idx"`
 		Pair       *ddrd.MayUAFPair       `json:"pair,omitempty"`
 		Pairs      []ddrd.MayUAFPair      `json:"pairs,omitempty"`
@@ -588,6 +630,7 @@ func outputJSON(entries []entryInfo, target *prog.Target) {
 			Key:        e.Key,
 			Seq:        e.Seq,
 			Timestamp:  stored.Timestamp.Format(time.RFC3339),
+			Source:     sourceName(stored.Source),
 			CallIdx:    stored.CallIdx,
 			Barrier:    stored.Barrier,
 			ReplayPlan: stored.ReplayPlan,

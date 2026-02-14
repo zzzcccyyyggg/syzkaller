@@ -722,6 +722,13 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 			log.Logf(0, "rpcserver: setting UkcUseFineMode=true for validation request id=%d", id)
 		}
 	}
+	// Set timing threshold for widened threshold exploration
+	if req.TimingThresholdUs > 0 {
+		execReq.TimingThresholdUs = req.TimingThresholdUs
+		if runner.debug {
+			log.Logf(0, "rpcserver: setting TimingThresholdUs=%d for request id=%d", req.TimingThresholdUs, id)
+		}
+	}
 	msg := &flatrpc.HostMessage{
 		Msg: &flatrpc.HostMessages{
 			Type:  flatrpc.HostMessagesRawExecRequest,

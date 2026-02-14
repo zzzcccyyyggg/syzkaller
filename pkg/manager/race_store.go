@@ -34,6 +34,7 @@ type storedUAFCorpusEntry struct {
 	Profile       *storedPairProfile     `json:"profile,omitempty"`
 	ReplayHistory []storedBarrierRecord  `json:"replay_history,omitempty"`
 	Timestamp     time.Time              `json:"timestamp"`
+	Source        int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
 }
 
 type storedReplayPlan struct {
@@ -212,6 +213,7 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 		Signals:   entry.SignalsSlice(),
 		Barrier:   entry.Barrier,
 		Timestamp: entry.Timestamp,
+		Source:    int(entry.Source),
 	}
 	if len(entry.Pairs) != 0 {
 		stored.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
@@ -316,6 +318,7 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		Signals:       sliceToSignal(stored.Signals),
 		Barrier:       stored.Barrier,
 		Timestamp:     stored.Timestamp,
+		Source:        fuzzer.PairSource(stored.Source),
 	}
 	if len(stored.Pairs) != 0 {
 		entry.Pairs = make([]*ddrd.MayUAFPair, 0, len(stored.Pairs))

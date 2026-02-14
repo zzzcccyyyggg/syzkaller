@@ -37,6 +37,12 @@ type Fuzzer struct {
 	// Race-Guided Program-Group Fuzzing
 	raceGroup *RaceGroupManager
 
+	// Dual-Queue Timing Exploration System
+	timingScheduler *TimingScheduler
+
+	// Unified pair evaluator for timing exploration and corpus saving decisions
+	pairEvaluator *PairEvaluator
+
 	uafBootstrapDone atomic.Bool
 
 	ctx          context.Context
@@ -89,25 +95,78 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		if cfg.MaxStacksPerVarNamePair > 0 {
 			raceConfig.MaxStacksPerVarPair = cfg.MaxStacksPerVarNamePair
 		}
-		// Override PairCooldown configuration if set
-		if cfg.CooldownThreshold > 0 {
-			raceConfig.CooldownThreshold = cfg.CooldownThreshold
-		}
-		if cfg.NewStackPenalty > 0 {
-			raceConfig.NewStackPenalty = cfg.NewStackPenalty
-		}
-		if cfg.NoDiscoveryPenalty > 0 {
-			raceConfig.NoDiscoveryPenalty = cfg.NoDiscoveryPenalty
-		}
 		// Random Baseline Mode: disable all intelligent strategies
 		if cfg.RandomBaselineMode {
 			raceConfig.RandomBaselineMode = true
-			raceConfig.EnablePartnerSelection = false
-			raceConfig.EnableRaceYieldFeedback = false
 			raceConfig.EnableAffinityTable = false
-			log.Logf(0, "[RANDOM-BASELINE] Race-guided strategies DISABLED for A/B testing")
+			// Also disable timing exploration for pure random baseline
+			cfg.EnableTimingExploration = false
+			log.Logf(0, "[RANDOM-BASELINE] Race-guided strategies DISABLED for A/B testing (including timing exploration)")
 		}
 		f.raceGroup = NewRaceGroupManager(raceConfig)
+
+		// Initialize Dual-Queue Timing Exploration System
+		timingConfig := DefaultTimingExplorationConfig()
+		// Override with user configuration
+		if cfg.EnableTimingExploration {
+			timingConfig.EnableTimingExploration = true
+		}
+		if cfg.TimingExplorationQueueSize > 0 {
+			timingConfig.TimingExplorationQueueSize = cfg.TimingExplorationQueueSize
+		}
+		if cfg.TimingExplorationRatio > 0 {
+			timingConfig.TimingExplorationRatio = cfg.TimingExplorationRatio
+		}
+		if cfg.DelayMinMicros > 0 {
+			timingConfig.DelayMinMicros = cfg.DelayMinMicros
+		}
+		if cfg.DelayMaxMicros > 0 {
+			timingConfig.DelayMaxMicros = cfg.DelayMaxMicros
+		}
+		if cfg.MaxDelaysPerProgram > 0 {
+			timingConfig.MaxDelaysPerProgram = cfg.MaxDelaysPerProgram
+		}
+		if cfg.TimingMutationStrategy != "" {
+			timingConfig.TimingMutationStrategy = cfg.TimingMutationStrategy
+		}
+		if cfg.WidenedThresholdMicros > 0 {
+			timingConfig.WidenedThresholdMicros = cfg.WidenedThresholdMicros
+		}
+		if cfg.MaxAttemptsPerPair > 0 {
+			timingConfig.MaxAttemptsPerPair = cfg.MaxAttemptsPerPair
+		}
+		if cfg.MaxCorpusCountPerVarName > 0 {
+			timingConfig.MaxCorpusCountPerVarName = cfg.MaxCorpusCountPerVarName
+		}
+		if cfg.SuccessThreshold > 0 {
+			timingConfig.SuccessThreshold = cfg.SuccessThreshold
+		}
+		if cfg.ExecutionsPerAttempt > 0 {
+			timingConfig.ExecutionsPerAttempt = cfg.ExecutionsPerAttempt
+		}
+		f.timingScheduler = NewTimingScheduler(
+			target,
+			timingConfig,
+			f.raceGroup.GetVarPairRegistry(),
+			rnd,
+		)
+
+		// Create unified pair evaluator
+		evaluatorConfig := PairEvaluatorConfig{
+			MaxCorpusCountPerVarName: timingConfig.MaxCorpusCountPerVarName,
+			MaxTimingAttemptsPerPair: timingConfig.MaxAttemptsPerPair,
+			MaxStacksPerVarName:      cfg.MaxStacksPerVarNamePair,
+		}
+		f.pairEvaluator = NewPairEvaluator(evaluatorConfig, f.raceGroup.GetVarPairRegistry())
+
+		// Set corpus count checker for both scheduler and evaluator
+		if f.uaf != nil {
+			f.timingScheduler.SetCorpusCountChecker(f.uaf.GetVarNamePairCount)
+			f.pairEvaluator.SetCorpusCounter(f.uaf.GetVarNamePairCount)
+		}
+		log.Logf(0, "[TIMING] Dual-queue timing exploration initialized: queue_size=%d, ratio=%.2f, delays=%d-%dμs, max_corpus_per_varname=%d",
+			timingConfig.TimingExplorationQueueSize, timingConfig.TimingExplorationRatio,
+			timingConfig.DelayMinMicros, timingConfig.DelayMaxMicros, timingConfig.MaxCorpusCountPerVarName)
 	}
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
@@ -115,6 +174,29 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	if cfg.Debug {
 		go f.logCurrentStats()
 	}
+
+	// Register ddrd.Store-based stats for source tracking
+	stat.New("ddrd pairs total", "Total unique pairs in ddrd.Store",
+		stat.Console, stat.Graph("ddrd"), func() int {
+			return f.ddrd.Count()
+		})
+	stat.New("ddrd pairs fuzz", "Pairs from normal fuzzing",
+		stat.Console, stat.Graph("ddrd"), func() int {
+			return f.ddrd.CountFromFuzz()
+		})
+	stat.New("ddrd pairs timing", "Pairs from timing exploration (validated)",
+		stat.Console, stat.Graph("ddrd"), func() int {
+			return f.ddrd.CountFromTiming()
+		})
+	stat.New("ddrd varnames fuzz", "Varnames from normal fuzzing",
+		stat.Console, stat.Graph("ddrd"), func() int {
+			return f.ddrd.CountVarnamesFromFuzz()
+		})
+	stat.New("ddrd varnames timing", "Varnames from timing exploration",
+		stat.Console, stat.Graph("ddrd"), func() int {
+			return f.ddrd.CountVarnamesFromTiming()
+		})
+
 	return f
 }
 
@@ -156,6 +238,23 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		// Set the smash queue for uaf mode to submit barrier requests
 		fuzzer.uaf.setQueue(ret.smashQueue)
 		sources = append(sources, ret.triageQueue)
+
+		// Add timing exploration source if enabled
+		if fuzzer.timingScheduler != nil && fuzzer.timingScheduler.Config().EnableTimingExploration {
+			// Timing exploration runs at configured ratio (e.g., 10% of the time)
+			// Use skipQueue based on ratio: ratio=0.1 means run every ~10 jobs
+			timingSkip := 10 // Default: run 1 in 10 jobs
+			if fuzzer.timingScheduler.Config().TimingExplorationRatio > 0 {
+				timingSkip = int(1.0 / fuzzer.timingScheduler.Config().TimingExplorationRatio)
+				if timingSkip < 1 {
+					timingSkip = 1
+				}
+			}
+			sources = append(sources,
+				queue.Alternate(queue.Callback(fuzzer.genTimingExploration), timingSkip),
+			)
+		}
+
 		sources = append(sources,
 			queue.Alternate(ret.smashQueue, skipQueue),
 			queue.Callback(fuzzer.genFuzz),
@@ -227,14 +326,22 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 	}
 
 	if fuzzer.uaf != nil && flags == ProgBarrier {
-		// 先保存所有 barrier 执行收集到的 pairs
-		// 然后如果有新 pairs，触发 solo 过滤 job 来去除非跨程序的 pairs
-		if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
-			// 检查是否有新的 pairs（通过检查是否被添加到 ddrd store）
-			newPairs := fuzzer.ddrd.Add(res.Ddrd)
-			if len(newPairs) > 0 {
-				// 有新 pairs，触发 solo 过滤
-				fuzzer.triggerSoloFilter(req, res, newPairs)
+		// Check if this is a timing exploration result
+		isTimingExploration := req.IsTimingExploration && req.TimingExplorationInfo != nil
+		if isTimingExploration {
+			// Timing exploration: let processTimingExplorationResult handle pair tracking
+			// - Phase 1: Don't add pairs (just discover candidates)
+			// - Phase 2: Add pairs with SourceTiming only if validated
+			fuzzer.processTimingExplorationResult(req, res)
+		} else {
+			// Normal fuzzing: add pairs with SourceFuzz
+			if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
+				// 检查是否有新的 pairs（通过检查是否被添加到 ddrd store）
+				newPairs := fuzzer.ddrd.AddWithSource(res.Ddrd, ddrd.SourceFuzz)
+				if len(newPairs) > 0 {
+					// 有新 pairs，触发 solo 过滤
+					fuzzer.triggerSoloFilter(req, res, newPairs, SourceFuzz)
+				}
 			}
 		}
 		// 记录执行并检测新覆盖率（pair 级别）
@@ -343,12 +450,34 @@ type Config struct {
 	MaxStacksPerVarNamePair      int // Max unique stack pairs per VarName pair (default: 20)
 	NewVarNamePairAffinityWeight int // Affinity weight for new VarName pair (default: 5)
 	NewStackAffinityWeight       int // Affinity weight for new stack (default: 1)
-	// PairCooldown configuration
-	CooldownThreshold  int // Failure score threshold to enter cooldown (default: 20)
-	NewStackPenalty    int // Failure score penalty for new stack only (default: 1)
-	NoDiscoveryPenalty int // Failure score penalty for no discovery (default: 2)
 	// A/B Testing
 	RandomBaselineMode bool // Disable all race-guided strategies for baseline comparison
+
+	// ======== Dual-Queue Timing Exploration Configuration ========
+	// EnableTimingExploration enables the timing exploration queue
+	EnableTimingExploration bool
+	// TimingExplorationQueueSize is the max size of the timing exploration queue
+	TimingExplorationQueueSize int
+	// TimingExplorationRatio is the fraction of executions for timing exploration (0.0-1.0)
+	TimingExplorationRatio float64
+	// DelayMinMicros is the minimum delay in microseconds for syz_delay()
+	DelayMinMicros int64
+	// DelayMaxMicros is the maximum delay in microseconds for syz_delay()
+	DelayMaxMicros int64
+	// MaxDelaysPerProgram limits syz_delay() calls per program
+	MaxDelaysPerProgram int
+	// TimingMutationStrategy: "random", "targeted", "binary_search", "timediff"
+	TimingMutationStrategy string
+	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds)
+	WidenedThresholdMicros int64
+	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair
+	MaxAttemptsPerPair int
+	// MaxCorpusCountPerVarName: skip timing exploration if VarName pair has this many corpus entries
+	MaxCorpusCountPerVarName int
+	// SuccessThreshold is the trigger rate threshold to consider exploration successful (0.0-1.0)
+	SuccessThreshold float64
+	// ExecutionsPerAttempt is how many times to execute each delay plan
+	ExecutionsPerAttempt int
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -460,6 +589,268 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	return req
 }
 
+// genTimingExploration generates a timing exploration request.
+// Two-phase strategy:
+// - Phase 1 (PhaseWidenedDiscovery): Use widened threshold to discover candidate pairs (don't save)
+// - Phase 2 (PhaseValidation): Insert delays, use NORMAL threshold to validate (save if successful)
+func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
+	if fuzzer.timingScheduler == nil {
+		return nil
+	}
+
+	// Try to get the next timing exploration job
+	job := fuzzer.timingScheduler.GetNextJob()
+	if job == nil {
+		// No jobs available, fall back to regular fuzzing
+		return nil
+	}
+
+	// Get thresholds
+	widenedThreshold := fuzzer.timingScheduler.Config().WidenedThresholdMicros
+	normalThreshold := int64(0) // 0 means use default (2ms in executor)
+
+	// Determine phase based on whether delay plan exists
+	// Phase 1: no delays, use widened threshold (discovery)
+	// Phase 2: has delays, use normal threshold (validation)
+	phase := queue.PhaseWidenedDiscovery
+	threshold := widenedThreshold
+	if len(job.DelayPlan) > 0 {
+		phase = queue.PhaseValidation
+		threshold = normalThreshold // Use normal threshold for validation
+	}
+
+	phaseStr := "DISCOVERY"
+	if phase == queue.PhaseValidation {
+		phaseStr = "VALIDATION"
+	}
+
+	log.Logf(1, "[TIMING-EXPLORE] Phase=%s, attempt=%d, delays=%d, pair=0x%x/0x%x, threshold=%dus",
+		phaseStr, job.AttemptNumber, len(job.DelayPlan),
+		job.TargetPair.UseAccessName, job.TargetPair.FreeAccessName, threshold)
+
+	// Convert delay plan to queue format
+	var delayInsertions []queue.DelayInsertion
+	for _, d := range job.DelayPlan {
+		delayInsertions = append(delayInsertions, queue.DelayInsertion{
+			ProgIdx:     d.ProgIdx,
+			BeforeCall:  d.BeforeCall,
+			DelayMicros: d.DelayMicros,
+		})
+	}
+
+	// Create the request
+	req := &queue.Request{
+		Prog:                job.Prog1,
+		ExecOpts:            flatrpc.ExecOpts{},
+		Stat:                fuzzer.statExecFuzz,
+		TimingThresholdUs:   threshold,
+		IsTimingExploration: true,
+		TimingExplorationInfo: &queue.TimingExplorationInfo{
+			Phase:          phase,
+			TargetPair:     job.TargetPair,
+			AttemptNumber:  job.AttemptNumber,
+			DelayPlan:      delayInsertions,
+			OriginalProg1:  job.OriginalProg1,
+			OriginalProg2:  job.OriginalProg2,
+			CandidatePairs: job.CandidatePairs, // Pass candidate pairs from Phase 1
+		},
+	}
+
+	// Apply barrier mode for the timing exploration
+	if fuzzer.uafReady() && fuzzer.Config.BarrierMode {
+		mask := fuzzer.Config.BarrierMask
+		if mask != 0 {
+			req.SetBarrier(mask)
+			// Set barrier programs: mutated prog1 and prog2
+			programs := []*prog.Prog{job.Prog1, job.Prog2}
+			if err := req.SetBarrierPrograms(programs); err != nil {
+				log.Logf(0, "[TIMING-EXPLORE] Failed to set barrier programs: %v", err)
+				return nil
+			}
+			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+			req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
+		}
+	}
+
+	flags := ProgFlags(ProgBarrier)
+	fuzzer.prepare(req, flags, 0)
+
+	// Record timing exploration metrics
+	fuzzer.timingScheduler.RecordJobExecution(job)
+
+	return req
+}
+
+// processTimingExplorationResult handles the result of a timing exploration job.
+// Two-phase strategy:
+// - Phase 1 (Discovery): Found candidates with widened threshold → enqueue for Phase 2 (don't save)
+// - Phase 2 (Validation): Confirmed with normal threshold + delays → SAVE programs
+func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *queue.Result) {
+	info := req.TimingExplorationInfo
+	if info == nil {
+		return
+	}
+
+	targetPair := info.TargetPair
+	pairsFound := 0
+
+	// Check if we found any pairs in this execution
+	if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
+		pairsFound = len(res.Ddrd.UAFPairs)
+	}
+
+	// Check if we successfully triggered the target pair
+	triggeredTarget := false
+	if targetPair != nil && res.Ddrd != nil {
+		for _, p := range res.Ddrd.UAFPairs {
+			if p.UseAccessName == targetPair.UseAccessName &&
+				p.FreeAccessName == targetPair.FreeAccessName {
+				triggeredTarget = true
+				break
+			}
+		}
+	}
+
+	// Build delay description for logging
+	var delayDesc string
+	for i, d := range info.DelayPlan {
+		if i > 0 {
+			delayDesc += ", "
+		}
+		delayDesc += fmt.Sprintf("prog%d[%d]=%dμs", d.ProgIdx, d.BeforeCall, d.DelayMicros)
+	}
+
+	switch info.Phase {
+	case queue.PhaseWidenedDiscovery:
+		// Phase 1: Discovery with widened threshold
+		// Collect candidate pairs (new ones we haven't seen before) - don't add them yet!
+		var candidatePairs []*ddrd.MayUAFPair
+		if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
+			for _, p := range res.Ddrd.UAFPairs {
+				if fuzzer.ddrd.IsNewPair(p) {
+					candidatePairs = append(candidatePairs, p)
+				}
+			}
+		}
+
+		// Don't save programs yet, just log and enqueue for validation
+		if len(candidatePairs) > 0 || triggeredTarget {
+			log.Logf(0, "[TIMING-EXPLORE-PHASE1] CANDIDATES FOUND: attempt=%d, target=0x%x/0x%x, candidates=%d, total=%d",
+				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName,
+				len(candidatePairs), pairsFound)
+
+			// Enqueue for Phase 2 validation with delays
+			if fuzzer.timingScheduler != nil && len(req.BarrierPrograms) >= 2 {
+				// Pass candidate pairs to scheduler for validation
+				fuzzer.timingScheduler.EnqueueForValidation(
+					req.BarrierPrograms[0],
+					req.BarrierPrograms[1],
+					targetPair,
+					candidatePairs,
+				)
+			}
+		} else {
+			log.Logf(1, "[TIMING-EXPLORE-PHASE1] No candidates: attempt=%d, target=0x%x/0x%x, pairs=%d",
+				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName, pairsFound)
+		}
+
+	case queue.PhaseValidation:
+		// Phase 2: Validation with normal threshold + delays
+		// Use candidate pairs from Phase 1 (passed via info.CandidatePairs)
+		// Also check for any new pairs discovered in this execution
+		candidatePairs := info.CandidatePairs // Pairs from Phase 1
+
+		// Check if Phase 2 also discovered new pairs not in Phase 1 candidates
+		if res.Ddrd != nil && len(res.Ddrd.UAFPairs) > 0 {
+			for _, p := range res.Ddrd.UAFPairs {
+				if fuzzer.ddrd.IsNewPair(p) {
+					// Check if this pair is already in Phase 1 candidates
+					found := false
+					for _, cp := range candidatePairs {
+						if cp.UAFPairID() == p.UAFPairID() {
+							found = true
+							break
+						}
+					}
+					if !found {
+						candidatePairs = append(candidatePairs, p)
+					}
+				}
+			}
+		}
+
+		// Filter candidates using PairEvaluator before saving
+		// This prevents wasting resources on VarName pairs that already have enough corpus entries
+		originalCount := len(candidatePairs)
+		if fuzzer.pairEvaluator != nil && len(candidatePairs) > 0 {
+			candidatePairs, _ = fuzzer.pairEvaluator.FilterCandidates(candidatePairs)
+			if filteredOut := originalCount - len(candidatePairs); filteredOut > 0 {
+				log.Logf(1, "[TIMING-EXPLORE-PHASE2] Filtered %d/%d candidates (corpus limit reached)",
+					filteredOut, originalCount)
+			}
+		}
+
+		// NOW we save programs if successful (have candidates or triggered target)
+		if len(candidatePairs) > 0 || triggeredTarget {
+			log.Logf(0, "[TIMING-EXPLORE-PHASE2-SUCCESS] VALIDATED with delays: attempt=%d, target=0x%x/0x%x, triggered=%v, new_pairs=%d, delays=[%s]",
+				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName,
+				triggeredTarget, len(candidatePairs), delayDesc)
+
+			// NOW save the programs with syz_delay to corpus
+			if len(req.BarrierPrograms) >= 2 {
+				for i, p := range req.BarrierPrograms {
+					if p != nil {
+						log.Logf(0, "[TIMING-EXPLORE-SAVE] Saving validated prog%d with delays to corpus (len=%d calls)", i, len(p.Calls))
+						fuzzer.Config.Corpus.Save(corpus.NewInput{
+							Prog: p.Clone(),
+							Call: -1,
+						})
+					}
+				}
+			}
+
+			// Add validated pairs to the store with timing source and trigger solo filter
+			if len(candidatePairs) > 0 {
+				for _, p := range candidatePairs {
+					fuzzer.ddrd.AddPairWithSource(p, ddrd.SourceTiming)
+				}
+				// Trigger solo filter for the new pairs
+				fuzzer.triggerSoloFilter(req, res, candidatePairs, SourceTiming)
+			}
+
+			// Report success to timing scheduler
+			if fuzzer.timingScheduler != nil {
+				result := &TimingExplorationResult{
+					Job: &TimingExplorationJob{
+						TargetPair:    targetPair,
+						AttemptNumber: info.AttemptNumber,
+					},
+					TriggeredNewPairs: true,
+					NewPairs:          candidatePairs,
+					SuccessRate:       1.0,
+				}
+				fuzzer.timingScheduler.OnJobCompleted(result)
+			}
+		} else {
+			log.Logf(1, "[TIMING-EXPLORE-PHASE2-FAIL] Not validated with delays: attempt=%d, target=0x%x/0x%x, pairs=%d, delays=[%s]",
+				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName, pairsFound, delayDesc)
+
+			// Report failure to timing scheduler
+			if fuzzer.timingScheduler != nil {
+				result := &TimingExplorationResult{
+					Job: &TimingExplorationJob{
+						TargetPair:    targetPair,
+						AttemptNumber: info.AttemptNumber,
+					},
+					TriggeredNewPairs: false,
+					SuccessRate:       0.0,
+				}
+				fuzzer.timingScheduler.OnJobCompleted(result)
+			}
+		}
+	}
+}
+
 func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 	if req == nil {
 		return
@@ -490,34 +881,12 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 		return nil
 	}
 
-	// Use Race-Guided Partner Selection if available
-	if fuzzer.raceGroup != nil {
-		corpus := fuzzer.Config.Corpus.Programs()
-		rnd := fuzzer.rand()
-		programs := fuzzer.raceGroup.BuildBarrierProgramsWithRaceGuidance(req.Prog, count, corpus, rnd)
-
-		// Sync ObjectLinker stats to Fuzzer stats
-		if ol := fuzzer.raceGroup.GetObjectLinker(); ol != nil {
-			_, successes, _ := ol.GetStats()
-			if successes > 0 {
-				// Update only the delta
-				currentVal := int(fuzzer.statObjectLinkings.Val())
-				delta := successes - currentVal
-				if delta > 0 {
-					fuzzer.statObjectLinkings.Add(delta)
-				}
-			}
-		}
-
-		return programs
-	}
-
-	// Fallback to original random selection
 	programs := make([]*prog.Prog, count)
 	programs[0] = req.Prog
 	if count == 1 {
 		return programs
 	}
+
 	rnd := fuzzer.rand()
 	for i := 1; i < count; i++ {
 		candidate := fuzzer.Config.Corpus.ChooseProgram(rnd)
@@ -525,8 +894,30 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 			programs[i] = req.Prog.Clone()
 			continue
 		}
-		programs[i] = candidate.Clone()
+		partner := candidate.Clone()
+		// Apply Object-Level Linking V2 to ensure shared kernel objects
+		if fuzzer.raceGroup != nil {
+			if ol := fuzzer.raceGroup.GetObjectLinker(); ol != nil {
+				partner = ol.LinkProgramsV2(req.Prog, partner)
+			}
+		}
+		programs[i] = partner
 	}
+
+	// Sync ObjectLinker stats to Fuzzer stats
+	if fuzzer.raceGroup != nil {
+		if ol := fuzzer.raceGroup.GetObjectLinker(); ol != nil {
+			_, successes, _ := ol.GetStats()
+			if successes > 0 {
+				currentVal := int(fuzzer.statObjectLinkings.Val())
+				delta := successes - currentVal
+				if delta > 0 {
+					fuzzer.statObjectLinkings.Add(delta)
+				}
+			}
+		}
+	}
+
 	for i := range programs {
 		if programs[i] == nil {
 			programs[i] = req.Prog.Clone()
@@ -538,7 +929,7 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 // triggerSoloFilter starts a solo filter job to remove non-cross-program pairs.
 // This is called after barrier execution discovers new pairs.
 // The job executes prog1 solo and prog2 solo, then filters out pairs that also appear in solo runs.
-func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, newPairs []*ddrd.MayUAFPair) {
+func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, newPairs []*ddrd.MayUAFPair, source PairSource) {
 	if req == nil || len(req.BarrierPrograms) < 2 || len(newPairs) == 0 {
 		return
 	}
@@ -565,6 +956,7 @@ func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, n
 			Name: "solo-filter",
 			Type: "solo-filter",
 		},
+		source:       source,
 	}
 	fuzzer.startJob(fuzzer.statJobsSoloFilter, job)
 }

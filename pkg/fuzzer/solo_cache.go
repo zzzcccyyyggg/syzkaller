@@ -5,6 +5,7 @@ package fuzzer
 
 import (
 	"sync"
+	"time"
 
 	"github.com/google/syzkaller/prog"
 )
@@ -189,26 +190,9 @@ func (c *SoloPairCache) removeFromOrder(sig string) {
 	}
 }
 
-// currentTimestamp returns the current Unix timestamp.
+// currentTimestamp returns the current Unix timestamp for LRU ordering.
 func currentTimestamp() int64 {
-	return int64(0) // Simplified; use time.Now().Unix() in production
+	return time.Now().Unix()
 }
 
-// ============================================================================
-// Program Signature for Caching
-// ============================================================================
 
-// programSignatureForCache generates a cache key for a program.
-// This uses a more stable signature than progSignature() for better cache hits.
-func programSignatureForCache(p *prog.Prog) string {
-	if p == nil {
-		return ""
-	}
-
-	// Use the first 128 bytes of serialized form
-	data := p.Serialize()
-	if len(data) > 128 {
-		data = data[:128]
-	}
-	return string(data)
-}

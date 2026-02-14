@@ -58,16 +58,8 @@ func genProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
 }
 
 func mutateProgRequest(fuzzer *Fuzzer, rnd *rand.Rand) *queue.Request {
-	var p *prog.Prog
-
-	// M2: Race-Yield Weighted Selection
-	// If race group manager is available, use race-yield feedback for selection
-	if fuzzer.raceGroup != nil {
-		corpus := fuzzer.Config.Corpus.Programs()
-		p = fuzzer.raceGroup.ChooseProgramWithFeedback(corpus, rnd)
-	} else {
-		p = fuzzer.Config.Corpus.ChooseProgram(rnd)
-	}
+	// Random corpus selection (M2 Thompson Sampling removed — caused over-exploitation)
+	p := fuzzer.Config.Corpus.ChooseProgram(rnd)
 
 	if p == nil {
 		return nil
@@ -242,8 +234,7 @@ func (job *triageJob) handleCall(call int, info *triageCall) {
 	}
 	job.fuzzer.Config.Corpus.Save(input)
 
-	// M1: Update namespace index when new programs are added to corpus
-	// Note: BoostBanditForNewCoverage is now handled by coverageTriageJob for UAF mode pairs
+	// Update namespace index when new programs are added to corpus
 	if job.fuzzer.raceGroup != nil {
 		job.fuzzer.raceGroup.UpdateNamespaceIndex(p)
 	}
@@ -664,6 +655,7 @@ type soloFilterJob struct {
 	stat         *stat.Val
 	fuzzer       *Fuzzer
 	info         *JobInfo
+	source       PairSource // source of the pairs (fuzz or timing)
 }
 
 func (job *soloFilterJob) run(fuzzer *Fuzzer) {
@@ -685,22 +677,15 @@ func (job *soloFilterJob) run(fuzzer *Fuzzer) {
 	log.Logf(1, "[SOLO-FILTER] filtered: %d cross-program pairs (from %d barrier pairs)",
 		len(crossProgramPairs), len(job.barrierPairs))
 
-	// Always update bandit and pair cooldown, regardless of whether we found new pairs
-	// This is critical for "exhausted pair cooling down"
-	job.updateBanditAndCooldown(crossProgramPairs)
-
 	// Save the filtered cross-program pairs
 	if len(crossProgramPairs) > 0 {
 		fuzzer.statCrossProgPairs.Add(len(crossProgramPairs))
 
 		// Save to UAF corpus
 		if fuzzer.uaf != nil {
-			fuzzer.uaf.handleFilteredPairs(job.req, job.res, job.prog1, job.prog2, crossProgramPairs)
+			fuzzer.uaf.handleFilteredPairs(job.req, job.res, job.prog1, job.prog2, crossProgramPairs, job.source)
 			log.Logf(1, "[SOLO-FILTER] saved %d cross-program pairs", len(crossProgramPairs))
 		}
-
-		// Update M1' share scores and race prior
-		job.processCrossProgramPairs(crossProgramPairs, prog1SoloPairs, prog2SoloPairs)
 
 		// Update Syscall Affinity Table (record interaction success)
 		job.updateAffinityTable(crossProgramPairs)
@@ -800,95 +785,6 @@ func (job *soloFilterJob) filterCrossProgramPairs(
 	return crossProgram
 }
 
-// updateBanditAndCooldown updates M2 bandit parameters and pair cooldown.
-// This is called for EVERY execution, regardless of whether new pairs were found.
-// This is critical for "exhausted pair cooling down".
-func (job *soloFilterJob) updateBanditAndCooldown(crossProgramPairs []*ddrd.MayUAFPair) {
-	if job.fuzzer.raceGroup == nil {
-		return
-	}
-
-	// Update M2 Bandit parameters for both programs
-	// Note: RecordBanditExecution handles both success (α++) and failure (β++)
-	// Returns both new VarName pair count and new stack count
-	newVarPairs1, newStacks1 := job.fuzzer.raceGroup.RecordBanditExecution(job.prog1, crossProgramPairs)
-	newVarPairs2, newStacks2 := job.fuzzer.raceGroup.RecordBanditExecution(job.prog2, crossProgramPairs)
-	totalNewVarPairs := newVarPairs1 + newVarPairs2
-	totalNewStacks := newStacks1 + newStacks2
-
-	// Update pair cooldown using three-tier penalty system:
-	// - New VarName pair: reset failure score
-	// - Only new stack: add NewStackPenalty (default: 1)
-	// - Nothing new: add NoDiscoveryPenalty (default: 2)
-	job.fuzzer.raceGroup.RecordPairExecution(job.prog1, job.prog2, totalNewVarPairs, totalNewStacks)
-
-	// Log bandit update info periodically
-	if totalNewVarPairs > 0 || totalNewStacks > 0 {
-		log.Logf(0, "[BANDIT-UPDATE] new_varname_pairs=%d new_stacks=%d (prog1: vp=%d s=%d, prog2: vp=%d s=%d)",
-			totalNewVarPairs, totalNewStacks, newVarPairs1, newStacks1, newVarPairs2, newStacks2)
-	}
-}
-
-// processCrossProgramPairs updates M1' share scores and race prior.
-// Only called when crossProgramPairs is non-empty.
-func (job *soloFilterJob) processCrossProgramPairs(
-	crossProgramPairs []*ddrd.MayUAFPair,
-	prog1SoloPairs *VarNamePairSet,
-	prog2SoloPairs *VarNamePairSet,
-) {
-	if job.fuzzer.raceGroup == nil {
-		return
-	}
-
-	// Update share scores for M1' based on cross-program pairs
-	for _, uafPair := range crossProgramPairs {
-		if uafPair == nil {
-			continue
-		}
-
-		// Extract (prog_idx, call_idx) information for M1' learning
-		if uafPair.FreeProgIdx >= 0 && uafPair.FreeCallIdx >= 0 {
-			job.updateShareScore(uafPair.FreeProgIdx, uafPair.FreeCallIdx, uafPair)
-		}
-		if uafPair.UseProgIdx >= 0 && uafPair.UseCallIdx >= 0 {
-			job.updateShareScore(uafPair.UseProgIdx, uafPair.UseCallIdx, uafPair)
-		}
-	}
-
-	// Update race prior for M1' (tracks historically race-producing pairs)
-	job.fuzzer.raceGroup.RecordRacePairWithPartner(job.prog1, job.prog2, crossProgramPairs)
-}
-
-// updateShareScore updates M1' share score based on cross-program race.
-func (job *soloFilterJob) updateShareScore(progIdx int32, callIdx int32, pair *ddrd.MayUAFPair) {
-	if job.fuzzer.raceGroup == nil {
-		return
-	}
-
-	var p *prog.Prog
-	if progIdx == 0 {
-		p = job.prog1
-	} else if progIdx == 1 {
-		p = job.prog2
-	} else {
-		return
-	}
-
-	if p == nil || int(callIdx) >= len(p.Calls) {
-		return
-	}
-
-	certaintyScore := CertaintyScore(1) // High certainty: passed filter
-
-	call := p.Calls[callIdx]
-	if call != nil && call.Meta != nil {
-		nsKey := extractNamespaceFromMeta(call.Meta)
-		if nsKey != "" {
-			job.fuzzer.raceGroup.IncrementShareScore(nsKey, certaintyScore)
-		}
-	}
-}
-
 func (job *soloFilterJob) getInfo() *JobInfo {
 	return job.info
 }
@@ -945,14 +841,4 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 	}
 }
 
-// extractNamespaceFromMeta extracts namespace from syscall metadata.
-func extractNamespaceFromMeta(meta *prog.Syscall) string {
-	if meta == nil {
-		return ""
-	}
-	name := meta.Name
-	if idx := strings.Index(name, "$"); idx > 0 {
-		name = name[:idx]
-	}
-	return meta.CallName
-}
+

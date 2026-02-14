@@ -80,6 +80,7 @@ Extend existing manager⇄fuzzer sync payloads:
 - **Disabled in UAF mode**: `Smash`, `Hints`, and `FaultInjection` jobs are automatically skipped when `ModeUAF` is enabled. This avoids interfering with barrier synchronization and reduces unnecessary execution overhead that does not contribute to UAF detection.
 - Constraint: maintain call ordering that participated in the recorded pair (avoid deleting required calls).
 - Store `CallIdx` + dependencies: embed keep masks to ensure target call(s) survive mutation.
+- **M3 (Window Preserving Mutation)**: Originally designed (see `race_guided_fuzzing_design.md`) but **not implemented** in the current codebase. Standard syzkaller mutation is used instead.
 - Future work: pair-guided mutation (e.g., nudge pointer lifetimes, reorder free/use pairs).
 
 ## 6. Validation Workflow (Future)

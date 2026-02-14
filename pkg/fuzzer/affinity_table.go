@@ -5,7 +5,6 @@ package fuzzer
 
 import (
 	"sort"
-	"strings"
 	"sync"
 	"time"
 
@@ -262,11 +261,6 @@ func ExtractSyscallSignature(p *prog.Prog, callIdx int32) SyscallSignature {
 	}
 }
 
-// findObjectInfo is deprecated - we no longer track object-level information
-// to prevent key explosion. Keeping as a no-op for compatibility.
-func findObjectInfo(p *prog.Prog, call *prog.Call, callIdx int) (objType, objID string) {
-	return "", ""
-}
 
 // ExtractSignaturesFromPair extracts syscall signatures from a UAF pair.
 func ExtractSignaturesFromPair(prog1, prog2 *prog.Prog, pair *ddrd.MayUAFPair) (sig1, sig2 SyscallSignature) {
@@ -359,19 +353,4 @@ func GetNamespaceAffinity(prog1, prog2 *prog.Prog) float64 {
 
 	// Return ratio of shared namespaces
 	return float64(shared) / float64(max(len(ns1), len(ns2)))
-}
-
-// extractSyscallBaseName extracts the base name from a syscall name.
-func extractSyscallBaseName(name string) string {
-	if idx := strings.Index(name, "$"); idx > 0 {
-		return name[:idx]
-	}
-	return name
-}
-
-func max(a, b int) int {
-	if a > b {
-		return a
-	}
-	return b
 }

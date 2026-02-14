@@ -325,21 +325,64 @@ type Experimental struct {
 	// Defaults to 1 if unset or zero.
 	NewStackAffinityWeight int `json:"new_stack_affinity_weight,omitempty"`
 
-	// CooldownThreshold is the failure score threshold for entering cooldown.
-	// When FailureScore reaches this value, the (main, partner) pair enters cooldown.
-	// Defaults to 20 if unset or zero.
+	// Deprecated: CooldownThreshold is no longer used (M1'/M2 removed). Kept for config compatibility.
 	CooldownThreshold int `json:"cooldown_threshold,omitempty"`
-	// NewStackPenalty is the failure score penalty when only new stacks are discovered (no new VarName pairs).
-	// Defaults to 1 if unset or zero.
+	// Deprecated: NewStackPenalty is no longer used (M1'/M2 removed). Kept for config compatibility.
 	NewStackPenalty int `json:"new_stack_penalty,omitempty"`
-	// NoDiscoveryPenalty is the failure score penalty when nothing new is discovered.
-	// Defaults to 2 if unset or zero.
+	// Deprecated: NoDiscoveryPenalty is no longer used (M1'/M2 removed). Kept for config compatibility.
 	NoDiscoveryPenalty int `json:"no_discovery_penalty,omitempty"`
 
 	// RandomBaselineMode disables all race-guided fuzzing strategies for A/B testing.
 	// When enabled, program and partner selection becomes purely random.
 	// This is useful for comparing the effectiveness of race-guided strategies.
 	RandomBaselineMode bool `json:"random_baseline_mode,omitempty"`
+
+	// ======== Dual-Queue Timing Exploration Configuration ========
+	// EnableTimingExploration enables the timing exploration queue for race optimization.
+	// When enabled, newly discovered VarName pairs are enqueued for timing optimization
+	// using syz_delay() syscalls to explore timing windows.
+	// Defaults to false if unset.
+	EnableTimingExploration bool `json:"enable_timing_exploration,omitempty"`
+	// Deprecated: EnablePartnerSelection is no longer used (M1' removed). Kept for config compatibility.
+	EnablePartnerSelection bool `json:"enable_partner_selection,omitempty"`
+	// Deprecated: EnableRaceYieldFeedback is no longer used (M2 removed). Kept for config compatibility.
+	EnableRaceYieldFeedback bool `json:"enable_race_yield_feedback,omitempty"`
+	// TimingExplorationQueueSize is the max size of the timing exploration queue.
+	// Defaults to 500 if unset or zero.
+	TimingExplorationQueueSize int `json:"timing_exploration_queue_size,omitempty"`
+	// TimingExplorationRatio is the fraction of executions for timing exploration (0.0-1.0).
+	// Defaults to 0.1 (10%) if unset or zero.
+	TimingExplorationRatio float64 `json:"timing_exploration_ratio,omitempty"`
+	// DelayMinMicros is the minimum delay in microseconds for syz_delay().
+	// Defaults to 10 if unset or zero.
+	DelayMinMicros int64 `json:"delay_min_micros,omitempty"`
+	// DelayMaxMicros is the maximum delay in microseconds for syz_delay().
+	// Defaults to 200000 (200ms) if unset or zero.
+	DelayMaxMicros int64 `json:"delay_max_micros,omitempty"`
+	// MaxDelaysPerProgram limits syz_delay() calls per program.
+	// Defaults to 5 if unset or zero.
+	MaxDelaysPerProgram int `json:"max_delays_per_program,omitempty"`
+	// TimingMutationStrategy specifies the delay mutation strategy.
+	// Options: "random", "targeted", "binary_search", "timediff"
+	// Defaults to "targeted" if unset.
+	TimingMutationStrategy string `json:"timing_mutation_strategy,omitempty"`
+	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
+	// This allows timing exploration to detect pairs with larger timediff that normal threshold misses.
+	// Defaults to 500000 (500ms) if unset or zero.
+	WidenedThresholdMicros int64 `json:"widened_threshold_micros,omitempty"`
+	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair.
+	// Defaults to 20 if unset or zero.
+	MaxAttemptsPerPair int `json:"max_attempts_per_pair,omitempty"`
+	// MaxCorpusCountPerVarName: if a VarName pair already has this many entries
+	// in the corpus, skip timing exploration for it. 0 means no limit.
+	// This prevents wasting resources on common pairs that are already well-covered.
+	MaxCorpusCountPerVarName int `json:"max_corpus_count_per_varname,omitempty"`
+	// SuccessThreshold is the trigger rate threshold to consider exploration successful (0.0-1.0).
+	// Defaults to 0.1 (10%) if unset or zero.
+	SuccessThreshold float64 `json:"success_threshold,omitempty"`
+	// ExecutionsPerAttempt is how many times to execute each delay plan.
+	// Defaults to 5 if unset or zero.
+	ExecutionsPerAttempt int `json:"executions_per_attempt,omitempty"`
 }
 
 type UAFValidateConfig struct {

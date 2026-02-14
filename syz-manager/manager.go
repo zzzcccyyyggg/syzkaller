@@ -1324,10 +1324,20 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			MaxStacksPerVarNamePair:      mgr.cfg.Experimental.MaxStacksPerVarNamePair,
 			NewVarNamePairAffinityWeight: mgr.cfg.Experimental.NewVarNamePairAffinityWeight,
 			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
-			CooldownThreshold:            mgr.cfg.Experimental.CooldownThreshold,
-			NewStackPenalty:              mgr.cfg.Experimental.NewStackPenalty,
-			NoDiscoveryPenalty:           mgr.cfg.Experimental.NoDiscoveryPenalty,
 			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
+			// Dual-Queue Timing Exploration Configuration
+			EnableTimingExploration:     mgr.cfg.Experimental.EnableTimingExploration,
+			TimingExplorationQueueSize:  mgr.cfg.Experimental.TimingExplorationQueueSize,
+			TimingExplorationRatio:      mgr.cfg.Experimental.TimingExplorationRatio,
+			DelayMinMicros:              mgr.cfg.Experimental.DelayMinMicros,
+			DelayMaxMicros:              mgr.cfg.Experimental.DelayMaxMicros,
+			MaxDelaysPerProgram:         mgr.cfg.Experimental.MaxDelaysPerProgram,
+			TimingMutationStrategy:      mgr.cfg.Experimental.TimingMutationStrategy,
+			WidenedThresholdMicros:      mgr.cfg.Experimental.WidenedThresholdMicros,
+			MaxAttemptsPerPair:          mgr.cfg.Experimental.MaxAttemptsPerPair,
+			MaxCorpusCountPerVarName:    mgr.cfg.Experimental.MaxCorpusCountPerVarName,
+			SuccessThreshold:            mgr.cfg.Experimental.SuccessThreshold,
+			ExecutionsPerAttempt:        mgr.cfg.Experimental.ExecutionsPerAttempt,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)

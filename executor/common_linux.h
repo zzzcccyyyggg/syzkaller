@@ -2277,6 +2277,68 @@ static long syz_memcpy_off(volatile long a0, volatile long a1, volatile long a2,
 }
 #endif
 
+// ============================================================================
+// syz_delay - Pseudo syscall for timing control in race detection
+// ============================================================================
+// This pseudo-syscall introduces a controlled delay between syscalls.
+// It is used by the timing exploration queue to find optimal timing
+// windows for triggering race conditions.
+//
+// Usage: syz_delay(microseconds)
+// - microseconds: delay duration in microseconds (0-10000000, i.e., 0-10s)
+//
+// The delay is implemented using usleep() for microsecond precision.
+// Maximum delay is clamped to 10 seconds to prevent hangs.
+//
+// Example use case:
+//   syz_delay(1000)    <- 1ms delay
+//   ioctl$something()  <- Free operation
+//   ...
+//   (in another program)
+//   read$something()   <- Use operation
+//
+// By inserting delays strategically, we can control the relative
+// timing of Free and Use operations to maximize race triggering.
+// ============================================================================
+#if SYZ_EXECUTOR || __NR_syz_delay
+#include <sys/time.h>
+
+static long syz_delay(volatile long microseconds)
+{
+	struct timeval start_tv, end_tv;
+	
+	// Clamp to reasonable range: 0 to 10 seconds
+	if (microseconds < 0)
+		microseconds = 0;
+	if (microseconds > 10000000)
+		microseconds = 10000000;
+
+	// Get start time
+	gettimeofday(&start_tv, NULL);
+	
+	// Log before delay
+	fprintf(stderr, "[syz_delay] START: requested=%ld us, time=%ld.%06ld\n",
+		microseconds, (long)start_tv.tv_sec, (long)start_tv.tv_usec);
+
+	if (microseconds > 0) {
+		usleep((useconds_t)microseconds);
+	}
+
+	// Get end time
+	gettimeofday(&end_tv, NULL);
+	
+	// Calculate actual delay
+	long actual_us = (end_tv.tv_sec - start_tv.tv_sec) * 1000000 + 
+	                 (end_tv.tv_usec - start_tv.tv_usec);
+	
+	// Log after delay
+	fprintf(stderr, "[syz_delay] END: actual=%ld us, time=%ld.%06ld\n",
+		actual_us, (long)end_tv.tv_sec, (long)end_tv.tv_usec);
+
+	return 0;
+}
+#endif
+
 #if SYZ_EXECUTOR || __NR_syz_create_resource
 // syz_create_resource(val intptr) intptr
 // Variants of this pseudo-syscall are used to create resources from arbitrary values.

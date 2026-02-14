@@ -1,6 +1,8 @@
 package ddrd
 
 import (
+	"math/bits"
+
 	"github.com/google/syzkaller/pkg/hash"
 )
 
@@ -98,4 +100,29 @@ func GeneratePairID(Prog1, Prog2 []byte) uint64 {
 		id = id<<8 | uint64(h[i])
 	}
 	return id
+}
+
+// ============================================================================
+// Canonical VarName Pair ID Functions
+// ============================================================================
+// These are the authoritative functions for computing VarName pair IDs.
+// All code in pkg/fuzzer/ and pkg/ddrd/ should use these instead of
+// defining local variants.
+// ============================================================================
+
+// OrderedVarNamePairID computes a direction-sensitive ID for a (name1, name2) pair.
+// OrderedVarNamePairID(A, B) != OrderedVarNamePairID(B, A).
+// Use this when the pair has a clear direction (e.g., Free→Use in UAF corpus).
+func OrderedVarNamePairID(name1, name2 uint64) uint64 {
+	return name1 ^ bits.RotateLeft64(name2, 32)
+}
+
+// UnorderedVarNamePairID computes a direction-independent ID for a (name1, name2) pair.
+// UnorderedVarNamePairID(A, B) == UnorderedVarNamePairID(B, A).
+// Use this when pair direction doesn't matter (e.g., VarNamePairRegistry, Bandit dedup).
+func UnorderedVarNamePairID(name1, name2 uint64) uint64 {
+	if name1 > name2 {
+		name1, name2 = name2, name1
+	}
+	return (name1 * 0x9E3779B97F4A7C15) ^ name2
 }

@@ -567,8 +567,9 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
 }
 
 // 为了减少改动 先将uaf模型暂用到race上
-int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
-   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx)
+// With configurable threshold (in microseconds). If threshold_us=0, uses default 2ms.
+int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* detector,
+   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx, uint64_t threshold_us)
 {
     // Use provided syscall_ctx, or fall back to global g_syscall_context if NULL
     SyscallContextTable* ctx = syscall_ctx ? syscall_ctx : &g_syscall_context;
@@ -596,10 +597,11 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
     if (!race_pairs)
         return 0;
 
-    int race_pair_count = access_context_analyze_race_pairs(
-        &detector->context, race_pairs, max_internal_pairs);
+    // Use configurable threshold
+    int race_pair_count = access_context_analyze_race_pairs_with_threshold(
+        &detector->context, race_pairs, max_internal_pairs, threshold_us);
 
-    debug("Successfully parsed %d race pairs\n", race_pair_count);
+    debug("Successfully parsed %d race pairs (threshold=%llu us)\n", race_pair_count, (unsigned long long)threshold_us);
 
     // 3. 把 RacePair 压缩/映射为对外的 may_race_pair_t
     int basic_count = 0;
@@ -661,6 +663,14 @@ int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
     free(race_pairs);
 
     return basic_count;
+}
+
+// Backward-compatible wrapper: uses default threshold (0 = 2ms)
+int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
+   may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx)
+{
+    return race_detector_analyze_and_generate_race_infos_with_threshold(
+        detector, uaf_buffer, max_uaf_pairs, syscall_ctx, 0);
 }
 
 

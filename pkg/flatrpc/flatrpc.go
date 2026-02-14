@@ -156,7 +156,7 @@ func (v HostMessagesRaw) String() string {
 }
 
 type HostMessagesRawT struct {
-	Type  HostMessagesRaw
+	Type HostMessagesRaw
 	Value interface{}
 }
 
@@ -181,16 +181,16 @@ func (rcv HostMessagesRaw) UnPack(table flatbuffers.Table) *HostMessagesRawT {
 	switch rcv {
 	case HostMessagesRawExecRequest:
 		x := ExecRequestRaw{_tab: table}
-		return &HostMessagesRawT{Type: HostMessagesRawExecRequest, Value: x.UnPack()}
+		return &HostMessagesRawT{ Type: HostMessagesRawExecRequest, Value: x.UnPack() }
 	case HostMessagesRawSignalUpdate:
 		x := SignalUpdateRaw{_tab: table}
-		return &HostMessagesRawT{Type: HostMessagesRawSignalUpdate, Value: x.UnPack()}
+		return &HostMessagesRawT{ Type: HostMessagesRawSignalUpdate, Value: x.UnPack() }
 	case HostMessagesRawCorpusTriaged:
 		x := CorpusTriagedRaw{_tab: table}
-		return &HostMessagesRawT{Type: HostMessagesRawCorpusTriaged, Value: x.UnPack()}
+		return &HostMessagesRawT{ Type: HostMessagesRawCorpusTriaged, Value: x.UnPack() }
 	case HostMessagesRawStateRequest:
 		x := StateRequestRaw{_tab: table}
-		return &HostMessagesRawT{Type: HostMessagesRawStateRequest, Value: x.UnPack()}
+		return &HostMessagesRawT{ Type: HostMessagesRawStateRequest, Value: x.UnPack() }
 	}
 	return nil
 }
@@ -226,7 +226,7 @@ func (v ExecutorMessagesRaw) String() string {
 }
 
 type ExecutorMessagesRawT struct {
-	Type  ExecutorMessagesRaw
+	Type ExecutorMessagesRaw
 	Value interface{}
 }
 
@@ -249,13 +249,13 @@ func (rcv ExecutorMessagesRaw) UnPack(table flatbuffers.Table) *ExecutorMessages
 	switch rcv {
 	case ExecutorMessagesRawExecResult:
 		x := ExecResultRaw{_tab: table}
-		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawExecResult, Value: x.UnPack()}
+		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawExecResult, Value: x.UnPack() }
 	case ExecutorMessagesRawExecuting:
 		x := ExecutingMessageRaw{_tab: table}
-		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawExecuting, Value: x.UnPack()}
+		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawExecuting, Value: x.UnPack() }
 	case ExecutorMessagesRawState:
 		x := StateResultRaw{_tab: table}
-		return &ExecutorMessagesRawT{Type: ExecutorMessagesRawState, Value: x.UnPack()}
+		return &ExecutorMessagesRawT{ Type: ExecutorMessagesRawState, Value: x.UnPack() }
 	}
 	return nil
 }
@@ -511,9 +511,7 @@ type ConnectHelloRawT struct {
 }
 
 func (t *ConnectHelloRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	ConnectHelloRawStart(builder)
 	ConnectHelloRawAddCookie(builder, t.Cookie)
 	return ConnectHelloRawEnd(builder)
@@ -524,9 +522,7 @@ func (rcv *ConnectHelloRaw) UnPackTo(t *ConnectHelloRawT) {
 }
 
 func (rcv *ConnectHelloRaw) UnPack() *ConnectHelloRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ConnectHelloRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -580,19 +576,16 @@ func ConnectHelloRawAddCookie(builder *flatbuffers.Builder, cookie uint64) {
 func ConnectHelloRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ConnectRequestRawT struct {
-	Cookie      uint64 `json:"cookie"`
-	Id          int64  `json:"id"`
-	Arch        string `json:"arch"`
+	Cookie uint64 `json:"cookie"`
+	Id int64 `json:"id"`
+	Arch string `json:"arch"`
 	GitRevision string `json:"git_revision"`
 	SyzRevision string `json:"syz_revision"`
 }
 
 func (t *ConnectRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	archOffset := builder.CreateString(t.Arch)
 	gitRevisionOffset := builder.CreateString(t.GitRevision)
 	syzRevisionOffset := builder.CreateString(t.SyzRevision)
@@ -614,9 +607,7 @@ func (rcv *ConnectRequestRaw) UnPackTo(t *ConnectRequestRawT) {
 }
 
 func (rcv *ConnectRequestRaw) UnPack() *ConnectRequestRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ConnectRequestRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -718,26 +709,23 @@ func ConnectRequestRawAddSyzRevision(builder *flatbuffers.Builder, syzRevision f
 func ConnectRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ConnectReplyRawT struct {
-	Debug            bool     `json:"debug"`
-	Cover            bool     `json:"cover"`
-	CoverEdges       bool     `json:"cover_edges"`
-	Kernel64Bit      bool     `json:"kernel_64_bit"`
-	Procs            int32    `json:"procs"`
-	Slowdown         int32    `json:"slowdown"`
-	SyscallTimeoutMs int32    `json:"syscall_timeout_ms"`
-	ProgramTimeoutMs int32    `json:"program_timeout_ms"`
-	LeakFrames       []string `json:"leak_frames"`
-	RaceFrames       []string `json:"race_frames"`
-	Features         Feature  `json:"features"`
-	Files            []string `json:"files"`
+	Debug bool `json:"debug"`
+	Cover bool `json:"cover"`
+	CoverEdges bool `json:"cover_edges"`
+	Kernel64Bit bool `json:"kernel_64_bit"`
+	Procs int32 `json:"procs"`
+	Slowdown int32 `json:"slowdown"`
+	SyscallTimeoutMs int32 `json:"syscall_timeout_ms"`
+	ProgramTimeoutMs int32 `json:"program_timeout_ms"`
+	LeakFrames []string `json:"leak_frames"`
+	RaceFrames []string `json:"race_frames"`
+	Features Feature `json:"features"`
+	Files []string `json:"files"`
 }
 
 func (t *ConnectReplyRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	leakFramesOffset := flatbuffers.UOffsetT(0)
 	if t.LeakFrames != nil {
 		leakFramesLength := len(t.LeakFrames)
@@ -821,9 +809,7 @@ func (rcv *ConnectReplyRaw) UnPackTo(t *ConnectReplyRawT) {
 }
 
 func (rcv *ConnectReplyRaw) UnPack() *ConnectReplyRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ConnectReplyRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1066,17 +1052,14 @@ func ConnectReplyRawStartFilesVector(builder *flatbuffers.Builder, numElems int)
 func ConnectReplyRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type InfoRequestRawT struct {
-	Error    string             `json:"error"`
+	Error string `json:"error"`
 	Features []*FeatureInfoRawT `json:"features"`
-	Files    []*FileInfoRawT    `json:"files"`
+	Files []*FileInfoRawT `json:"files"`
 }
 
 func (t *InfoRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	errorOffset := builder.CreateString(t.Error)
 	featuresOffset := flatbuffers.UOffsetT(0)
 	if t.Features != nil {
@@ -1130,9 +1113,7 @@ func (rcv *InfoRequestRaw) UnPackTo(t *InfoRequestRawT) {
 }
 
 func (rcv *InfoRequestRaw) UnPack() *InfoRequestRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &InfoRequestRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1234,15 +1215,12 @@ func InfoRequestRawStartFilesVector(builder *flatbuffers.Builder, numElems int) 
 func InfoRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type InfoReplyRawT struct {
 	CoverFilter []uint64 `json:"cover_filter"`
 }
 
 func (t *InfoReplyRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	coverFilterOffset := flatbuffers.UOffsetT(0)
 	if t.CoverFilter != nil {
 		coverFilterLength := len(t.CoverFilter)
@@ -1266,9 +1244,7 @@ func (rcv *InfoReplyRaw) UnPackTo(t *InfoReplyRawT) {
 }
 
 func (rcv *InfoReplyRaw) UnPack() *InfoReplyRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &InfoReplyRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1339,24 +1315,21 @@ func InfoReplyRawStartCoverFilterVector(builder *flatbuffers.Builder, numElems i
 func InfoReplyRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type FileInfoRawT struct {
-	Name                  string `json:"name"`
-	Exists                bool   `json:"exists"`
-	UkcUseName            uint64 `json:"ukc_use_name"`
-	UkcUseStack           uint64 `json:"ukc_use_stack"`
-	UkcFreeName           uint64 `json:"ukc_free_name"`
-	UkcFreeStack          uint64 `json:"ukc_free_stack"`
-	UkcUseAccessDelayTime int32  `json:"ukc_use_access_delay_time"`
-	UkcIsValid            bool   `json:"ukc_is_valid"`
-	Error                 string `json:"error"`
-	Data                  []byte `json:"data"`
+	Name string `json:"name"`
+	Exists bool `json:"exists"`
+	UkcUseName uint64 `json:"ukc_use_name"`
+	UkcUseStack uint64 `json:"ukc_use_stack"`
+	UkcFreeName uint64 `json:"ukc_free_name"`
+	UkcFreeStack uint64 `json:"ukc_free_stack"`
+	UkcUseAccessDelayTime int32 `json:"ukc_use_access_delay_time"`
+	UkcIsValid bool `json:"ukc_is_valid"`
+	Error string `json:"error"`
+	Data []byte `json:"data"`
 }
 
 func (t *FileInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	nameOffset := builder.CreateString(t.Name)
 	errorOffset := builder.CreateString(t.Error)
 	dataOffset := flatbuffers.UOffsetT(0)
@@ -1391,9 +1364,7 @@ func (rcv *FileInfoRaw) UnPackTo(t *FileInfoRawT) {
 }
 
 func (rcv *FileInfoRaw) UnPack() *FileInfoRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &FileInfoRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1599,16 +1570,13 @@ func FileInfoRawStartDataVector(builder *flatbuffers.Builder, numElems int) flat
 func FileInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type GlobInfoRawT struct {
-	Name  string   `json:"name"`
+	Name string `json:"name"`
 	Files []string `json:"files"`
 }
 
 func (t *GlobInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	nameOffset := builder.CreateString(t.Name)
 	filesOffset := flatbuffers.UOffsetT(0)
 	if t.Files != nil {
@@ -1639,9 +1607,7 @@ func (rcv *GlobInfoRaw) UnPackTo(t *GlobInfoRawT) {
 }
 
 func (rcv *GlobInfoRaw) UnPack() *GlobInfoRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &GlobInfoRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1714,17 +1680,14 @@ func GlobInfoRawStartFilesVector(builder *flatbuffers.Builder, numElems int) fla
 func GlobInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type FeatureInfoRawT struct {
-	Id        Feature `json:"id"`
-	NeedSetup bool    `json:"need_setup"`
-	Reason    string  `json:"reason"`
+	Id Feature `json:"id"`
+	NeedSetup bool `json:"need_setup"`
+	Reason string `json:"reason"`
 }
 
 func (t *FeatureInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	reasonOffset := builder.CreateString(t.Reason)
 	FeatureInfoRawStart(builder)
 	FeatureInfoRawAddId(builder, t.Id)
@@ -1740,9 +1703,7 @@ func (rcv *FeatureInfoRaw) UnPackTo(t *FeatureInfoRawT) {
 }
 
 func (rcv *FeatureInfoRaw) UnPack() *FeatureInfoRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &FeatureInfoRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1822,17 +1783,14 @@ func FeatureInfoRawAddReason(builder *flatbuffers.Builder, reason flatbuffers.UO
 func FeatureInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type HostMessageRawT struct {
 	Msg *HostMessagesRawT `json:"msg"`
 }
 
 func (t *HostMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	msgOffset := t.Msg.Pack(builder)
-
+	
 	HostMessageRawStart(builder)
 	if t.Msg != nil {
 		HostMessageRawAddMsgType(builder, t.Msg.Type)
@@ -1849,9 +1807,7 @@ func (rcv *HostMessageRaw) UnPackTo(t *HostMessageRawT) {
 }
 
 func (rcv *HostMessageRaw) UnPack() *HostMessageRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &HostMessageRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -1917,17 +1873,14 @@ func HostMessageRawAddMsg(builder *flatbuffers.Builder, msg flatbuffers.UOffsetT
 func HostMessageRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ExecutorMessageRawT struct {
 	Msg *ExecutorMessagesRawT `json:"msg"`
 }
 
 func (t *ExecutorMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	msgOffset := t.Msg.Pack(builder)
-
+	
 	ExecutorMessageRawStart(builder)
 	if t.Msg != nil {
 		ExecutorMessageRawAddMsgType(builder, t.Msg.Type)
@@ -1944,9 +1897,7 @@ func (rcv *ExecutorMessageRaw) UnPackTo(t *ExecutorMessageRawT) {
 }
 
 func (rcv *ExecutorMessageRaw) UnPack() *ExecutorMessageRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ExecutorMessageRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2012,17 +1963,14 @@ func ExecutorMessageRawAddMsg(builder *flatbuffers.Builder, msg flatbuffers.UOff
 func ExecutorMessageRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ExecOptsRawT struct {
-	EnvFlags   ExecEnv  `json:"env_flags"`
-	ExecFlags  ExecFlag `json:"exec_flags"`
-	SandboxArg int64    `json:"sandbox_arg"`
+	EnvFlags ExecEnv `json:"env_flags"`
+	ExecFlags ExecFlag `json:"exec_flags"`
+	SandboxArg int64 `json:"sandbox_arg"`
 }
 
 func (t *ExecOptsRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	return CreateExecOptsRaw(builder, t.EnvFlags, t.ExecFlags, t.SandboxArg)
 }
 func (rcv *ExecOptsRaw) UnPackTo(t *ExecOptsRawT) {
@@ -2032,9 +1980,7 @@ func (rcv *ExecOptsRaw) UnPackTo(t *ExecOptsRawT) {
 }
 
 func (rcv *ExecOptsRaw) UnPack() *ExecOptsRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ExecOptsRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2081,37 +2027,35 @@ func CreateExecOptsRaw(builder *flatbuffers.Builder, envFlags ExecEnv, execFlags
 	builder.PrependUint64(uint64(envFlags))
 	return builder.Offset()
 }
-
 type ExecRequestRawT struct {
-	Id                    int64         `json:"id"`
-	Type                  RequestType   `json:"type"`
-	Avoid                 uint64        `json:"avoid"`
-	Data                  []byte        `json:"data"`
-	ExecOpts              *ExecOptsRawT `json:"exec_opts"`
-	Flags                 RequestFlag   `json:"flags"`
-	AllSignal             []int32       `json:"all_signal"`
-	BarrierParticipants   uint64        `json:"barrier_participants"`
-	BarrierGroupId        int64         `json:"barrier_group_id"`
-	BarrierIndex          int32         `json:"barrier_index"`
-	BarrierGroupSize      int32         `json:"barrier_group_size"`
-	BarrierStartDelayUs   []int64       `json:"barrier_start_delay_us"`
-	UkcUseName            uint64        `json:"ukc_use_name"`
-	UkcUseStack           uint64        `json:"ukc_use_stack"`
-	UkcUseSn              int32         `json:"ukc_use_sn"`
-	UkcUseTid             int32         `json:"ukc_use_tid"`
-	UkcFreeName           uint64        `json:"ukc_free_name"`
-	UkcFreeStack          uint64        `json:"ukc_free_stack"`
-	UkcFreeSn             int32         `json:"ukc_free_sn"`
-	UkcFreeTid            int32         `json:"ukc_free_tid"`
-	UkcUseAccessDelayTime int32         `json:"ukc_use_access_delay_time"`
-	UkcIsValid            bool          `json:"ukc_is_valid"`
-	UkcUseFineMode        bool          `json:"ukc_use_fine_mode"`
+	Id int64 `json:"id"`
+	Type RequestType `json:"type"`
+	Avoid uint64 `json:"avoid"`
+	Data []byte `json:"data"`
+	ExecOpts *ExecOptsRawT `json:"exec_opts"`
+	Flags RequestFlag `json:"flags"`
+	AllSignal []int32 `json:"all_signal"`
+	BarrierParticipants uint64 `json:"barrier_participants"`
+	BarrierGroupId int64 `json:"barrier_group_id"`
+	BarrierIndex int32 `json:"barrier_index"`
+	BarrierGroupSize int32 `json:"barrier_group_size"`
+	BarrierStartDelayUs []int64 `json:"barrier_start_delay_us"`
+	UkcUseName uint64 `json:"ukc_use_name"`
+	UkcUseStack uint64 `json:"ukc_use_stack"`
+	UkcUseSn int32 `json:"ukc_use_sn"`
+	UkcUseTid int32 `json:"ukc_use_tid"`
+	UkcFreeName uint64 `json:"ukc_free_name"`
+	UkcFreeStack uint64 `json:"ukc_free_stack"`
+	UkcFreeSn int32 `json:"ukc_free_sn"`
+	UkcFreeTid int32 `json:"ukc_free_tid"`
+	UkcUseAccessDelayTime int32 `json:"ukc_use_access_delay_time"`
+	UkcIsValid bool `json:"ukc_is_valid"`
+	UkcUseFineMode bool `json:"ukc_use_fine_mode"`
+	TimingThresholdUs int64 `json:"timing_threshold_us"`
 }
 
 func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	dataOffset := flatbuffers.UOffsetT(0)
 	if t.Data != nil {
 		dataOffset = builder.CreateByteString(t.Data)
@@ -2159,6 +2103,7 @@ func (t *ExecRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffset
 	ExecRequestRawAddUkcUseAccessDelayTime(builder, t.UkcUseAccessDelayTime)
 	ExecRequestRawAddUkcIsValid(builder, t.UkcIsValid)
 	ExecRequestRawAddUkcUseFineMode(builder, t.UkcUseFineMode)
+	ExecRequestRawAddTimingThresholdUs(builder, t.TimingThresholdUs)
 	return ExecRequestRawEnd(builder)
 }
 
@@ -2194,12 +2139,11 @@ func (rcv *ExecRequestRaw) UnPackTo(t *ExecRequestRawT) {
 	t.UkcUseAccessDelayTime = rcv.UkcUseAccessDelayTime()
 	t.UkcIsValid = rcv.UkcIsValid()
 	t.UkcUseFineMode = rcv.UkcUseFineMode()
+	t.TimingThresholdUs = rcv.TimingThresholdUs()
 }
 
 func (rcv *ExecRequestRaw) UnPack() *ExecRequestRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ExecRequestRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2559,8 +2503,20 @@ func (rcv *ExecRequestRaw) MutateUkcUseFineMode(n bool) bool {
 	return rcv._tab.MutateBoolSlot(48, n)
 }
 
+func (rcv *ExecRequestRaw) TimingThresholdUs() int64 {
+	o := flatbuffers.UOffsetT(rcv._tab.Offset(50))
+	if o != 0 {
+		return rcv._tab.GetInt64(o + rcv._tab.Pos)
+	}
+	return 0
+}
+
+func (rcv *ExecRequestRaw) MutateTimingThresholdUs(n int64) bool {
+	return rcv._tab.MutateInt64Slot(50, n)
+}
+
 func ExecRequestRawStart(builder *flatbuffers.Builder) {
-	builder.StartObject(23)
+	builder.StartObject(24)
 }
 func ExecRequestRawAddId(builder *flatbuffers.Builder, id int64) {
 	builder.PrependInt64Slot(0, id, 0)
@@ -2640,18 +2596,18 @@ func ExecRequestRawAddUkcIsValid(builder *flatbuffers.Builder, ukcIsValid bool) 
 func ExecRequestRawAddUkcUseFineMode(builder *flatbuffers.Builder, ukcUseFineMode bool) {
 	builder.PrependBoolSlot(22, ukcUseFineMode, false)
 }
+func ExecRequestRawAddTimingThresholdUs(builder *flatbuffers.Builder, timingThresholdUs int64) {
+	builder.PrependInt64Slot(23, timingThresholdUs, 0)
+}
 func ExecRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type SignalUpdateRawT struct {
 	NewMax []uint64 `json:"new_max"`
 }
 
 func (t *SignalUpdateRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	newMaxOffset := flatbuffers.UOffsetT(0)
 	if t.NewMax != nil {
 		newMaxLength := len(t.NewMax)
@@ -2675,9 +2631,7 @@ func (rcv *SignalUpdateRaw) UnPackTo(t *SignalUpdateRawT) {
 }
 
 func (rcv *SignalUpdateRaw) UnPack() *SignalUpdateRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &SignalUpdateRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2748,14 +2702,11 @@ func SignalUpdateRawStartNewMaxVector(builder *flatbuffers.Builder, numElems int
 func SignalUpdateRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type CorpusTriagedRawT struct {
 }
 
 func (t *CorpusTriagedRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	CorpusTriagedRawStart(builder)
 	return CorpusTriagedRawEnd(builder)
 }
@@ -2764,9 +2715,7 @@ func (rcv *CorpusTriagedRaw) UnPackTo(t *CorpusTriagedRawT) {
 }
 
 func (rcv *CorpusTriagedRaw) UnPack() *CorpusTriagedRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &CorpusTriagedRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2805,14 +2754,11 @@ func CorpusTriagedRawStart(builder *flatbuffers.Builder) {
 func CorpusTriagedRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type StateRequestRawT struct {
 }
 
 func (t *StateRequestRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	StateRequestRawStart(builder)
 	return StateRequestRawEnd(builder)
 }
@@ -2821,9 +2767,7 @@ func (rcv *StateRequestRaw) UnPackTo(t *StateRequestRawT) {
 }
 
 func (rcv *StateRequestRaw) UnPack() *StateRequestRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &StateRequestRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2862,18 +2806,15 @@ func StateRequestRawStart(builder *flatbuffers.Builder) {
 func StateRequestRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ExecutingMessageRawT struct {
-	Id           int64 `json:"id"`
-	ProcId       int32 `json:"proc_id"`
-	Try          int32 `json:"try"`
+	Id int64 `json:"id"`
+	ProcId int32 `json:"proc_id"`
+	Try int32 `json:"try"`
 	WaitDuration int64 `json:"wait_duration"`
 }
 
 func (t *ExecutingMessageRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	ExecutingMessageRawStart(builder)
 	ExecutingMessageRawAddId(builder, t.Id)
 	ExecutingMessageRawAddProcId(builder, t.ProcId)
@@ -2890,9 +2831,7 @@ func (rcv *ExecutingMessageRaw) UnPackTo(t *ExecutingMessageRawT) {
 }
 
 func (rcv *ExecutingMessageRaw) UnPack() *ExecutingMessageRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ExecutingMessageRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -2991,19 +2930,16 @@ func ExecutingMessageRawAddWaitDuration(builder *flatbuffers.Builder, waitDurati
 func ExecutingMessageRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type CallInfoRawT struct {
-	Flags  CallFlag          `json:"flags"`
-	Error  int32             `json:"error"`
-	Signal []uint64          `json:"signal"`
-	Cover  []uint64          `json:"cover"`
-	Comps  []*ComparisonRawT `json:"comps"`
+	Flags CallFlag `json:"flags"`
+	Error int32 `json:"error"`
+	Signal []uint64 `json:"signal"`
+	Cover []uint64 `json:"cover"`
+	Comps []*ComparisonRawT `json:"comps"`
 }
 
 func (t *CallInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	signalOffset := flatbuffers.UOffsetT(0)
 	if t.Signal != nil {
 		signalLength := len(t.Signal)
@@ -3063,9 +2999,7 @@ func (rcv *CallInfoRaw) UnPackTo(t *CallInfoRawT) {
 }
 
 func (rcv *CallInfoRaw) UnPack() *CallInfoRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &CallInfoRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -3223,18 +3157,15 @@ func CallInfoRawStartCompsVector(builder *flatbuffers.Builder, numElems int) fla
 func CallInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ComparisonRawT struct {
-	Pc      uint64 `json:"pc"`
-	Op1     uint64 `json:"op1"`
-	Op2     uint64 `json:"op2"`
-	IsConst bool   `json:"is_const"`
+	Pc uint64 `json:"pc"`
+	Op1 uint64 `json:"op1"`
+	Op2 uint64 `json:"op2"`
+	IsConst bool `json:"is_const"`
 }
 
 func (t *ComparisonRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	return CreateComparisonRaw(builder, t.Pc, t.Op1, t.Op2, t.IsConst)
 }
 func (rcv *ComparisonRaw) UnPackTo(t *ComparisonRawT) {
@@ -3245,9 +3176,7 @@ func (rcv *ComparisonRaw) UnPackTo(t *ComparisonRawT) {
 }
 
 func (rcv *ComparisonRaw) UnPack() *ComparisonRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ComparisonRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -3303,20 +3232,17 @@ func CreateComparisonRaw(builder *flatbuffers.Builder, pc uint64, op1 uint64, op
 	builder.PrependUint64(pc)
 	return builder.Offset()
 }
-
 type ProgInfoRawT struct {
-	Calls     []*CallInfoRawT `json:"calls"`
-	ExtraRaw  []*CallInfoRawT `json:"extra_raw"`
-	Extra     *CallInfoRawT   `json:"extra"`
-	Elapsed   uint64          `json:"elapsed"`
-	Freshness uint64          `json:"freshness"`
-	Ddrd      *DdrdRawT       `json:"ddrd"`
+	Calls []*CallInfoRawT `json:"calls"`
+	ExtraRaw []*CallInfoRawT `json:"extra_raw"`
+	Extra *CallInfoRawT `json:"extra"`
+	Elapsed uint64 `json:"elapsed"`
+	Freshness uint64 `json:"freshness"`
+	Ddrd *DdrdRawT `json:"ddrd"`
 }
 
 func (t *ProgInfoRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	callsOffset := flatbuffers.UOffsetT(0)
 	if t.Calls != nil {
 		callsLength := len(t.Calls)
@@ -3377,9 +3303,7 @@ func (rcv *ProgInfoRaw) UnPackTo(t *ProgInfoRawT) {
 }
 
 func (rcv *ProgInfoRaw) UnPack() *ProgInfoRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ProgInfoRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -3532,16 +3456,13 @@ func ProgInfoRawAddDdrd(builder *flatbuffers.Builder, ddrd flatbuffers.UOffsetT)
 func ProgInfoRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type DdrdRawT struct {
-	UafPairs    []*DdrdUafPairRawT         `json:"uaf_pairs"`
+	UafPairs []*DdrdUafPairRawT `json:"uaf_pairs"`
 	ExtendedUaf []*DdrdExtendedUafPairRawT `json:"extended_uaf"`
 }
 
 func (t *DdrdRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	uafPairsOffset := flatbuffers.UOffsetT(0)
 	if t.UafPairs != nil {
 		uafPairsLength := len(t.UafPairs)
@@ -3592,9 +3513,7 @@ func (rcv *DdrdRaw) UnPackTo(t *DdrdRawT) {
 }
 
 func (rcv *DdrdRaw) UnPack() *DdrdRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &DdrdRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -3685,30 +3604,27 @@ func DdrdRawStartExtendedUafVector(builder *flatbuffers.Builder, numElems int) f
 func DdrdRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type DdrdUafPairRawT struct {
 	FreeAccessName uint64 `json:"free_access_name"`
-	UseAccessName  uint64 `json:"use_access_name"`
-	FreeCallStack  uint64 `json:"free_call_stack"`
-	UseCallStack   uint64 `json:"use_call_stack"`
-	Signal         uint64 `json:"signal"`
-	TimeDiff       uint64 `json:"time_diff"`
-	FreeSn         int32  `json:"free_sn"`
-	UseSn          int32  `json:"use_sn"`
-	LockType       uint32 `json:"lock_type"`
-	UseAccessType  uint32 `json:"use_access_type"`
-	FreeTid        int32  `json:"free_tid"`
-	UseTid         int32  `json:"use_tid"`
-	FreeCallIdx    int32  `json:"free_call_idx"`
-	UseCallIdx     int32  `json:"use_call_idx"`
-	FreeProgIdx    int32  `json:"free_prog_idx"`
-	UseProgIdx     int32  `json:"use_prog_idx"`
+	UseAccessName uint64 `json:"use_access_name"`
+	FreeCallStack uint64 `json:"free_call_stack"`
+	UseCallStack uint64 `json:"use_call_stack"`
+	Signal uint64 `json:"signal"`
+	TimeDiff uint64 `json:"time_diff"`
+	FreeSn int32 `json:"free_sn"`
+	UseSn int32 `json:"use_sn"`
+	LockType uint32 `json:"lock_type"`
+	UseAccessType uint32 `json:"use_access_type"`
+	FreeTid int32 `json:"free_tid"`
+	UseTid int32 `json:"use_tid"`
+	FreeCallIdx int32 `json:"free_call_idx"`
+	UseCallIdx int32 `json:"use_call_idx"`
+	FreeProgIdx int32 `json:"free_prog_idx"`
+	UseProgIdx int32 `json:"use_prog_idx"`
 }
 
 func (t *DdrdUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	DdrdUafPairRawStart(builder)
 	DdrdUafPairRawAddFreeAccessName(builder, t.FreeAccessName)
 	DdrdUafPairRawAddUseAccessName(builder, t.UseAccessName)
@@ -3749,9 +3665,7 @@ func (rcv *DdrdUafPairRaw) UnPackTo(t *DdrdUafPairRawT) {
 }
 
 func (rcv *DdrdUafPairRaw) UnPack() *DdrdUafPairRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &DdrdUafPairRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4030,19 +3944,16 @@ func DdrdUafPairRawAddUseProgIdx(builder *flatbuffers.Builder, useProgIdx int32)
 func DdrdUafPairRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type DdrdSerializedAccessRawT struct {
-	VarName       uint64 `json:"var_name"`
+	VarName uint64 `json:"var_name"`
 	CallStackHash uint64 `json:"call_stack_hash"`
-	AccessTime    uint64 `json:"access_time"`
-	Sn            uint32 `json:"sn"`
-	AccessType    uint32 `json:"access_type"`
+	AccessTime uint64 `json:"access_time"`
+	Sn uint32 `json:"sn"`
+	AccessType uint32 `json:"access_type"`
 }
 
 func (t *DdrdSerializedAccessRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	DdrdSerializedAccessRawStart(builder)
 	DdrdSerializedAccessRawAddVarName(builder, t.VarName)
 	DdrdSerializedAccessRawAddCallStackHash(builder, t.CallStackHash)
@@ -4061,9 +3972,7 @@ func (rcv *DdrdSerializedAccessRaw) UnPackTo(t *DdrdSerializedAccessRawT) {
 }
 
 func (rcv *DdrdSerializedAccessRaw) UnPack() *DdrdSerializedAccessRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &DdrdSerializedAccessRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4177,22 +4086,19 @@ func DdrdSerializedAccessRawAddAccessType(builder *flatbuffers.Builder, accessTy
 func DdrdSerializedAccessRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type DdrdExtendedUafPairRawT struct {
-	Basic                  *DdrdUafPairRawT            `json:"basic"`
-	UseThreadHistoryCount  uint32                      `json:"use_thread_history_count"`
-	FreeThreadHistoryCount uint32                      `json:"free_thread_history_count"`
-	UseTargetTime          uint64                      `json:"use_target_time"`
-	FreeTargetTime         uint64                      `json:"free_target_time"`
-	PathDistanceUse        float64                     `json:"path_distance_use"`
-	PathDistanceFree       float64                     `json:"path_distance_free"`
-	AccessHistory          []*DdrdSerializedAccessRawT `json:"access_history"`
+	Basic *DdrdUafPairRawT `json:"basic"`
+	UseThreadHistoryCount uint32 `json:"use_thread_history_count"`
+	FreeThreadHistoryCount uint32 `json:"free_thread_history_count"`
+	UseTargetTime uint64 `json:"use_target_time"`
+	FreeTargetTime uint64 `json:"free_target_time"`
+	PathDistanceUse float64 `json:"path_distance_use"`
+	PathDistanceFree float64 `json:"path_distance_free"`
+	AccessHistory []*DdrdSerializedAccessRawT `json:"access_history"`
 }
 
 func (t *DdrdExtendedUafPairRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	basicOffset := t.Basic.Pack(builder)
 	accessHistoryOffset := flatbuffers.UOffsetT(0)
 	if t.AccessHistory != nil {
@@ -4237,9 +4143,7 @@ func (rcv *DdrdExtendedUafPairRaw) UnPackTo(t *DdrdExtendedUafPairRawT) {
 }
 
 func (rcv *DdrdExtendedUafPairRaw) UnPack() *DdrdExtendedUafPairRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &DdrdExtendedUafPairRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4410,24 +4314,21 @@ func DdrdExtendedUafPairRawStartAccessHistoryVector(builder *flatbuffers.Builder
 func DdrdExtendedUafPairRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type ExecResultRawT struct {
-	Id               int64         `json:"id"`
-	Proc             int32         `json:"proc"`
-	Output           []byte        `json:"output"`
-	Hanged           bool          `json:"hanged"`
-	Error            string        `json:"error"`
-	Info             *ProgInfoRawT `json:"info"`
-	BarrierProcs     uint64        `json:"barrier_procs"`
-	BarrierGroupId   int64         `json:"barrier_group_id"`
-	BarrierIndex     int32         `json:"barrier_index"`
-	BarrierGroupSize int32         `json:"barrier_group_size"`
+	Id int64 `json:"id"`
+	Proc int32 `json:"proc"`
+	Output []byte `json:"output"`
+	Hanged bool `json:"hanged"`
+	Error string `json:"error"`
+	Info *ProgInfoRawT `json:"info"`
+	BarrierProcs uint64 `json:"barrier_procs"`
+	BarrierGroupId int64 `json:"barrier_group_id"`
+	BarrierIndex int32 `json:"barrier_index"`
+	BarrierGroupSize int32 `json:"barrier_group_size"`
 }
 
 func (t *ExecResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	outputOffset := flatbuffers.UOffsetT(0)
 	if t.Output != nil {
 		outputOffset = builder.CreateByteString(t.Output)
@@ -4462,9 +4363,7 @@ func (rcv *ExecResultRaw) UnPackTo(t *ExecResultRawT) {
 }
 
 func (rcv *ExecResultRaw) UnPack() *ExecResultRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &ExecResultRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4675,15 +4574,12 @@ func ExecResultRawAddBarrierGroupSize(builder *flatbuffers.Builder, barrierGroup
 func ExecResultRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type StateResultRawT struct {
 	Data []byte `json:"data"`
 }
 
 func (t *StateResultRawT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	dataOffset := flatbuffers.UOffsetT(0)
 	if t.Data != nil {
 		dataOffset = builder.CreateByteString(t.Data)
@@ -4698,9 +4594,7 @@ func (rcv *StateResultRaw) UnPackTo(t *StateResultRawT) {
 }
 
 func (rcv *StateResultRaw) UnPack() *StateResultRawT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &StateResultRawT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4779,17 +4673,14 @@ func StateResultRawStartDataVector(builder *flatbuffers.Builder, numElems int) f
 func StateResultRawEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type SnapshotHeaderT struct {
-	State        SnapshotState `json:"state"`
-	OutputOffset uint32        `json:"output_offset"`
-	OutputSize   uint32        `json:"output_size"`
+	State SnapshotState `json:"state"`
+	OutputOffset uint32 `json:"output_offset"`
+	OutputSize uint32 `json:"output_size"`
 }
 
 func (t *SnapshotHeaderT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	SnapshotHeaderStart(builder)
 	SnapshotHeaderAddState(builder, t.State)
 	SnapshotHeaderAddOutputOffset(builder, t.OutputOffset)
@@ -4804,9 +4695,7 @@ func (rcv *SnapshotHeader) UnPackTo(t *SnapshotHeaderT) {
 }
 
 func (rcv *SnapshotHeader) UnPack() *SnapshotHeaderT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &SnapshotHeaderT{}
 	rcv.UnPackTo(t)
 	return t
@@ -4890,22 +4779,19 @@ func SnapshotHeaderAddOutputSize(builder *flatbuffers.Builder, outputSize uint32
 func SnapshotHeaderEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type SnapshotHandshakeT struct {
-	CoverEdges       bool    `json:"cover_edges"`
-	Kernel64Bit      bool    `json:"kernel_64_bit"`
-	Slowdown         int32   `json:"slowdown"`
-	SyscallTimeoutMs int32   `json:"syscall_timeout_ms"`
-	ProgramTimeoutMs int32   `json:"program_timeout_ms"`
-	Features         Feature `json:"features"`
-	EnvFlags         ExecEnv `json:"env_flags"`
-	SandboxArg       int64   `json:"sandbox_arg"`
+	CoverEdges bool `json:"cover_edges"`
+	Kernel64Bit bool `json:"kernel_64_bit"`
+	Slowdown int32 `json:"slowdown"`
+	SyscallTimeoutMs int32 `json:"syscall_timeout_ms"`
+	ProgramTimeoutMs int32 `json:"program_timeout_ms"`
+	Features Feature `json:"features"`
+	EnvFlags ExecEnv `json:"env_flags"`
+	SandboxArg int64 `json:"sandbox_arg"`
 }
 
 func (t *SnapshotHandshakeT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	SnapshotHandshakeStart(builder)
 	SnapshotHandshakeAddCoverEdges(builder, t.CoverEdges)
 	SnapshotHandshakeAddKernel64Bit(builder, t.Kernel64Bit)
@@ -4930,9 +4816,7 @@ func (rcv *SnapshotHandshake) UnPackTo(t *SnapshotHandshakeT) {
 }
 
 func (rcv *SnapshotHandshake) UnPack() *SnapshotHandshakeT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &SnapshotHandshakeT{}
 	rcv.UnPackTo(t)
 	return t
@@ -5091,19 +4975,16 @@ func SnapshotHandshakeAddSandboxArg(builder *flatbuffers.Builder, sandboxArg int
 func SnapshotHandshakeEnd(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
 	return builder.EndObject()
 }
-
 type SnapshotRequestT struct {
-	ExecFlags      ExecFlag `json:"exec_flags"`
-	NumCalls       int32    `json:"num_calls"`
-	AllCallSignal  uint64   `json:"all_call_signal"`
-	AllExtraSignal bool     `json:"all_extra_signal"`
-	ProgData       []byte   `json:"prog_data"`
+	ExecFlags ExecFlag `json:"exec_flags"`
+	NumCalls int32 `json:"num_calls"`
+	AllCallSignal uint64 `json:"all_call_signal"`
+	AllExtraSignal bool `json:"all_extra_signal"`
+	ProgData []byte `json:"prog_data"`
 }
 
 func (t *SnapshotRequestT) Pack(builder *flatbuffers.Builder) flatbuffers.UOffsetT {
-	if t == nil {
-		return 0
-	}
+	if t == nil { return 0 }
 	progDataOffset := flatbuffers.UOffsetT(0)
 	if t.ProgData != nil {
 		progDataOffset = builder.CreateByteString(t.ProgData)
@@ -5126,9 +5007,7 @@ func (rcv *SnapshotRequest) UnPackTo(t *SnapshotRequestT) {
 }
 
 func (rcv *SnapshotRequest) UnPack() *SnapshotRequestT {
-	if rcv == nil {
-		return nil
-	}
+	if rcv == nil { return nil }
 	t := &SnapshotRequestT{}
 	rcv.UnPackTo(t)
 	return t

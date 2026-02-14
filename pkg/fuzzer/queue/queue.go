@@ -22,6 +22,40 @@ import (
 	"github.com/google/syzkaller/prog"
 )
 
+// TimingExplorationPhase indicates the current phase of timing exploration.
+type TimingExplorationPhase int
+
+const (
+	// PhaseWidenedDiscovery: Phase 1 - use widened threshold to discover candidate pairs (don't save)
+	PhaseWidenedDiscovery TimingExplorationPhase = iota
+	// PhaseValidation: Phase 2 - use normal threshold with delays to validate (save if successful)
+	PhaseValidation
+)
+
+// TimingExplorationInfo holds metadata about a timing exploration job.
+type TimingExplorationInfo struct {
+	// Phase indicates which phase of timing exploration this is
+	Phase TimingExplorationPhase
+	// TargetPair is the pair being explored
+	TargetPair *ddrd.MayUAFPair
+	// AttemptNumber is the current attempt number for this pair
+	AttemptNumber int
+	// DelayPlan describes the delay insertions
+	DelayPlan []DelayInsertion
+	// OriginalProg1 and OriginalProg2 are the original programs before mutation
+	OriginalProg1 *prog.Prog
+	OriginalProg2 *prog.Prog
+	// CandidatePairs holds pairs discovered in PhaseWidenedDiscovery, to be validated in PhaseValidation
+	CandidatePairs []*ddrd.MayUAFPair
+}
+
+// DelayInsertion describes a single syz_delay insertion.
+type DelayInsertion struct {
+	ProgIdx     int   // 0 or 1, which program
+	BeforeCall  int   // index of the call before which to insert delay
+	DelayMicros int64 // delay in microseconds
+}
+
 type Request struct {
 	// Type of the request.
 	// RequestTypeProgram executes Prog, and is used by most requests (also the default zero value).
@@ -61,6 +95,19 @@ type Request struct {
 
 	// IsValidationMode indicates this request is from validation framework (use FINE modes)
 	IsValidationMode bool
+
+	// TimingThresholdUs is the timing threshold in microseconds for race pair detection.
+	// If > 0, overrides the default 2ms threshold in executor.
+	// Used by timing exploration queue to use widened threshold (e.g., 500ms = 500000us).
+	TimingThresholdUs int64
+
+	// IsTimingExploration marks this request as a timing exploration job.
+	// When true, results are processed specially to track exploration success.
+	IsTimingExploration bool
+
+	// TimingExplorationInfo holds metadata about the timing exploration job.
+	// Only set when IsTimingExploration is true.
+	TimingExplorationInfo *TimingExplorationInfo
 
 	// This stat will be incremented on request completion.
 	Stat *stat.Val

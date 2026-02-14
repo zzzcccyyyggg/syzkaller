@@ -5,6 +5,11 @@ configuration file, passed at invocation time with the `-config` option.
 This configuration can be based on the [example](/pkg/mgrconfig/testdata/qemu-example.cfg);
 the file is in JSON format and contains the the [following parameters](/pkg/mgrconfig/config.go).
 
+## DDRD Configuration
+
+For DDRD (Data Race / UAF Detector) related configurations under the `experimental`
+section, see the [DDRD Configuration Reference](ddrd_configuration_reference.md).
+
 ## Kernel objects
 
 `kernel_obj` still points at the directory that contains the unstripped

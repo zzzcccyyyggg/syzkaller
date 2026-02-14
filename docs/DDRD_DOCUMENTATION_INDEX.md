@@ -15,10 +15,13 @@
 │  │  设计与架构文档      │                                                │
 │  ├─────────────────────┤                                                │
 │  │ • uaf_barrier_fuzzing.md     ← UAF Barrier Fuzzing 整体设计          │
-│  │ • race_guided_fuzzing.md     ← Race-Guided Fuzzing 概览               │
-│  │ • race_guided_fuzzing_design.md ← 详细设计与实现说明                │
+│  │ • race_guided_fuzzing.md     ← Race-Guided Fuzzing 概览（已更新）     │
+│  │ • race_guided_fuzzing_design.md ← 历史设计（M1'/M2 已移除）         │
+│  │ • genfuzz_redesign.md        ← ★ GenFuzz 重设计（M1'/M2 移除说明）   │
+│  │ • timing_exploration_config.md ← Timing Exploration 双队列配置指南    │
 │  │ • barrier_dispatch_flow.md   ← Barrier 派发与 DDRD 集成流程          │
 │  │ • ddrd_executor_flow.md      ← Executor/Runner 中的 DDRD 处理流程    │
+│  │ • ddrd_configuration_reference.md ← ★ 完整配置参考手册              │
 │  └─────────────────────┘                                                │
 │           │                                                             │
 │           ▼                                                             │
@@ -54,6 +57,20 @@
 
 ### 1. 设计与架构
 
+#### [`ddrd_configuration_reference.md`](ddrd_configuration_reference.md)
+**定位**: ★ 完整配置参考手册
+
+**内容**:
+- 所有 `experimental` 节下的 DDRD 配置项（基础模式、Data Race 去重、历史记录、Race-Guided 策略、Timing Exploration、UAF Validate）
+- 每个配置项的类型、默认值、行为说明
+- 配置交互关系与依赖关系
+- 完整 JSON 配置示例（Fuzzing / Baseline / Validate）
+- Executor 编译时常量
+
+**适合**: 配置任何 DDRD 相关功能时的权威参考
+
+---
+
 #### [`uaf_barrier_fuzzing.md`](uaf_barrier_fuzzing.md)
 **定位**: 顶层设计文档
 
@@ -73,23 +90,52 @@
 **定位**: Race-Guided Fuzzing 概览
 
 **内容**:
-- M1'/M2 选择策略、对象链接、冷却与亲和度学习
+- 当前架构：随机选择 + ObjectLinker V2 + Solo Filter + Affinity Table
+- 已移除组件（M1'/M2/PairCooldown）说明
 - Solo Filter 与 Coverage Triage
-- 关键参数与文件结构
+- 关键文件结构
 
-**适合**: 快速理解 race-guided 的核心机制
+**适合**: 快速理解 race-guided 的当前架构
 
 ---
 
 #### [`race_guided_fuzzing_design.md`](race_guided_fuzzing_design.md)
-**定位**: 详细设计与实现
+**定位**: 历史设计与实现（参考用）
 
 **内容**:
-- 选择、链接、过滤与反馈全链路设计
-- Bandit 更新细节与覆盖率归因
-- 亲和度表、冷却、VarName Registry 细节
+- 当前简化架构图
+- 历史 M1'/M2/PairCooldown 详细设计（标记为已移除）
+- VarName Registry、Coverage Triage 细节
+- A/B Testing 配置
 
-**适合**: 深入理解实现细节与扩展方向
+**适合**: 了解历史设计决策和演进过程
+
+---
+
+#### [`genfuzz_redesign.md`](genfuzz_redesign.md)
+**定位**: ★ GenFuzz 重设计方案
+
+**内容**:
+- M1'/M2 过度聚焦问题分析
+- Phase 1：M1'/M2 代码移除（✅已完成）
+- Phase 2：多策略延时注入设计（待定）
+- Phase 3：竞争知识引导的变异设计（待定）
+- 实现计划与风险评估
+
+**适合**: 理解 M1'/M2 为何被移除、未来改进方向
+
+---
+
+#### [`timing_exploration_config.md`](timing_exploration_config.md)
+**定位**: Timing Exploration 双队列配置指南
+
+**内容**:
+- Pair Discovery Queue 与 Timing Exploration Queue 双队列架构
+- `syz_delay()` 插入策略与配置
+- 4 种变异策略（targeted/timediff/binary_search/random）
+- 完整配置字段说明与示例
+
+**适合**: 配置 Timing Exploration 参数
 
 ---
 
@@ -225,13 +271,18 @@
 
 ### 新手入门
 1. [`uaf_barrier_fuzzing.md`](uaf_barrier_fuzzing.md) - 了解整体设计
-2. [`ddrd_tools_usage.md`](ddrd_tools_usage.md) - 学习基本使用
-3. [`uaf_validate_mode.md`](uaf_validate_mode.md) - 配置验证模式
+2. [`ddrd_configuration_reference.md`](ddrd_configuration_reference.md) - 完整配置参考
+3. [`race_guided_fuzzing.md`](race_guided_fuzzing.md) - 快速理解 race-guided 核心机制
+4. [`ddrd_tools_usage.md`](ddrd_tools_usage.md) - 学习基本使用
+5. [`uaf_validate_mode.md`](uaf_validate_mode.md) - 配置验证模式
 
 ### 深入理解实现
-1. [`barrier_dispatch_flow.md`](barrier_dispatch_flow.md) - Barrier 调度机制
-2. [`ddrd_executor_flow.md`](ddrd_executor_flow.md) - DDRD 数据流
-3. [`DDRD_BARRIER_IMPLEMENTATION_STATUS.md`](../DDRD_BARRIER_IMPLEMENTATION_STATUS.md) - 代码入口点
+1. [`genfuzz_redesign.md`](genfuzz_redesign.md) - M1'/M2 移除说明与未来改进方向
+2. [`race_guided_fuzzing_design.md`](race_guided_fuzzing_design.md) - 历史 M1'/M2 设计（参考）
+3. [`timing_exploration_config.md`](timing_exploration_config.md) - Timing Exploration 双队列配置
+3. [`barrier_dispatch_flow.md`](barrier_dispatch_flow.md) - Barrier 调度机制
+4. [`ddrd_executor_flow.md`](ddrd_executor_flow.md) - DDRD 数据流
+5. [`DDRD_BARRIER_IMPLEMENTATION_STATUS.md`](../DDRD_BARRIER_IMPLEMENTATION_STATUS.md) - 代码入口点
 
 ### 问题排查
 1. [`ddrd_tools_usage.md`](ddrd_tools_usage.md) - 调试技巧章节
@@ -249,6 +300,10 @@
 | DDRD 序列化 | `executor/executor.cc::ddrd_build_output()` |
 | UKC 控制 | `executor/ukc.h` |
 | Race Detector | `executor/ddrd/race_detector.{h,c}` |
+| Race-Guided Fuzzing | `pkg/fuzzer/race_group.go`, `affinity_table.go` |
+| Timing Exploration | `pkg/fuzzer/timing_scheduler.go`, `timing_mutator.go`, `timing_queue.go` |
+| Pair Evaluation | `pkg/fuzzer/pair_evaluator.go` |
+| UAF Corpus | `pkg/fuzzer/race.go` |
 | UAF Store (Go) | `pkg/manager/uaf_store.go` |
 | Validate Manager | `pkg/racevalidate/manager.go` (package `uafvalidate`) |
 | Executor Adapter | `pkg/racevalidate/executor.go` (package `uafvalidate`) |
@@ -261,4 +316,4 @@
 - 新功能需在本索引中添加条目
 - 过时内容应标记或删除，避免误导
 
-**最后更新**: 2026-01-19
+**最后更新**: 2026-02-14

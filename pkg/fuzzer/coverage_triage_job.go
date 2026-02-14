@@ -125,24 +125,10 @@ func (job *coverageTriageJob) checkCoverageContribution(newCover, progCover cove
 	return contributed
 }
 
-// boostProgramsWithNewCoverage boosts Bandit scores for programs that brought new coverage.
+// boostProgramsWithNewCoverage is a no-op after M2 Bandit removal.
+// Kept as stub for potential future use.
 func (job *coverageTriageJob) boostProgramsWithNewCoverage(prog1Contributed, prog2Contributed bool) {
-	if job.fuzzer.raceGroup == nil {
-		return
-	}
-
-	// For each program that contributed new coverage, boost its Bandit score
-	if prog1Contributed {
-		job.fuzzer.raceGroup.BoostBanditForNewCoverage(job.prog1)
-		job.fuzzer.statCoverageTriageBoosts.Add(1)
-		log.Logf(1, "[COV-TRIAGE] boosted prog1 for new coverage contribution")
-	}
-
-	if prog2Contributed {
-		job.fuzzer.raceGroup.BoostBanditForNewCoverage(job.prog2)
-		job.fuzzer.statCoverageTriageBoosts.Add(1)
-		log.Logf(1, "[COV-TRIAGE] boosted prog2 for new coverage contribution")
-	}
+	// M2 Bandit removed — no boost needed
 }
 
 // boostPairPriority gives the pair more mutation opportunities.

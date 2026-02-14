@@ -1962,6 +1962,7 @@ struct ExecRequestRawT : public flatbuffers::NativeTable {
   int32_t ukc_use_access_delay_time = 0;
   bool ukc_is_valid = false;
   bool ukc_use_fine_mode = false;
+  int64_t timing_threshold_us = 0;
   ExecRequestRawT() = default;
   ExecRequestRawT(const ExecRequestRawT &o);
   ExecRequestRawT(ExecRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -1994,7 +1995,8 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_UKC_FREE_TID = 42,
     VT_UKC_USE_ACCESS_DELAY_TIME = 44,
     VT_UKC_IS_VALID = 46,
-    VT_UKC_USE_FINE_MODE = 48
+    VT_UKC_USE_FINE_MODE = 48,
+    VT_TIMING_THRESHOLD_US = 50
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -2065,6 +2067,9 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   bool ukc_use_fine_mode() const {
     return GetField<uint8_t>(VT_UKC_USE_FINE_MODE, 0) != 0;
   }
+  int64_t timing_threshold_us() const {
+    return GetField<int64_t>(VT_TIMING_THRESHOLD_US, 0);
+  }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
            VerifyField<int64_t>(verifier, VT_ID, 8) &&
@@ -2093,6 +2098,7 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME, 4) &&
            VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID, 1) &&
            VerifyField<uint8_t>(verifier, VT_UKC_USE_FINE_MODE, 1) &&
+           VerifyField<int64_t>(verifier, VT_TIMING_THRESHOLD_US, 8) &&
            verifier.EndTable();
   }
   ExecRequestRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2173,6 +2179,9 @@ struct ExecRequestRawBuilder {
   void add_ukc_use_fine_mode(bool ukc_use_fine_mode) {
     fbb_.AddElement<uint8_t>(ExecRequestRaw::VT_UKC_USE_FINE_MODE, static_cast<uint8_t>(ukc_use_fine_mode), 0);
   }
+  void add_timing_threshold_us(int64_t timing_threshold_us) {
+    fbb_.AddElement<int64_t>(ExecRequestRaw::VT_TIMING_THRESHOLD_US, timing_threshold_us, 0);
+  }
   explicit ExecRequestRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
     start_ = fbb_.StartTable();
@@ -2208,8 +2217,10 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
     bool ukc_is_valid = false,
-    bool ukc_use_fine_mode = false) {
+    bool ukc_use_fine_mode = false,
+    int64_t timing_threshold_us = 0) {
   ExecRequestRawBuilder builder_(_fbb);
+  builder_.add_timing_threshold_us(timing_threshold_us);
   builder_.add_ukc_free_stack(ukc_free_stack);
   builder_.add_ukc_free_name(ukc_free_name);
   builder_.add_ukc_use_stack(ukc_use_stack);
@@ -2260,7 +2271,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
     bool ukc_is_valid = false,
-    bool ukc_use_fine_mode = false) {
+    bool ukc_use_fine_mode = false,
+    int64_t timing_threshold_us = 0) {
   auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
   auto all_signal__ = all_signal ? _fbb.CreateVector<int32_t>(*all_signal) : 0;
   auto barrier_start_delay_us__ = barrier_start_delay_us ? _fbb.CreateVector<int64_t>(*barrier_start_delay_us) : 0;
@@ -2288,7 +2300,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
       ukc_free_tid,
       ukc_use_access_delay_time,
       ukc_is_valid,
-      ukc_use_fine_mode);
+      ukc_use_fine_mode,
+      timing_threshold_us);
 }
 
 flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -4284,7 +4297,8 @@ inline ExecRequestRawT::ExecRequestRawT(const ExecRequestRawT &o)
         ukc_free_tid(o.ukc_free_tid),
         ukc_use_access_delay_time(o.ukc_use_access_delay_time),
         ukc_is_valid(o.ukc_is_valid),
-        ukc_use_fine_mode(o.ukc_use_fine_mode) {
+        ukc_use_fine_mode(o.ukc_use_fine_mode),
+        timing_threshold_us(o.timing_threshold_us) {
 }
 
 inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT {
@@ -4311,6 +4325,7 @@ inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFER
   std::swap(ukc_use_access_delay_time, o.ukc_use_access_delay_time);
   std::swap(ukc_is_valid, o.ukc_is_valid);
   std::swap(ukc_use_fine_mode, o.ukc_use_fine_mode);
+  std::swap(timing_threshold_us, o.timing_threshold_us);
   return *this;
 }
 
@@ -4346,6 +4361,7 @@ inline void ExecRequestRaw::UnPackTo(ExecRequestRawT *_o, const flatbuffers::res
   { auto _e = ukc_use_access_delay_time(); _o->ukc_use_access_delay_time = _e; }
   { auto _e = ukc_is_valid(); _o->ukc_is_valid = _e; }
   { auto _e = ukc_use_fine_mode(); _o->ukc_use_fine_mode = _e; }
+  { auto _e = timing_threshold_us(); _o->timing_threshold_us = _e; }
 }
 
 inline flatbuffers::Offset<ExecRequestRaw> ExecRequestRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -4379,6 +4395,7 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _ukc_use_access_delay_time = _o->ukc_use_access_delay_time;
   auto _ukc_is_valid = _o->ukc_is_valid;
   auto _ukc_use_fine_mode = _o->ukc_use_fine_mode;
+  auto _timing_threshold_us = _o->timing_threshold_us;
   return rpc::CreateExecRequestRaw(
       _fbb,
       _id,
@@ -4403,7 +4420,8 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
       _ukc_free_tid,
       _ukc_use_access_delay_time,
       _ukc_is_valid,
-      _ukc_use_fine_mode);
+      _ukc_use_fine_mode,
+      _timing_threshold_us);
 }
 
 inline SignalUpdateRawT *SignalUpdateRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

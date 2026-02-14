@@ -1,10 +1,27 @@
 # Race-Yield-Guided Program-Group Fuzzing Design
 
+> **⚠️ 历史设计文档 (2026-02-14 更新)**
+>
+> M1'（Hybrid Partner Selection）、M2（Bandit Corpus Selection）、PairCooldown 已被**完全移除**。
+> 当前系统使用**纯随机选择 + ObjectLinker V2**。
+> 本文档保留历史设计供参考。当前架构见 [genfuzz_redesign.md](genfuzz_redesign.md)。
+
 ## Overview
 
-This document describes the design and implementation of the Race-Guided Program-Group Fuzzing framework in DDRD-syzkaller. The framework combines M1' partner selection, M2 bandit corpus selection, object linking, pair cooldown, syscall affinity learning, solo filtering, coverage triage, and a VarName Pair Registry.
+This document describes the **historical** design of the Race-Guided Program-Group Fuzzing framework.
+The M1'/M2/PairCooldown components documented here have been removed due to the Thompson Sampling
+over-exploitation problem (positive feedback loop causing program starvation).
 
-## Architecture
+**Current architecture (post-cleanup)**:
+- Corpus selection: `Corpus.ChooseProgram(rnd)` — pure random
+- Partner selection: `Corpus.ChooseProgram(rnd)` — pure random + Clone
+- Object Linking V2: preserved — syscall variant unification
+- Solo Filter: preserved — cross-program pair filtering
+- VarName Pair Registry: preserved — max stacks per pair
+- Affinity Table: preserved — syscall interaction learning
+- Coverage Triage: preserved — coverage attribution (no bandit boost)
+
+## Architecture (Current)
 
 ```
 ┌─────────────────────────────────────────────────────────────────────┐
@@ -13,12 +30,10 @@ This document describes the design and implementation of the Race-Guided Program
                  │                                       │
                  ▼                                       ▼
 ┌────────────────────────────┐        ┌─────────────────────────────┐
-│  M2 Bandit Corpus          │        │  M1' Hybrid Partner         │
-│  Selector                  │        │  Selector                   │
+│  Corpus Selection          │        │  Partner Selection          │
 │  ────────────────────      │        │  ─────────────────────     │
-│  • Thompson Sampling       │        │  • 60% ScoreBased           │
-│  • Beta(α,β) per program   │        │  • 30% RacePrior            │
-│  • Feedback: VarName pairs │        │  • 10% Explore              │
+│  • Random (uniform)        │        │  • Random (uniform)         │
+│  • No bandit feedback      │        │  • No scoring/prior         │
 └──────────────┬─────────────┘        └──────────────┬──────────────┘
                │                                   │
                └──────────────┬────────────────────┘
@@ -39,11 +54,18 @@ This document describes the design and implementation of the Race-Guided Program
          ▼                      ▼                      ▼
 ┌────────────────────┐  ┌──────────────────────┐  ┌──────────────────────┐
 │ Solo Filter         │  │ Coverage Triage Job  │  │ VarName Pair Registry│
-│ (cross-prog only)   │  │ (bandit boost)       │  │ (max 20 stacks/pair) │
+│ (cross-prog only)   │  │ (affinity recording) │  │ (max 100 stacks/pair)│
 └────────────────────┘  └──────────────────────┘  └──────────────────────┘
 ```
 
-## Module 1' (M1'): Hybrid Partner Selector
+---
+
+## Historical Design (Removed Components)
+
+> The following sections document M1'/M2/PairCooldown as they existed before removal.
+> They are preserved for historical reference only.
+
+## Module 1' (M1'): Hybrid Partner Selector [REMOVED]
 
 ### Purpose
 Select a partner program to pair with the current program for concurrent execution to maximize the chance of triggering races.
@@ -84,26 +106,17 @@ PairPenalty   = 1.0 (normal) or 0.01 (cooldown)
 ### Implementation
 
 ```go
-// RacePriorIndex tracks program pairs that have historically produced races
 type RacePriorIndex struct {
     mu    sync.RWMutex
-    pairs map[RacePairKey]*RacePairEntry
-}
-
-type RacePairKey struct {
-    Prog1Hash uint64
-    Prog2Hash uint64
-}
-
-type RacePairEntry struct {
-    Prog1     *prog.Prog
-    Prog2     *prog.Prog
-    RaceCount int
-    LastSeen  time.Time
+    index map[string][]*RacePriorEntry  // progSig → partner entries
 }
 ```
 
-## Module 2 (M2): Bandit Corpus Selector
+> **Note**: The `RacePairKey`/`RacePairEntry` types shown in earlier design drafts have been
+> replaced by a simpler `progSig → []*RacePriorEntry` map in the current implementation.
+> See `pkg/fuzzer/race_group.go` for the actual structure.
+
+## Module 2 (M2): Bandit Corpus Selector [REMOVED]
 
 ### Purpose
 Select which program from the corpus to use as the base for fuzzing, using a Multi-Armed Bandit approach to balance exploitation and exploration.
@@ -117,30 +130,31 @@ Each program in the corpus maintains a Beta(α, β) distribution:
 ```go
 type BanditCorpusSelector struct {
     mu           sync.RWMutex
-    progStats    map[uint64]*BanditProgStats  // hash → stats
-    seenVarPairs map[VarPairKey]struct{}      // for deduplication
+    betaParams   map[string]*BetaParams   // progSignature → params
+    seenVarPairs map[uint64]struct{}       // for deduplication
 }
 
-type BanditProgStats struct {
-    prog  *prog.Prog
-    alpha float64  // success count (new VarName pairs)
-    beta  float64  // failure count (no new pairs)
+type BetaParams struct {
+    Alpha float64  // success count (new VarName pairs)
+    Beta  float64  // failure count (no new pairs)
 }
 ```
 
 ### Selection Process
 
 ```go
-func (b *BanditCorpusSelector) Select() *prog.Prog {
+func (b *BanditCorpusSelector) SelectProgramWithBandit(corpus []*prog.Prog) *prog.Prog {
     // Thompson Sampling: sample from Beta(α, β) for each program
     var best *prog.Prog
     var bestSample float64
     
-    for _, stats := range b.progStats {
-        sample := sampleBeta(stats.alpha, stats.beta)
+    for _, p := range corpus {
+        sig := progSignature(p)
+        params := b.getOrCreateParams(sig)
+        sample := sampleBeta(params.Alpha, params.Beta)
         if sample > bestSample {
             bestSample = sample
-            best = stats.prog
+            best = p
         }
     }
     return best
@@ -197,10 +211,7 @@ Increase the probability that program pairs access the same kernel objects.
 For syscalls of the **same type** between prog1 and prog2, unify resource arguments
 in prog2 to match prog1 (e.g., file paths), avoiding brittle path matching.
 
-## Pair Cooldown
-
-### Purpose
-Avoid repeatedly executing exhausted (main, partner) pairs.
+## Pair Cooldown [REMOVED]
 
 ### Three-Tier Penalty System
 
@@ -249,6 +260,12 @@ Confidence = min(Executions / 100, 1.0)
 ```
 
 ## Module 3 (M3): Window Preserving Mutation
+
+> **⚠️ NOT IMPLEMENTED — Removed in current version.**
+>
+> The M3 module was designed but never fully implemented. The current codebase uses
+> standard syzkaller mutation instead. The design below is preserved for reference
+> in case this feature is revisited in the future.
 
 ### Purpose
 When mutating programs that have produced races, preserve the relative ordering of syscalls involved in the race to maintain the race-triggering capability.
@@ -340,10 +357,12 @@ const DefaultMaxStacksPerVarPair = 100
 type VarNamePairRegistry struct {
     mu            sync.RWMutex
     stacksPerPair map[uint64]map[uint64]bool  // varPairID → stackPairID → exists
-    maxStacks     int
+    maxStacks     int                          // default: 100 (configurable)
 }
 
-func (r *VarNamePairRegistry) ShouldRecord(pair *MayUAFPair) bool {
+// RegisterPair checks and records a new stack for a VarName pair.
+// Returns true if the pair was accepted (under the stack limit).
+func (r *VarNamePairRegistry) RegisterPair(pair *MayUAFPair) bool {
     varPairID := varNamePairID(pair.FreeAccessName, pair.UseAccessName)
     stkPairID := stackPairID(pair.FreeCallStack, pair.UseCallStack)
     
@@ -418,10 +437,8 @@ and boost the bandit scores for exploration.
 
 1. **Receive Race Reports** via FlatBuffers
 2. **Convert to MayUAFPair** with call indices
-3. **VarName Pair Registry** filters duplicates (max 20)
-4. **M2 Bandit Feedback** updates program statistics
-5. **M1' Partner Selector** updates race prior index
-6. **M3 Window Preserving** extracts race windows for mutation
+3. **VarName Pair Registry** filters duplicates (max 100 stacks per VarName pair)
+4. **Affinity Table** records syscall interaction data
 
 ## File Locations
 
@@ -433,40 +450,43 @@ and boost the bandit scores for exploration.
 | FlatBuffers Schema | `pkg/flatrpc/flatrpc.fbs` |
 | Go Types | `pkg/ddrd/types.go` |
 | Race Report Conversion | `pkg/ddrd/report.go` |
-| M1', M2, VarName Registry, Solo Filter | `pkg/fuzzer/race_group.go` |
+| M1', M2, VarName Registry, Solo Filter | `pkg/fuzzer/race_group.go` (M1'/M2 removed, Registry/SoloFilter remain) |
 | Object Linking V2 | `pkg/fuzzer/object_linking_v2.go` |
-| Pair Cooldown | `pkg/fuzzer/pair_cooldown.go` |
+| Pair Cooldown | ~~`pkg/fuzzer/pair_cooldown.go`~~ (deleted) |
 | Syscall Affinity Table | `pkg/fuzzer/affinity_table.go` |
 | Coverage Triage Job | `pkg/fuzzer/coverage_triage_job.go` |
 
 ## Configuration Summary
 
+> Parameters marked ~~strikethrough~~ belong to removed components M1'/M2/PairCooldown.
+
 | Parameter | Value | Description |
 |-----------|-------|-------------|
-| ScoreBasedWeight | 0.6 | M1' bucket weight for score-based selection |
-| RacePriorWeight | 0.3 | M1' bucket weight for historical race pairs |
-| ExploreWeight | 0.1 | M1' bucket weight for random exploration |
-| MaxLengthDiff | 3 | Max syscall length difference for partners |
-| MinPairScore | 0.1 | Minimum score to accept a pair |
-| Initial Alpha | 1.0 | M2 Beta distribution initial α |
-| Initial Beta | 1.0 | M2 Beta distribution initial β |
-| NewVarNamePairReward | 10.0 | M2 Alpha boost for new VarName pair |
-| StackRewardBase | 2.0 | M2 Base for harmonic stack reward |
-| ExploitRate | 0.8 | M2 exploit probability for high-yield programs |
-| HighYieldThreshold | 3 | High-yield threshold for program selection |
-| AffinityWeight | 0.2 | Weight for syscall affinity score |
-| CooldownThreshold | 20 | Failure score to enter cooldown |
-| NewStackPenalty | 1 | Cooldown penalty for new stack only |
-| NoDiscoveryPenalty | 2 | Cooldown penalty for no discovery |
-| CooldownDuration | 200 | Cooldown length (selection rounds) |
+| ~~ScoreBasedWeight~~ | ~~0.6~~ | ~~M1' bucket weight for score-based selection~~ |
+| ~~RacePriorWeight~~ | ~~0.3~~ | ~~M1' bucket weight for historical race pairs~~ |
+| ~~ExploreWeight~~ | ~~0.1~~ | ~~M1' bucket weight for random exploration~~ |
+| ~~MaxLengthDiff~~ | ~~3~~ | ~~Max syscall length difference for partners~~ |
+| ~~MinPairScore~~ | ~~0.1~~ | ~~Minimum score to accept a pair~~ |
+| ~~Initial Alpha~~ | ~~1.0~~ | ~~M2 Beta distribution initial α~~ |
+| ~~Initial Beta~~ | ~~1.0~~ | ~~M2 Beta distribution initial β~~ |
+| ~~NewVarNamePairReward~~ | ~~10.0~~ | ~~M2 Alpha boost for new VarName pair~~ |
+| ~~StackRewardBase~~ | ~~2.0~~ | ~~M2 Base for harmonic stack reward~~ |
+| ~~ExploitRate~~ | ~~0.0~~ | ~~M2 exploit probability~~ |
+| ~~HighYieldThreshold~~ | ~~3~~ | ~~High-yield threshold~~ |
+| ~~AffinityWeight~~ | ~~0.2~~ | ~~Weight for syscall affinity score~~ |
+| ~~CooldownThreshold~~ | ~~20~~ | ~~Failure score to enter cooldown~~ |
+| ~~NewStackPenalty~~ | ~~1~~ | ~~Cooldown penalty for new stack only~~ |
+| ~~NoDiscoveryPenalty~~ | ~~2~~ | ~~Cooldown penalty for no discovery~~ |
+| ~~CooldownDuration~~ | ~~200~~ | ~~Cooldown length (selection rounds)~~ |
 | MaxStacksPerVarNamePair | 100 | VarName pair stack limit |
-| MAX_SYSCALL_HISTORY | 32 | Max history entries per thread |
+| MAX_SYSCALL_HISTORY | 128 | Max history entries per thread |
 | MAX_THREADS | 64 | Max tracked threads |
 | RandomBaselineMode | false | Disable all strategies for A/B testing |
 
 ## A/B Testing: Random Baseline Mode
 
-For evaluating the effectiveness of race-guided strategies, a **Random Baseline Mode** is provided.
+> **Note**: With M1'/M2 removed, `random_baseline_mode` now only affects Affinity Table recording
+> and a few minor code paths. The core selection is already random by default.
 
 ### Configuration
 
@@ -482,27 +502,16 @@ For evaluating the effectiveness of race-guided strategies, a **Random Baseline 
 
 | Component | Normal Mode | Random Baseline Mode |
 |-----------|-------------|---------------------|
-| M2 Bandit Corpus Selection | Thompson Sampling | Random selection |
-| M1' Partner Selection | ScoreBased/RacePrior/Explore | Random selection |
-| Pair Cooldown | Three-tier penalty tracking | Disabled |
+| Corpus Selection | Random | Random (same) |
+| Partner Selection | Random | Random (same) |
 | Affinity Table | Learning from interactions | Disabled |
 | Object Linking | Enabled | Enabled (preserved) |
 
-### Use Case
-
-Run two experiments with identical configurations except for `random_baseline_mode`:
-
-1. **Experiment A (Guided)**: `"random_baseline_mode": false`
-2. **Experiment B (Baseline)**: `"random_baseline_mode": true`
-
-Compare:
-- VarName pairs discovered over time
-- Unique stack combinations found
-- Time to first discovery
-
 ## Future Improvements
 
-1. **Decay Mechanism**: Add time-based decay for M2 Beta parameters
-2. **Adaptive Weights**: Dynamically adjust M1' bucket weights based on effectiveness
+1. ~~**Decay Mechanism**: Add time-based decay for M2 Beta parameters~~ (M2 removed)
+2. ~~**Adaptive Weights**: Dynamically adjust M1' bucket weights based on effectiveness~~ (M1' removed)
 3. **Cross-Program Analysis**: Share race information across fuzzing sessions
-4. **Priority Queuing**: Prioritize execution of high-value program pairs
+4. **Resource-Aware Partner Selection**: Leverage syzkaller's `ResourceType`/`ResultArg` system for smarter partner matching
+5. **Race-Aware Mutation**: Protect high-affinity syscalls from mutation (see [genfuzz_redesign.md](genfuzz_redesign.md) Module B)
+6. **Multi-Strategy Delay Injection**: Inject `syz_delay()` in normal barrier execution (see [genfuzz_redesign.md](genfuzz_redesign.md) Module C)

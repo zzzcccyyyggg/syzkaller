@@ -834,7 +834,8 @@ public:
 	      available_(false),
 	      warned_unavailable_(false),
 	      extended_requested_(false),
-	      active_for_group_(false)
+	      active_for_group_(false),
+	      timing_threshold_us_(0)
 	{
 	}
 
@@ -851,6 +852,13 @@ public:
 		ClearOutput();
 		active_for_group_ = false;
 		extended_requested_ = collect_extended;
+		
+		// Store timing threshold from request (if provided)
+		// This allows timing exploration queue to use widened threshold
+		timing_threshold_us_ = (req && req->timing_threshold_us > 0) ? req->timing_threshold_us : 0;
+		if (timing_threshold_us_ > 0) {
+			debug("ddrd: using custom timing threshold: %llu us\n", (unsigned long long)timing_threshold_us_);
+		}
 
 		bool set_pair = false;
 		ukc_device_uaf_pair_t pair = {};
@@ -1007,9 +1015,14 @@ public:
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
 		// 为避免更改过多 race 也先使用uaf pair的模型
 		// Pass merged syscall context to race detector
-		int count = race_detector_analyze_and_generate_race_infos(&detector_, pairs.data(),
+		// Use configurable threshold if set, otherwise use default (0 = 2ms)
+		int count = race_detector_analyze_and_generate_race_infos_with_threshold(&detector_, pairs.data(),
 									  (int)kDdrdMaxUafPairs,
-									  &merged_ctx);
+									  &merged_ctx, timing_threshold_us_);
+		if (timing_threshold_us_ > 0) {
+			debug("ddrd: analyzed with custom threshold %llu us, found %d pairs\n", 
+			      (unsigned long long)timing_threshold_us_, count);
+		}
 		if (count <= 0) {
 			ClearOutput();
 			active_for_group_ = false;
@@ -1138,6 +1151,7 @@ private:
 	bool warned_unavailable_;
 	bool extended_requested_;
 	bool active_for_group_;
+	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 2ms)
 	DdrdOutputState output_;
 };
 #endif // GOOS_linux
