@@ -502,6 +502,7 @@ const uint64 instr_eof = -1;
 const uint64 instr_copyin = -2;
 const uint64 instr_copyout = -3;
 const uint64 instr_setprops = -4;
+const uint64 instr_fork_and_exec = -5; // keep in sync with prog.execInstrForkAndExec
 
 const uint64 arg_const = 0;
 const uint64 arg_addr32 = 1;
@@ -697,6 +698,7 @@ static bool copyout(char* addr, uint64 size, uint64* res);
 static void setup_control_pipes();
 static bool coverage_filter(uint64 pc);
 static rpc::ComparisonRaw convert(const kcov_comparison_t& cmp);
+void execute_fork_barrier(uint8** input_posp, int setup_call_index);
 static flatbuffers::span<uint8_t> finish_output(OutputData* output, int proc_id, uint64 req_id, uint32 num_calls,
 						uint64 elapsed, uint64 freshness, uint32 status, bool hanged,
 						const std::vector<uint8_t>* process_output, uint64 barrier_procs,
@@ -1258,6 +1260,7 @@ void execute_one()
 	}
 
 	int call_index = 0;
+	bool used_fork_barrier = false;
 	uint64 prog_extra_timeout = 0;
 	uint64 prog_extra_cover_timeout = 0;
 	call_props_t call_props;
@@ -1367,6 +1370,19 @@ void execute_one()
 			read_call_props_t(call_props, read_input(&input_pos, false));
 			continue;
 		}
+		if (call_num == instr_fork_and_exec) {
+			// Fork-barrier execution: fork N children that inherit the parent's fd table.
+			// The setup calls have already executed above (as normal syscalls), so all
+			// fds/resources are available. Now fork children that each execute their
+			// own portion of syscalls concurrently.
+			fprintf(stderr, "[FORK-BARRIER] execute_one: hit instr_fork_and_exec at call_index=%d\n", call_index);
+			used_fork_barrier = true;
+			execute_fork_barrier(&input_pos, call_index);
+			fprintf(stderr, "[FORK-BARRIER] execute_one: fork_barrier completed, going to fork_barrier_done\n");
+			// After fork-barrier, parent breaks out of the main loop.
+			// Children have _exit'd already.
+			goto fork_barrier_done;
+		}
 
 		// Normal syscall.
 		if (call_num >= ARRAY_SIZE(syscalls))
@@ -1448,6 +1464,7 @@ void execute_one()
 		}
 	}
 
+fork_barrier_done:
 #if SYZ_HAVE_CLOSE_FDS
 	close_fds();
 #endif
@@ -1466,31 +1483,428 @@ void execute_one()
 		}
 	}
 
-	// Copy syscall context to shared memory for runner process to read
+	// Copy syscall context to shared memory for runner process to read.
+	// In fork-barrier mode, children have already written their entries to
+	// output_data->syscall_history via atomic append before _exit(0).
+	// Only overwrite with parent's g_syscall_context for non-fork-barrier paths.
 #if GOOS_linux
 	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
-		int32_t ctx_count = g_syscall_context.history_count;
-		if (ctx_count > (int32_t)MAX_SHARED_SYSCALL_HISTORY)
-			ctx_count = (int32_t)MAX_SHARED_SYSCALL_HISTORY;
-		output_data->syscall_history_count.store(ctx_count, std::memory_order_release);
-		for (int32_t i = 0; i < ctx_count; i++) {
-			output_data->syscall_history[i].tid = g_syscall_context.history[i].tid;
-			output_data->syscall_history[i].call_index = g_syscall_context.history[i].call_index;
-			output_data->syscall_history[i].prog_idx = barrier_index >= 0 ? barrier_index : 0; // Record which program
-			output_data->syscall_history[i].start_time = g_syscall_context.history[i].start_time;
-			output_data->syscall_history[i].end_time = g_syscall_context.history[i].end_time;
+		if (!used_fork_barrier) {
+			// Non-fork-barrier: copy from g_syscall_context (original behavior)
+			int32_t ctx_count = g_syscall_context.history_count;
+			if (ctx_count > (int32_t)MAX_SHARED_SYSCALL_HISTORY)
+				ctx_count = (int32_t)MAX_SHARED_SYSCALL_HISTORY;
+			output_data->syscall_history_count.store(ctx_count, std::memory_order_release);
+			for (int32_t i = 0; i < ctx_count; i++) {
+				output_data->syscall_history[i].tid = g_syscall_context.history[i].tid;
+				output_data->syscall_history[i].call_index = g_syscall_context.history[i].call_index;
+				output_data->syscall_history[i].prog_idx = barrier_index >= 0 ? barrier_index : 0;
+				output_data->syscall_history[i].start_time = g_syscall_context.history[i].start_time;
+				output_data->syscall_history[i].end_time = g_syscall_context.history[i].end_time;
+			}
+		} else {
+			// Fork-barrier: children already populated output_data->syscall_history.
+			int32_t total = output_data->syscall_history_count.load(std::memory_order_acquire);
+			fprintf(stderr, "[FORK-BARRIER] parent: total %d syscall history entries in shared memory (setup+children)\n", total);
 		}
-		// fprintf(stderr, "[SHM-WRITE] executor pid=%d barrier_idx=%d wrote %d syscall entries to shared memory\n",
-		// 	getpid(), barrier_index, ctx_count);
-		// for (int32_t i = 0; i < ctx_count && i < 8; i++) {
-		// 	fprintf(stderr, "[SHM-WRITE]   entry[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\n",
-		// 		i, output_data->syscall_history[i].tid, output_data->syscall_history[i].call_index,
-		// 		output_data->syscall_history[i].prog_idx,
-		// 		(unsigned long long)output_data->syscall_history[i].start_time,
-		// 		(unsigned long long)output_data->syscall_history[i].end_time);
-		// }
 	}
 #endif
+}
+
+// Maximum number of children in fork-barrier mode. Keep in sync with Go side.
+static const int kMaxForkBarrierChildren = 8;
+
+// Shared memory structure for fork-barrier synchronization between parent and children.
+struct fork_barrier_sync {
+	std::atomic<int> ready_count;
+	std::atomic<bool> released;
+};
+
+// execute_fork_barrier handles the instr_fork_and_exec instruction.
+// At this point, all setup calls have already been executed by the parent.
+// The parent's fd table contains the shared resources (opened fds, sockets, etc.).
+// We fork() N children, each inheriting the fd table, and each executing their
+// own portion of the serialized syscall stream concurrently.
+//
+// Parameters:
+//   input_posp: pointer to the current position in the input stream (right after instr_fork_and_exec).
+//   setup_call_index: the call_index counter after setup calls have been processed.
+void execute_fork_barrier(uint8** input_posp, int setup_call_index)
+{
+	uint8* input_pos = *input_posp;
+	uint64 num_children = read_input(&input_pos);
+	fprintf(stderr, "[FORK-BARRIER] enter: num_children=%llu setup_call_index=%d\n",
+		(unsigned long long)num_children, setup_call_index);
+	if (num_children < 2 || num_children > kMaxForkBarrierChildren)
+		failmsg("bad fork barrier children count", "num_children=%llu", num_children);
+
+	// Read per-child metadata: (num_calls, delay_us) pairs.
+	struct child_meta {
+		uint64 num_calls;
+		int64_t delay_us;
+	};
+	child_meta children[kMaxForkBarrierChildren];
+	for (uint64 i = 0; i < num_children; i++) {
+		children[i].num_calls = read_input(&input_pos);
+		children[i].delay_us = static_cast<int64_t>(read_input(&input_pos));
+		fprintf(stderr, "[FORK-BARRIER] child[%llu]: num_calls=%llu delay_us=%lld\n",
+			(unsigned long long)i, (unsigned long long)children[i].num_calls,
+			(long long)children[i].delay_us);
+	}
+
+	// First, drain any still-running setup threads.
+	for (int i = 0; i < kMaxThreads; i++) {
+		thread_t* th = &threads[i];
+		if (th->executing && event_isset(&th->done))
+			handle_completion(th);
+	}
+	// Wait a bit more for any still-running threads.
+	if (running > 0) {
+		uint64 wait_end = current_time_ms() + 2 * syscall_timeout_ms;
+		while (running > 0 && current_time_ms() <= wait_end) {
+			sleep_ms(1 * slowdown_scale);
+			for (int i = 0; i < kMaxThreads; i++) {
+				thread_t* th = &threads[i];
+				if (th->executing && event_isset(&th->done))
+					handle_completion(th);
+			}
+		}
+	}
+
+	// Pre-scan to compute each child's input data start offset.
+	// We need to skip through each child's serialized instruction stream
+	// to find where the next child's data begins.
+	uint8* child_input_start[kMaxForkBarrierChildren];
+	uint8* scan_pos = input_pos;
+	for (uint64 i = 0; i < num_children; i++) {
+		child_input_start[i] = scan_pos;
+		// Skip this child's calls by reading through its instructions.
+		for (uint64 c = 0; c < children[i].num_calls; c++) {
+			// Each "call" in the serialized stream consists of:
+			// - Zero or more copyin/copyout/setprops instructions
+			// - One actual syscall instruction
+			// We need to skip all of them.
+			for (;;) {
+				uint64 call_num = read_input(&scan_pos);
+				if (call_num == instr_eof)
+					goto scan_done; // premature EOF
+				if (call_num == instr_copyin) {
+					// Skip copyin: addr, type, then type-specific data
+					read_input(&scan_pos); // addr
+					uint64 typ = read_input(&scan_pos);
+					switch (typ) {
+					case arg_const: {
+						read_input(&scan_pos); // meta
+						read_input(&scan_pos); // val
+						break;
+					}
+					case arg_addr32:
+					case arg_addr64:
+						read_input(&scan_pos); // val
+						break;
+					case arg_result:
+						read_input(&scan_pos); // meta
+						read_input(&scan_pos); // idx
+						read_input(&scan_pos); // div
+						read_input(&scan_pos); // add
+						read_input(&scan_pos); // default
+						break;
+					case arg_data: {
+						uint64 size = read_input(&scan_pos);
+						size &= ~(1ull << 63);
+						scan_pos += size;
+						break;
+					}
+					case arg_csum: {
+						uint64 size = read_input(&scan_pos);
+						(void)size;
+						uint64 csum_kind = read_input(&scan_pos);
+						if (csum_kind == 0) { // arg_csum_inet
+							uint64 chunks = read_input(&scan_pos);
+							for (uint64 j = 0; j < chunks; j++) {
+								read_input(&scan_pos); // chunk_kind
+								read_input(&scan_pos); // value
+								read_input(&scan_pos); // size
+							}
+						}
+						break;
+					}
+					}
+					continue;
+				}
+				if (call_num == instr_copyout) {
+					read_input(&scan_pos); // index
+					read_input(&scan_pos); // addr
+					read_input(&scan_pos); // size
+					continue;
+				}
+				if (call_num == instr_setprops) {
+					// Skip 3 properties (fail_nth, async, rerun)
+					read_input(&scan_pos, false);
+					read_input(&scan_pos, false);
+					read_input(&scan_pos, false);
+					continue;
+				}
+				// It's a real syscall. Skip copyout_index, num_args, and args.
+				read_input(&scan_pos); // copyout_index
+				uint64 num_args = read_input(&scan_pos);
+				for (uint64 a = 0; a < num_args; a++)
+					read_arg(&scan_pos);
+				// This call is done; move to next call in this child.
+				break;
+			}
+		}
+	}
+scan_done:
+
+	// Allocate shared sync barrier using mmap(MAP_SHARED|MAP_ANONYMOUS).
+	// This memory is shared across fork() so children and parent can synchronize.
+	void* sync_mem = mmap(NULL, sizeof(fork_barrier_sync),
+			      PROT_READ | PROT_WRITE, MAP_SHARED | MAP_ANONYMOUS, -1, 0);
+	if (sync_mem == MAP_FAILED)
+		fail("mmap for fork barrier sync");
+	auto* sync = new (sync_mem) fork_barrier_sync();
+	sync->ready_count.store(0, std::memory_order_relaxed);
+	sync->released.store(false, std::memory_order_relaxed);
+
+	// Before forking: write setup-phase syscall history to shared memory.
+	// Children will atomically append their own entries.
+#if GOOS_linux
+	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+		int32_t setup_hist_count = g_syscall_context.history_count;
+		if (setup_hist_count > (int32_t)MAX_SHARED_SYSCALL_HISTORY)
+			setup_hist_count = (int32_t)MAX_SHARED_SYSCALL_HISTORY;
+		for (int32_t j = 0; j < setup_hist_count; j++) {
+			output_data->syscall_history[j].tid = g_syscall_context.history[j].tid;
+			output_data->syscall_history[j].call_index = g_syscall_context.history[j].call_index;
+			output_data->syscall_history[j].prog_idx = -1; // setup phase
+			output_data->syscall_history[j].start_time = g_syscall_context.history[j].start_time;
+			output_data->syscall_history[j].end_time = g_syscall_context.history[j].end_time;
+		}
+		output_data->syscall_history_count.store(setup_hist_count, std::memory_order_release);
+		fprintf(stderr, "[FORK-BARRIER] wrote %d setup syscall history entries to shared memory\n", setup_hist_count);
+	}
+#endif
+
+	fprintf(stderr, "[FORK-BARRIER] forking %llu children...\n", (unsigned long long)num_children);
+	pid_t child_pids[kMaxForkBarrierChildren];
+	for (uint64 i = 0; i < num_children; i++) {
+		pid_t pid = fork();
+		if (pid < 0)
+			fail("fork in fork-barrier");
+		if (pid == 0) {
+			// === Child process i ===
+			fprintf(stderr, "[FORK-BARRIER] child[%llu] pid=%d started\n",
+				(unsigned long long)i, getpid());
+			// Apply per-child start delay.
+			if (children[i].delay_us > 0) {
+				struct timespec ts;
+				ts.tv_sec = children[i].delay_us / 1000000;
+				ts.tv_nsec = (children[i].delay_us % 1000000) * 1000;
+				while (nanosleep(&ts, &ts) == -1 && errno == EINTR)
+					;
+			}
+			// Signal readiness and wait for barrier release.
+			sync->ready_count.fetch_add(1, std::memory_order_acq_rel);
+			while (!sync->released.load(std::memory_order_acquire))
+				sched_yield();
+
+			// Execute this child's syscall sequence.
+			// We reuse the parent's execute_one() infrastructure (threads, output_data, etc.)
+			// by resetting state and running the child's portion of the input stream.
+			uint8* child_pos = child_input_start[i];
+
+			// Fix child_call_index: each child gets a unique, non-overlapping
+			// range in the merged program to enable correct time-based lookup.
+			// Child i starts at: setup_call_index + sum(children[0..i-1].num_calls)
+			int child_call_index = setup_call_index;
+			for (uint64 prev = 0; prev < i; prev++)
+				child_call_index += static_cast<int>(children[prev].num_calls);
+
+#if GOOS_linux
+			// Reset syscall context for this child — start fresh so only
+			// this child's syscalls are recorded (parent's setup entries are
+			// already written to shared memory above).
+			if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+				syscall_context_init(&g_syscall_context);
+			}
+#endif
+
+			call_props_t child_call_props;
+			memset(&child_call_props, 0, sizeof(child_call_props));
+
+			for (uint64 c = 0; c < children[i].num_calls; c++) {
+				for (;;) {
+					uint64 cn = read_input(&child_pos);
+					if (cn == instr_eof)
+						goto child_done;
+					if (cn == instr_copyin) {
+						char* addr = (char*)(read_input(&child_pos) + SYZ_DATA_OFFSET);
+						uint64 typ = read_input(&child_pos);
+						switch (typ) {
+						case arg_const: {
+							uint64 size, bf, bf_off, bf_len;
+							uint64 arg = read_const_arg(&child_pos, &size, &bf, &bf_off, &bf_len);
+							copyin(addr, arg, size, bf, bf_off, bf_len);
+							break;
+						}
+						case arg_addr32:
+						case arg_addr64: {
+							uint64 val = read_input(&child_pos) + SYZ_DATA_OFFSET;
+							if (typ == arg_addr32)
+								NONFAILING(*(uint32*)addr = val);
+							else
+								NONFAILING(*(uint64*)addr = val);
+							break;
+						}
+						case arg_result: {
+							uint64 meta = read_input(&child_pos);
+							uint64 size = meta & 0xff;
+							uint64 bf = meta >> 8;
+							uint64 val = read_result(&child_pos);
+							copyin(addr, val, size, bf, 0, 0);
+							break;
+						}
+						case arg_data: {
+							uint64 size = read_input(&child_pos);
+							size &= ~(1ull << 63);
+							if (child_pos + size > input_data + kMaxInput)
+								fail("data arg overflow in fork child");
+							NONFAILING(memcpy(addr, child_pos, size));
+							child_pos += size;
+							break;
+						}
+						case arg_csum: {
+							uint64 csum_size = read_input(&child_pos);
+							(void)csum_size;
+							char* csum_addr = addr;
+							uint64 csum_kind = read_input(&child_pos);
+							if (csum_kind == 0) {
+								struct csum_inet csum;
+								csum_inet_init(&csum);
+								uint64 chunks = read_input(&child_pos);
+								for (uint64 j = 0; j < chunks; j++) {
+									uint64 chunk_kind = read_input(&child_pos);
+									uint64 chunk_value = read_input(&child_pos);
+									uint64 chunk_size = read_input(&child_pos);
+									if (chunk_kind == 0) {
+										chunk_value += SYZ_DATA_OFFSET;
+										NONFAILING(csum_inet_update(&csum, (const uint8*)chunk_value, chunk_size));
+									} else {
+										csum_inet_update(&csum, (const uint8*)&chunk_value, chunk_size);
+									}
+								}
+								uint16 csum_value = csum_inet_digest(&csum);
+								copyin(csum_addr, csum_value, 2, binary_format_native, 0, 0);
+							}
+							break;
+						}
+						}
+						continue;
+					}
+					if (cn == instr_copyout) {
+						read_input(&child_pos); // index
+						read_input(&child_pos); // addr
+						read_input(&child_pos); // size
+						continue;
+					}
+					if (cn == instr_setprops) {
+						read_call_props_t(child_call_props, read_input(&child_pos, false));
+						continue;
+					}
+					// Normal syscall - execute it directly (non-threaded in each child).
+					if (cn >= ARRAY_SIZE(syscalls))
+						failmsg("invalid syscall in fork child", "call_num=%llu", cn);
+					uint64 copyout_index = read_input(&child_pos);
+					uint64 num_args = read_input(&child_pos);
+					if (num_args > kMaxArgs)
+						failmsg("bad args in fork child", "args=%llu", num_args);
+					intptr_t iargs[kMaxArgs] = {};
+					for (uint64 a = 0; a < num_args; a++)
+						iargs[a] = static_cast<intptr_t>(read_arg(&child_pos));
+
+#if GOOS_linux
+					// Record syscall context for DDRD attribution.
+					if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+						int current_tid = static_cast<int>(syscall(SYS_gettid));
+						syscall_context_enter(&g_syscall_context, current_tid, child_call_index, static_cast<int>(cn));
+					}
+#endif
+					// Execute the syscall directly (synchronously in child).
+					const call_t* call = &syscalls[cn];
+					intptr_t res = execute_syscall(call, iargs);
+					(void)res;
+#if GOOS_linux
+					if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+						int current_tid = static_cast<int>(syscall(SYS_gettid));
+						syscall_context_exit(&g_syscall_context, current_tid);
+					}
+#endif
+					// Store result for potential read_result references within this child.
+					if (copyout_index != no_copyout && copyout_index < kMaxCommands) {
+						results[copyout_index].executed = true;
+						results[copyout_index].val = res;
+					}
+					child_call_index++;
+					memset(&child_call_props, 0, sizeof(child_call_props));
+					break; // done with this call, move to next
+				}
+			}
+		child_done:
+#if GOOS_linux
+			// Write this child's syscall history to shared memory before exiting.
+			// This is critical: g_syscall_context is process-private (COW after fork),
+			// so it would be destroyed by _exit(0). We atomically append entries
+			// to output_data->syscall_history which is MAP_SHARED.
+			if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
+				int32_t child_hist_count = g_syscall_context.history_count;
+				if (child_hist_count > 0) {
+					// Atomically reserve slots
+					int32_t base = output_data->syscall_history_count.fetch_add(
+					    child_hist_count, std::memory_order_acq_rel);
+					int32_t max_slots = (int32_t)MAX_SHARED_SYSCALL_HISTORY;
+					int32_t written = 0;
+					for (int32_t j = 0; j < child_hist_count && (base + j) < max_slots; j++) {
+						output_data->syscall_history[base + j].tid = g_syscall_context.history[j].tid;
+						output_data->syscall_history[base + j].call_index = g_syscall_context.history[j].call_index;
+						output_data->syscall_history[base + j].prog_idx = static_cast<int32_t>(i);
+						output_data->syscall_history[base + j].start_time = g_syscall_context.history[j].start_time;
+						output_data->syscall_history[base + j].end_time = g_syscall_context.history[j].end_time;
+						written++;
+					}
+					fprintf(stderr, "[FORK-BARRIER] child[%llu] wrote %d syscall history entries to shm (base=%d)\n",
+						(unsigned long long)i, written, base);
+				}
+			}
+#endif
+			_exit(0);
+		}
+		child_pids[i] = pid;
+	}
+
+	// Parent: wait for all children to be ready, then release the barrier.
+	fprintf(stderr, "[FORK-BARRIER] parent: waiting for %llu children to become ready...\n",
+		(unsigned long long)num_children);
+	while (sync->ready_count.load(std::memory_order_acquire) < static_cast<int>(num_children))
+		sched_yield();
+	fprintf(stderr, "[FORK-BARRIER] parent: all children ready, releasing barrier\n");
+	sync->released.store(true, std::memory_order_release);
+
+	// Wait for all children to complete.
+	for (uint64 i = 0; i < num_children; i++) {
+		int status;
+		if (waitpid(child_pids[i], &status, 0) < 0) {
+			// Child may have been killed by signal, that's OK.
+		}
+	}
+
+	// Cleanup shared sync memory.
+	munmap(sync_mem, sizeof(fork_barrier_sync));
+
+	fprintf(stderr, "[FORK-BARRIER] parent: all children exited, fork-barrier complete\n");
+
+	// Update input_pos past the fork-barrier data.
+	*input_posp = scan_pos;
 }
 
 thread_t* schedule_call(int call_index, int call_num, uint64 copyout_index, uint64 num_args, uint64* args, uint8* pos, call_props_t call_props)

@@ -273,6 +273,13 @@ type Experimental struct {
 	// barrier_procs must specify at least two executor proc indices.
 	BarrierMode  bool  `json:"barrier_mode"`
 	BarrierProcs []int `json:"barrier_procs,omitempty"`
+	// Use fork-barrier execution model instead of multi-proc barrier.
+	// When enabled, barrier programs are merged into a single program and the executor
+	// uses fork() to create child processes that share the parent's fd table.
+	ForkBarrierMode bool `json:"fork_barrier_mode,omitempty"`
+	// Alternate between fork-barrier and legacy multi-proc barrier per execution
+	// when fork_barrier_mode is enabled.
+	AlternateForkBarrierMode bool `json:"alternate_fork_barrier_mode,omitempty"`
 
 	// Enable the UAF-focused fuzzing mode that prioritizes DDRD results.
 	UAFMode bool `json:"uaf_mode"`
@@ -383,6 +390,68 @@ type Experimental struct {
 	// ExecutionsPerAttempt is how many times to execute each delay plan.
 	// Defaults to 5 if unset or zero.
 	ExecutionsPerAttempt int `json:"executions_per_attempt,omitempty"`
+
+	// ======== Race Reproduction Configuration ========
+	// RaceRepro configures the race reproduction pipeline that attempts to
+	// reproduce validated timing pairs on VMs to find reproducible data races.
+	RaceRepro *RaceReproConfig `json:"race_repro,omitempty"`
+}
+
+// RaceReproConfig configures the race reproduction pipeline.
+// After Phase 2 validates a timing pair, it is forwarded to RaceReproLoop which
+// repeatedly executes the program on a VM to trigger observable kernel crashes
+// (KASAN/KCSAN) or stable DDRD detection.
+type RaceReproConfig struct {
+	// Enable race reproduction pipeline.
+	Enabled bool `json:"enabled"`
+	// Number of VMs dedicated to race reproduction.
+	// These VMs are taken from the total VM pool (total - fuzzing - crash_repro - race_repro).
+	// Defaults to 0 (disabled).
+	VMs int `json:"vms,omitempty"`
+	// RepeatBudget is how many times to execute each validated program on the VM.
+	// Higher values increase chance of triggering a crash but consume more resources.
+	// Defaults to 50 if unset or zero.
+	RepeatBudget int `json:"repeat_budget,omitempty"`
+	// RepeatCount is how many collection rounds to run for each entry.
+	// Matches StageManager's RepeatCount. Defaults to 5 if unset or zero.
+	RepeatCount int `json:"repeat_count,omitempty"`
+	// VerifyRepeatTimes is how many times to repeat each pair during verification.
+	// Defaults to 10 if unset or zero.
+	VerifyRepeatTimes int `json:"verify_repeat_times,omitempty"`
+	// DelaySweep enables sweeping different delay values during reproduction.
+	// When enabled, the delay timing is varied across attempts to find the
+	// most effective timing window.
+	DelaySweep bool `json:"delay_sweep,omitempty"`
+	// DelaySweepSteps is the number of delay steps to try during sweep.
+	// Defaults to 5 if unset or zero.
+	DelaySweepSteps int `json:"delay_sweep_steps,omitempty"`
+	// DelayMaxUs is the maximum delay in microseconds during sweep.
+	// Defaults to 1000 if unset or zero.
+	DelayMaxUs int64 `json:"delay_max_us,omitempty"`
+	// StabilityThreshold: fraction of attempts (0.0-1.0) that must detect the
+	// target pair via DDRD to consider it a "prog-level reproducer".
+	// Defaults to 0.3 (30%) if unset or zero.
+	StabilityThreshold float64 `json:"stability_threshold,omitempty"`
+	// EnableSnapshot enables VM snapshot for faster reset between attempts.
+	// Requires QEMU with snapshot support configured.
+	EnableSnapshot bool `json:"enable_snapshot,omitempty"`
+	// EnableReplay enables replay of execution history before each validation attempt.
+	// When enabled, the saved barrier execution history from fuzzing is replayed
+	// to reconstruct the system state before testing each entry.
+	// Defaults to true.
+	EnableReplay *bool `json:"enable_replay,omitempty"`
+	// ReplayCollectPairs controls whether to collect race pairs during replay.
+	// When false (default), replay runs in barrier mode but skips race pair collection.
+	ReplayCollectPairs bool `json:"replay_collect_pairs,omitempty"`
+	// HistoryCount is the number of execution history records to attach per task.
+	// Defaults to fuzzer's NewVarNamePairHistory setting (typically 1000).
+	HistoryCount int `json:"history_count,omitempty"`
+	// DisableCollectionDelay disables start_delay during the collection phase.
+	DisableCollectionDelay bool `json:"disable_collection_delay,omitempty"`
+	// DisableVerifyDelay disables start_delay during the verification phase.
+	DisableVerifyDelay bool `json:"disable_verify_delay,omitempty"`
+	// EnableHistoryMinimization enables replay history minimization after successful validation.
+	EnableHistoryMinimization bool `json:"enable_history_minimization,omitempty"`
 }
 
 type UAFValidateConfig struct {

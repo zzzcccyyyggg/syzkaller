@@ -669,6 +669,15 @@ func (sm *StageManager) dispatch(task *validationTask) {
 		return
 	}
 
+	// Recover from send-on-closed-channel panic.
+	// This can happen when Shutdown() closes the tasks channel between our
+	// tasksClosed check (under lock) and the actual channel send (outside lock).
+	defer func() {
+		if r := recover(); r != nil {
+			log.Logf(0, "uafvalidate: dispatch dropped key=%s (channel closed during send)", task.key)
+		}
+	}()
+
 	// Original channel-based dispatch
 	sm.mu.Lock()
 	if sm.tasksClosed {
@@ -1033,9 +1042,45 @@ func (sm *StageManager) runBatchReplayAndVerify(ctx context.Context, exec Execut
 		}
 	}
 
-	// Build verify requests - with delay sweep if enabled
+	// Build verify requests based on delay strategy:
+	// 1. VerifyDelayMultiplier > 0: use TimeDiff-based strategy (targeted, low overhead)
+	// 2. VerifyDelaySweep: progressive sweep from 0 to VerifyDelayMaxUs (exhaustive)
+	// 3. Neither: single verify request at the collected TimeDiff
 	verifyCount := 1
-	if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+	if sm.cfg.VerifyDelayMultiplier > 0 && verifyReq.AccessDelayUs > 0 {
+		// === TimeDiff-based strategy ===
+		// Generate verify requests at fixed multiples of the actual collected TimeDiff:
+		//   1x, 3x, 10x
+		// This is targeted: we already know the approximate timing window from collection,
+		// so we explore the original timing plus wider windows to catch the race.
+		baseDelay := verifyReq.AccessDelayUs
+		scales := []float64{1.0, 3.0, 10.0}
+
+		verifyCount = len(scales)
+		for _, scale := range scales {
+			scaledDelay := int64(float64(baseDelay) * scale)
+			if scaledDelay < 0 {
+				scaledDelay = 0
+			}
+
+			verifyReqCopy := *verifyReq
+			verifyReqCopy.StartDelayUs = scaledDelay
+			verifyReqCopy.AccessDelayUs = scaledDelay
+			verifyReqCopy.Delays = buildStartDelaysFromPair(task.entry, scaledDelay)
+
+			if verifyReq.TargetPair != nil {
+				pairCopy := *verifyReq.TargetPair
+				pairCopy.TimeDiff = uint64(scaledDelay) * 1000 // nanoseconds
+				verifyReqCopy.TargetPair = &pairCopy
+			}
+
+			reqs = append(reqs, &verifyReqCopy)
+		}
+
+		log.Logf(0, "[batch] verify: executing key=%s replay=%d verify=%d (timediff_multi base=%dµs scales=[1x,3x,10x]) total=%d",
+			task.key, replayCount, verifyCount, baseDelay, len(reqs))
+	} else if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+		// === Progressive sweep strategy ===
 		verifyCount = sm.cfg.VerifyDelaySteps
 		maxDelay := sm.cfg.VerifyDelayMaxUs
 		power := sm.cfg.VerifyDelayPower
@@ -1106,6 +1151,7 @@ func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, total
 	}
 
 	triggeredDelays := []int64{}
+	useTimediffMulti := sm.cfg.VerifyDelayMultiplier > 0
 	for i, r := range results {
 		if r == nil {
 			continue
@@ -1113,7 +1159,13 @@ func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, total
 		if r.TriggeredCount > 0 {
 			aggregated.TriggeredCount++
 			// Record which delay step triggered
-			if sm.cfg.VerifyDelaySweep {
+			if useTimediffMulti && len(results) == 3 {
+				// TimeDiff-based: scales are [1x, 3x, 10x]
+				scales := []string{"1x", "3x", "10x"}
+				if i < len(scales) {
+					log.Logf(1, "[batch] verify: timediff_multi triggered at scale=%s (step %d/%d)", scales[i], i+1, len(results))
+				}
+			} else if sm.cfg.VerifyDelaySweep {
 				sweepDelay := sweepDelayForStep(i, len(results), sm.cfg.VerifyDelayMaxUs, sm.cfg.VerifyDelayPower)
 				triggeredDelays = append(triggeredDelays, sweepDelay)
 			}
@@ -1130,8 +1182,11 @@ func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, total
 		}
 	}
 
-	// Log delay sweep statistics
-	if sm.cfg.VerifyDelaySweep && len(results) > 1 {
+	// Log multi-strategy statistics
+	if useTimediffMulti && len(results) > 1 {
+		log.Logf(0, "[batch] verify: timediff_multi triggered %d/%d scales",
+			aggregated.TriggeredCount, len(results))
+	} else if sm.cfg.VerifyDelaySweep && len(results) > 1 {
 		if len(triggeredDelays) > 0 {
 			log.Logf(0, "[batch] verify: delay sweep triggered %d/%d steps, first at %dµs",
 				aggregated.TriggeredCount, len(results), triggeredDelays[0])
@@ -1732,10 +1787,15 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		// ========== Update statistics ==========
-		// Determine total attempts (delay sweep steps or repeat times)
+		// Determine total attempts
 		totalAttempts := req.RepeatTimes
-		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
+		delayMode := ""
+		if sm.cfg.VerifyDelayMultiplier > 0 && req.AccessDelayUs > 0 {
+			totalAttempts = 3 // 0.5x, 1x, Nx
+			delayMode = fmt.Sprintf("timediff_multi base=%dµs x%.1f", req.AccessDelayUs, sm.cfg.VerifyDelayMultiplier)
+		} else if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
 			totalAttempts = sm.cfg.VerifyDelaySteps
+			delayMode = fmt.Sprintf("delay_sweep 0-%dµs", sm.cfg.VerifyDelayMaxUs)
 		}
 
 		status := "Not Triggerable"
@@ -1749,9 +1809,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			statusDetail = " (crashed with different race, target pair not matched)"
 		}
 
-		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d (delay_sweep) status=%s%s",
-				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)
+		if delayMode != "" {
+			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d (%s) status=%s%s",
+				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, delayMode, status, statusDetail)
 		} else {
 			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s%s",
 				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)

@@ -148,6 +148,16 @@ func (tm *TimingMutator) generateTimeDiffBasedPlan(
 	// Add jitter: 50%-150% of calculated delay for exploration
 	jitterMultiplier := 0.5 + rnd.Float64() // 0.5 to 1.5
 
+	// Fork-barrier fallback: In fork-barrier mode, the executor loses child
+	// processes' syscall context (via _exit(0)), so CallIdx and ProgIdx are
+	// reported as -1. When this happens, generate delays using heuristic
+	// positions within the two child program ranges (ProgIdx 0 and 1).
+	needsForkFallback := (firstCallIdx < 0 || firstProgIdx < 0) &&
+		(secondCallIdx < 0 || secondProgIdx < 0)
+	if needsForkFallback {
+		return tm.generateForkFallbackPlan(pair, timeDiffMicros, jitterMultiplier, rnd)
+	}
+
 	if timeDiffMicros < tm.config.DelayMinMicros {
 		// Time difference is very small, they're already close
 		// Add small random delays to explore the boundary
@@ -201,6 +211,77 @@ func (tm *TimingMutator) generateTimeDiffBasedPlan(
 	}
 
 	// Limit to max delays
+	if len(plan) > tm.config.MaxDelaysPerProgram {
+		plan = plan[:tm.config.MaxDelaysPerProgram]
+	}
+
+	return plan
+}
+
+// generateForkFallbackPlan creates a delay plan when the executor reports
+// CallIdx/ProgIdx as -1 (fork-barrier mode). This happens because forked
+// children's syscall_context history is lost on _exit(0).
+//
+// Strategy: Since we don't know which specific syscalls raced, we insert
+// delays at heuristic positions within the two child program ranges.
+// The goal is to shift relative timing between child 0 and child 1.
+func (tm *TimingMutator) generateForkFallbackPlan(
+	pair *ddrd.MayUAFPair,
+	timeDiffMicros int64,
+	jitterMultiplier float64,
+	rnd *rand.Rand,
+) DelayPlan {
+	plan := make(DelayPlan, 0)
+
+	// Calculate delay amount
+	var delayMicros int64
+	if timeDiffMicros < tm.config.DelayMinMicros {
+		// Small time difference — use random delay for exploration
+		delayMicros = tm.config.DelayMinMicros + rnd.Int63n(tm.config.DelayMinMicros*10)
+	} else {
+		delayMicros = int64(float64(timeDiffMicros) * jitterMultiplier)
+		if delayMicros < tm.config.DelayMinMicros {
+			delayMicros = tm.config.DelayMinMicros
+		}
+		if delayMicros > tm.config.DelayMaxMicros {
+			delayMicros = tm.config.DelayMaxMicros
+		}
+	}
+
+	// We know there are 2 children (ProgIdx 0 and 1).
+	// Three strategies, chosen randomly:
+	//  (a) 40%: Delay child 0 start → child 1 runs first
+	//  (b) 40%: Delay child 1 start → child 0 runs first
+	//  (c) 20%: Delay both at random offsets for wider exploration
+	r := rnd.Float64()
+	if r < 0.4 {
+		// Delay child 0 at its first call
+		plan = append(plan, DelayInsertion{
+			ProgIdx:     0,
+			BeforeCall:  0,
+			DelayMicros: delayMicros,
+		})
+	} else if r < 0.8 {
+		// Delay child 1 at its first call
+		plan = append(plan, DelayInsertion{
+			ProgIdx:     1,
+			BeforeCall:  0,
+			DelayMicros: delayMicros,
+		})
+	} else {
+		// Delay both at random positions
+		plan = append(plan, DelayInsertion{
+			ProgIdx:     0,
+			BeforeCall:  rnd.Intn(3), // early position in child 0
+			DelayMicros: delayMicros / 2,
+		})
+		plan = append(plan, DelayInsertion{
+			ProgIdx:     1,
+			BeforeCall:  rnd.Intn(3), // early position in child 1
+			DelayMicros: delayMicros,
+		})
+	}
+
 	if len(plan) > tm.config.MaxDelaysPerProgram {
 		plan = plan[:tm.config.MaxDelaysPerProgram]
 	}
@@ -453,6 +534,160 @@ func (tm *TimingMutator) insertCallAt(p *prog.Prog, idx int, call *prog.Call) {
 	p.Calls = append(p.Calls, nil)
 	copy(p.Calls[idx+1:], p.Calls[idx:])
 	p.Calls[idx] = call
+}
+
+// ApplyDelayPlanToMerged inserts syz_delay calls directly into a fork-barrier
+// merged program. The delay plan's (ProgIdx, BeforeCall) are translated to
+// merged-program call indices using the ForkPoint.Children ranges.
+// This avoids re-merging and guarantees the same fd layout as the original merge.
+func (tm *TimingMutator) ApplyDelayPlanToMerged(
+	merged *prog.Prog,
+	plan DelayPlan,
+) *prog.Prog {
+	if merged == nil {
+		return nil
+	}
+	if tm.delaySyscall == nil || len(plan) == 0 || merged.ForkPoint == nil {
+		return merged.Clone()
+	}
+
+	result := merged.Clone()
+	origFP := merged.ForkPoint
+	origCallCount := len(merged.Calls)
+
+	// Remove existing syz_delay from merged program first, so Phase 2 does not
+	// accumulate stale delays from previous runs/corpus programs.
+	removedPrefix := tm.removeExistingDelaysAndFixForkPoint(result)
+	fp := result.ForkPoint
+
+	// Translate plan entries to merged call indices.
+	// Priority:
+	//  1) If BeforeCall looks like a global merged index (falls into any child
+	//     range), use it directly.
+	//  2) Otherwise, treat BeforeCall as child-relative and use ProgIdx range.
+	type mergedIns struct {
+		idx         int
+		delayMicros int64
+	}
+	var insertions []mergedIns
+	for _, d := range plan {
+		mi := -1
+
+		if d.BeforeCall >= 0 && d.BeforeCall <= origCallCount {
+			if isIndexInAnyChildRange(origFP, d.BeforeCall) {
+				// Translate from original merged index to post-cleanup index.
+				mi = d.BeforeCall - removedPrefix[d.BeforeCall]
+			}
+		}
+
+		if mi < 0 {
+			if d.ProgIdx < 0 || d.ProgIdx >= len(fp.Children) {
+				continue
+			}
+			child := fp.Children[d.ProgIdx]
+			mi = child.StartIndex + d.BeforeCall
+			if mi < child.StartIndex {
+				mi = child.StartIndex
+			}
+			if mi > child.EndIndex {
+				mi = child.EndIndex
+			}
+		}
+		insertions = append(insertions, mergedIns{idx: mi, delayMicros: d.DelayMicros})
+	}
+
+	// Sort descending so that inserting from the end preserves earlier indices.
+	sort.Slice(insertions, func(i, j int) bool {
+		return insertions[i].idx > insertions[j].idx
+	})
+
+	for _, ins := range insertions {
+		delayCall := tm.createDelayCall(ins.delayMicros)
+		if delayCall == nil {
+			continue
+		}
+		tm.insertCallAt(result, ins.idx, delayCall)
+
+		// Update ForkPoint indices to account for the inserted call.
+		if ins.idx < fp.SetupCalls {
+			fp.SetupCalls++
+		}
+		for ci := range fp.Children {
+			if fp.Children[ci].StartIndex > ins.idx {
+				fp.Children[ci].StartIndex++
+			}
+			if fp.Children[ci].EndIndex > ins.idx {
+				fp.Children[ci].EndIndex++
+			}
+		}
+	}
+
+	return result
+}
+
+// SanitizeMergedForTiming returns a cloned merged program with all existing
+// syz_delay calls removed and ForkPoint boundaries remapped accordingly.
+// Use this before Phase 1 enqueue so discovery/validation share the same base.
+func (tm *TimingMutator) SanitizeMergedForTiming(merged *prog.Prog) *prog.Prog {
+	if merged == nil {
+		return nil
+	}
+	result := merged.Clone()
+	if tm == nil || tm.delaySyscall == nil || result.ForkPoint == nil {
+		return result
+	}
+	tm.removeExistingDelaysAndFixForkPoint(result)
+	return result
+}
+
+func isIndexInAnyChildRange(fp *prog.ForkPoint, idx int) bool {
+	if fp == nil || idx < 0 {
+		return false
+	}
+	for _, child := range fp.Children {
+		if idx >= child.StartIndex && idx <= child.EndIndex {
+			return true
+		}
+	}
+	return false
+}
+
+// removeExistingDelaysAndFixForkPoint removes all syz_delay calls from a
+// merged program and rewrites ForkPoint boundaries accordingly.
+// Returns removedPrefix where removedPrefix[i] is the number of removed delays
+// among original call indices [0, i).
+func (tm *TimingMutator) removeExistingDelaysAndFixForkPoint(p *prog.Prog) []int {
+	oldCount := len(p.Calls)
+	removedPrefix := make([]int, oldCount+1)
+	if oldCount == 0 || p.ForkPoint == nil || tm.delaySyscall == nil {
+		return removedPrefix
+	}
+
+	newCalls := make([]*prog.Call, 0, oldCount)
+	for i, c := range p.Calls {
+		removedPrefix[i+1] = removedPrefix[i]
+		if c != nil && c.Meta != nil && c.Meta.Name == tm.delaySyscall.Name {
+			removedPrefix[i+1]++
+			continue
+		}
+		newCalls = append(newCalls, c)
+	}
+
+	if len(newCalls) == oldCount {
+		return removedPrefix
+	}
+	p.Calls = newCalls
+
+	fp := p.ForkPoint
+	fp.SetupCalls -= removedPrefix[fp.SetupCalls]
+	for i := range fp.Children {
+		start := fp.Children[i].StartIndex
+		end := fp.Children[i].EndIndex
+		fp.Children[i].StartIndex = start - removedPrefix[start]
+		fp.Children[i].EndIndex = end - removedPrefix[end]
+	}
+
+	return removedPrefix
 }
 
 // cloneOrNil clones a program or returns nil if input is nil.

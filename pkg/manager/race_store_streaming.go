@@ -389,6 +389,16 @@ func (r *StreamingUAFCorpusReader) deserializeEntry(data []byte) (*fuzzer.UAFCor
 		entry.Programs = group
 	}
 
+	if r.target != nil && len(stored.MergedProg) != 0 {
+		mergedObj, err := r.target.Deserialize(stored.MergedProg, prog.NonStrict)
+		if err != nil {
+			// Not fatal — will fall back to re-merge on replay
+		} else {
+			entry.MergedProg = mergedObj
+		}
+	}
+	entry.ForkBarrier = stored.ForkBarrier
+
 	if stored.ReplayPlan != nil {
 		entry.ReplayPlan = fuzzer.UAFCorpusReplayPlan{
 			DelaysMicros: stored.ReplayPlan.DelaysMicros,

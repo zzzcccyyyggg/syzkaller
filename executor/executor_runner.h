@@ -852,7 +852,7 @@ public:
 		ClearOutput();
 		active_for_group_ = false;
 		extended_requested_ = collect_extended;
-		
+
 		// Store timing threshold from request (if provided)
 		// This allows timing exploration queue to use widened threshold
 		timing_threshold_us_ = (req && req->timing_threshold_us > 0) ? req->timing_threshold_us : 0;
@@ -1017,10 +1017,10 @@ public:
 		// Pass merged syscall context to race detector
 		// Use configurable threshold if set, otherwise use default (0 = 2ms)
 		int count = race_detector_analyze_and_generate_race_infos_with_threshold(&detector_, pairs.data(),
-									  (int)kDdrdMaxUafPairs,
-									  &merged_ctx, timing_threshold_us_);
+											 (int)kDdrdMaxUafPairs,
+											 &merged_ctx, timing_threshold_us_);
 		if (timing_threshold_us_ > 0) {
-			debug("ddrd: analyzed with custom threshold %llu us, found %d pairs\n", 
+			debug("ddrd: analyzed with custom threshold %llu us, found %d pairs\n",
 			      (unsigned long long)timing_threshold_us_, count);
 		}
 		if (count <= 0) {
@@ -1032,23 +1032,23 @@ public:
 		output_.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
 		debug("ddrd: detected %d UAF pair(s)\n", count);
 
-		for (int i = 0; i < count; i++) {
-			const may_uaf_pair_t& pair = output_.basic_pairs[i];
-			debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_stack=0x%016llx use_stack=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
-			      i,
-			      static_cast<unsigned long long>(pair.free_access_name),
-			      static_cast<unsigned long long>(pair.use_access_name),
-			      static_cast<unsigned long long>(pair.free_call_stack),
-			      static_cast<unsigned long long>(pair.use_call_stack),
-			      pair.free_tid,
-			      pair.use_tid,
-			      pair.free_sn,
-			      pair.use_sn,
-			      static_cast<unsigned long long>(pair.signal),
-			      static_cast<unsigned long long>(pair.time_diff),
-			      pair.lock_type,
-			      pair.use_access_type);
-		}
+		// for (int i = 0; i < count; i++) {
+		// const may_uaf_pair_t& pair = output_.basic_pairs[i];
+		// debug("ddrd: pair[%d] free_access=0x%016llx use_access=0x%016llx free_stack=0x%016llx use_stack=0x%016llx free_tid=%d use_tid=%d free_sn=%d use_sn=%d signal=0x%016llx time_diff=%llu lock_type=%u use_access_type=%u\n",
+		//       i,
+		//       static_cast<unsigned long long>(pair.free_access_name),
+		//       static_cast<unsigned long long>(pair.use_access_name),
+		//       static_cast<unsigned long long>(pair.free_call_stack),
+		//       static_cast<unsigned long long>(pair.use_call_stack),
+		//       pair.free_tid,
+		//       pair.use_tid,
+		//       pair.free_sn,
+		//       pair.use_sn,
+		//       static_cast<unsigned long long>(pair.signal),
+		//       static_cast<unsigned long long>(pair.time_diff),
+		//       pair.lock_type,
+		//       pair.use_access_type);
+		// }
 
 		// Collect extended info if requested
 		if (extended_requested_) {
@@ -1151,7 +1151,7 @@ private:
 	bool warned_unavailable_;
 	bool extended_requested_;
 	bool active_for_group_;
-	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 2ms)
+	uint64_t timing_threshold_us_; // configurable threshold in microseconds (0 = use default 2ms)
 	DdrdOutputState output_;
 };
 #endif // GOOS_linux
@@ -1259,7 +1259,7 @@ public:
 			// Install solo DDRD preparation callback (called before execution)
 			p->SetSoloDdrdPrepareCallback([this](Proc* proc, const rpc::ExecRequestRawT* req) {
 				bool collect_extended = req && req->exec_opts &&
-					IsSet(req->exec_opts->exec_flags(), rpc::ExecFlag::CollectDdrdExtended);
+							IsSet(req->exec_opts->exec_flags(), rpc::ExecFlag::CollectDdrdExtended);
 				ddrd_controller_.PrepareForGroup(true, collect_extended, req);
 				debug("runner: prepared solo DDRD for proc slot %d req %llu\n",
 				      proc->Id(), req ? static_cast<uint64>(req->id) : 0);

@@ -36,6 +36,7 @@ import (
 	"github.com/google/syzkaller/pkg/manager"
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
+	uafvalidate "github.com/google/syzkaller/pkg/racevalidate"
 	"github.com/google/syzkaller/pkg/report"
 	crash_pkg "github.com/google/syzkaller/pkg/report/crash"
 	"github.com/google/syzkaller/pkg/repro"
@@ -111,6 +112,15 @@ type Manager struct {
 	fsckChecker  image.FsckChecker
 
 	reproLoop *manager.ReproLoop
+
+	raceReproLoop *manager.RaceReproLoop
+
+	// VM reservation coordination: both crash repro and race repro share the
+	// same dispatcher pool's ReserveForRun mechanism. We track each subsystem's
+	// current reservation independently and call ReserveForRun with the sum.
+	reservedMu       sync.Mutex
+	reservedCrashVMs int
+	reservedRaceVMs  int
 
 	uafStore *manager.UAFCorpusStore
 
@@ -424,8 +434,32 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	}
 	mgr.pool = vm.NewDispatcher(mgr.vmPool, mgr.fuzzerInstance)
 	mgr.http.Pool = mgr.pool
-	reproVMs := max(0, mgr.vmPool.Count()-mgr.cfg.FuzzingVMs)
-	mgr.reproLoop = manager.NewReproLoop(mgr, reproVMs, mgr.cfg.DashboardOnlyRepro)
+
+	// VM pool three-way allocation: fuzzing | raceRepro | crashRepro
+	totalVMs := mgr.vmPool.Count()
+	raceReproVMs := 0
+	if rr := mgr.cfg.Experimental.RaceRepro; rr != nil && rr.Enabled && rr.VMs > 0 {
+		raceReproVMs = min(rr.VMs, max(0, totalVMs-mgr.cfg.FuzzingVMs))
+	}
+	crashReproVMs := max(0, totalVMs-mgr.cfg.FuzzingVMs-raceReproVMs)
+	log.Logf(0, "VM pool allocation: total=%d fuzzing=%d raceRepro=%d crashRepro=%d",
+		totalVMs, mgr.cfg.FuzzingVMs, raceReproVMs, crashReproVMs)
+
+	mgr.reproLoop = manager.NewReproLoop(mgr, crashReproVMs, mgr.cfg.DashboardOnlyRepro)
+
+	// Build the ExecutorFactory for race validation.
+	// This factory uses pool.Run() to acquire reserved VMs from the dispatcher.
+	var raceFactory uafvalidate.ExecutorFactory
+	var raceReproCfg *mgrconfig.RaceReproConfig
+	if raceReproVMs > 0 {
+		raceReproCfg = mgr.cfg.Experimental.RaceRepro
+		raceFactory = mgr.raceValidateExecutorFactory(uafvalidate.Config{
+			MaxConcurrent:    raceReproVMs,
+			ExecutionTimeout: 90 * time.Second,
+			ForkBarrierMode:  false,
+		})
+	}
+	mgr.raceReproLoop = manager.NewRaceReproLoop(mgr, raceReproVMs, raceFactory, raceReproCfg)
 	mgr.http.ReproLoop = mgr.reproLoop
 	mgr.http.TogglePause = mgr.pool.TogglePause
 
@@ -635,6 +669,14 @@ func (mgr *Manager) processRepro(res *manager.ReproResult) {
 }
 
 func (mgr *Manager) preloadCorpus() {
+	// In debug + fork_barrier_mode, skip corpus loading entirely so we can
+	// immediately start random fuzzing through the fork-barrier path.
+	if *flagDebug && mgr.cfg.Experimental.ForkBarrierMode {
+		log.Logf(0, "[FORK-BARRIER-DEBUG] debug+fork_barrier_mode: skipping corpus load, will start random fuzzing directly")
+		mgr.fresh = true
+		mgr.corpusPreload <- nil
+		return
+	}
 	info, err := manager.LoadSeeds(mgr.cfg, false)
 	if err != nil {
 		log.Fatalf("failed to load corpus: %v", err)
@@ -1063,7 +1105,62 @@ func (mgr *Manager) saveRepro(res *manager.ReproResult) {
 }
 
 func (mgr *Manager) ResizeReproPool(size int) {
-	mgr.pool.ReserveForRun(size)
+	mgr.reservedMu.Lock()
+	defer mgr.reservedMu.Unlock()
+	mgr.reservedCrashVMs = size
+	total := mgr.reservedCrashVMs + mgr.reservedRaceVMs
+	mgr.pool.ReserveForRun(total)
+}
+
+func (mgr *Manager) ResizeRaceReproPool(size int) {
+	mgr.reservedMu.Lock()
+	defer mgr.reservedMu.Unlock()
+	mgr.reservedRaceVMs = size
+	total := mgr.reservedCrashVMs + mgr.reservedRaceVMs
+	mgr.pool.ReserveForRun(total)
+}
+
+// raceReproCallback returns the callback function for Phase2→RaceRepro forwarding.
+// Returns nil if race reproduction is not configured.
+func (mgr *Manager) raceReproCallback() func(task *fuzzer.RaceReproTask) {
+	rr := mgr.cfg.Experimental.RaceRepro
+	if rr == nil || !rr.Enabled || rr.VMs <= 0 {
+		return nil
+	}
+	return func(task *fuzzer.RaceReproTask) {
+		if task == nil {
+			return
+		}
+		// Convert fuzzer.RaceReproTask → manager.RaceReproTask
+		mgrTask := &manager.RaceReproTask{
+			Prog1:              task.Prog1,
+			Prog2:              task.Prog2,
+			MergedProg:         task.MergedProg,
+			FreeAccessName:     task.FreeAccessName,
+			UseAccessName:      task.UseAccessName,
+			VarNamePairID:      task.VarNamePairID,
+			CandidatePairCount: task.CandidatePairCount,
+			RepeatBudget:       task.RepeatBudget,
+			ReplayHistory:      task.ReplayHistory, // Pass through execution history for replay
+		}
+		for _, d := range task.DelayPlan {
+			mgrTask.DelayPlan = append(mgrTask.DelayPlan, manager.DelayInsertion{
+				ProgIdx:     d.ProgIdx,
+				BeforeCall:  d.BeforeCall,
+				DelayMicros: d.DelayMicros,
+			})
+		}
+		mgr.raceReproLoop.Enqueue(mgrTask)
+	}
+}
+
+// raceReproBudget returns the configured repeat budget for race reproduction.
+func (mgr *Manager) raceReproBudget() int {
+	rr := mgr.cfg.Experimental.RaceRepro
+	if rr == nil || rr.RepeatBudget <= 0 {
+		return 50
+	}
+	return rr.RepeatBudget
 }
 
 func (mgr *Manager) uploadReproAssets(repro *repro.Result) []dashapi.NewAsset {
@@ -1318,6 +1415,8 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			ModeUAF:                      mgr.cfg.Experimental.UAFMode,
 			BarrierMode:                  mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:                  mgr.cfg.BarrierMask,
+			ForkBarrierMode:              mgr.cfg.Experimental.ForkBarrierMode,
+			AlternateForkBarrierMode:     mgr.cfg.Experimental.AlternateForkBarrierMode,
 			HistoryBufferSize:            mgr.cfg.Experimental.HistoryBufferSize,
 			NewVarNamePairHistory:        mgr.cfg.Experimental.NewVarNamePairHistory,
 			NewStackHistory:              mgr.cfg.Experimental.NewStackHistory,
@@ -1326,21 +1425,28 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
 			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
 			// Dual-Queue Timing Exploration Configuration
-			EnableTimingExploration:     mgr.cfg.Experimental.EnableTimingExploration,
-			TimingExplorationQueueSize:  mgr.cfg.Experimental.TimingExplorationQueueSize,
-			TimingExplorationRatio:      mgr.cfg.Experimental.TimingExplorationRatio,
-			DelayMinMicros:              mgr.cfg.Experimental.DelayMinMicros,
-			DelayMaxMicros:              mgr.cfg.Experimental.DelayMaxMicros,
-			MaxDelaysPerProgram:         mgr.cfg.Experimental.MaxDelaysPerProgram,
-			TimingMutationStrategy:      mgr.cfg.Experimental.TimingMutationStrategy,
-			WidenedThresholdMicros:      mgr.cfg.Experimental.WidenedThresholdMicros,
-			MaxAttemptsPerPair:          mgr.cfg.Experimental.MaxAttemptsPerPair,
-			MaxCorpusCountPerVarName:    mgr.cfg.Experimental.MaxCorpusCountPerVarName,
-			SuccessThreshold:            mgr.cfg.Experimental.SuccessThreshold,
-			ExecutionsPerAttempt:        mgr.cfg.Experimental.ExecutionsPerAttempt,
+			EnableTimingExploration:    mgr.cfg.Experimental.EnableTimingExploration,
+			TimingExplorationQueueSize: mgr.cfg.Experimental.TimingExplorationQueueSize,
+			TimingExplorationRatio:     mgr.cfg.Experimental.TimingExplorationRatio,
+			DelayMinMicros:             mgr.cfg.Experimental.DelayMinMicros,
+			DelayMaxMicros:             mgr.cfg.Experimental.DelayMaxMicros,
+			MaxDelaysPerProgram:        mgr.cfg.Experimental.MaxDelaysPerProgram,
+			TimingMutationStrategy:     mgr.cfg.Experimental.TimingMutationStrategy,
+			WidenedThresholdMicros:     mgr.cfg.Experimental.WidenedThresholdMicros,
+			MaxAttemptsPerPair:         mgr.cfg.Experimental.MaxAttemptsPerPair,
+			MaxCorpusCountPerVarName:   mgr.cfg.Experimental.MaxCorpusCountPerVarName,
+			SuccessThreshold:           mgr.cfg.Experimental.SuccessThreshold,
+			ExecutionsPerAttempt:       mgr.cfg.Experimental.ExecutionsPerAttempt,
+			RaceReproCallback:          mgr.raceReproCallback(),
+			RaceReproBudget:            mgr.raceReproBudget(),
 		}, rnd, mgr.target)
-		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
-		fuzzerObj.AddCandidates(candidates)
+		if *flagDebug && mgr.cfg.Experimental.ForkBarrierMode {
+			log.Logf(0, "[FORK-BARRIER-DEBUG] skipping UAF corpus seeds and %d corpus candidates for random fork-barrier fuzzing",
+				len(candidates))
+		} else {
+			mgr.enqueueUAFCorpusSeeds(fuzzerObj)
+			fuzzerObj.AddCandidates(candidates)
+		}
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 
@@ -1536,6 +1642,8 @@ func (mgr *Manager) setPhaseLocked(newPhase int) {
 	if newPhase == phaseTriagedHub {
 		// Start reproductions.
 		go mgr.reproLoop.Loop(vm.ShutdownCtx())
+		// Start race reproduction loop (if configured).
+		go mgr.raceReproLoop.Loop(vm.ShutdownCtx())
 	}
 	mgr.phase = newPhase
 }

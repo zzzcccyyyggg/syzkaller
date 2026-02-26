@@ -25,6 +25,8 @@ type UAFCorpusStore struct {
 type storedUAFCorpusEntry struct {
 	Program       []byte                 `json:"program"`
 	Programs      [][]byte               `json:"programs,omitempty"`
+	MergedProg    []byte                 `json:"merged_prog,omitempty"`
+	ForkBarrier   bool                   `json:"fork_barrier,omitempty"`
 	CallIdx       int                    `json:"call_idx"`
 	Pair          ddrd.MayUAFPair        `json:"pair"`
 	Pairs         []ddrd.MayUAFPair      `json:"pairs,omitempty"`
@@ -230,6 +232,10 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	if len(entry.Programs) != 0 {
 		stored.Programs = serializeProgramGroup(entry.Programs)
 	}
+	if entry.MergedProg != nil {
+		stored.MergedProg = entry.MergedProg.Serialize()
+	}
+	stored.ForkBarrier = entry.ForkBarrier
 	if !entry.ReplayPlan.IsZero() {
 		stored.ReplayPlan = &storedReplayPlan{
 			DelaysMicros: append([]int64(nil), entry.ReplayPlan.DelaysMicros...),
@@ -348,6 +354,16 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		}
 		entry.Programs = group
 	}
+	if store.target != nil && len(stored.MergedProg) != 0 {
+		mergedObj, err := store.target.Deserialize(stored.MergedProg, prog.NonStrict)
+		if err != nil {
+			log.Logf(0, "warning: failed to deserialize merged prog: %v", err)
+			// Continue without merged prog - not fatal, will fall back to re-merge
+		} else {
+			entry.MergedProg = mergedObj
+		}
+	}
+	entry.ForkBarrier = stored.ForkBarrier
 	if stored.ReplayPlan != nil {
 		entry.ReplayPlan = fuzzer.UAFCorpusReplayPlan{
 			DelaysMicros: append([]int64(nil), stored.ReplayPlan.DelaysMicros...),

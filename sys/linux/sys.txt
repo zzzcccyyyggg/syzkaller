@@ -17,7 +17,7 @@
 #
 # Returns: 0 on success
 # ============================================================================
-syz_delay(microseconds intptr[0:10000000])
+syz_delay(microseconds intptr[0:10000000]) (no_generate, no_minimize)
 
 include <linux/socket.h>
 include <linux/ptrace.h>

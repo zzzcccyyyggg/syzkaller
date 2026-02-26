@@ -16,6 +16,31 @@ type Prog struct {
 
 	// Was deserialized using Unsafe mode, so can do unsafe things.
 	isUnsafe bool
+
+	// ForkPoint describes a fork-barrier point inside the program.
+	// When non-nil, the program is a merged fork-barrier program:
+	//   Calls[0:ForkPoint.SetupCalls] are executed by the parent (setup phase),
+	//   then executor fork()s N children, each executing their own call slice.
+	ForkPoint *ForkPoint
+}
+
+// ForkPoint describes the fork-barrier structure of a merged program.
+type ForkPoint struct {
+	// SetupCalls is the number of leading calls in Prog.Calls that belong
+	// to the setup phase (executed by the parent before forking).
+	SetupCalls int
+	// Children describes each child process's call range and delay.
+	Children []ForkChild
+}
+
+// ForkChild describes one child's portion of a fork-barrier program.
+type ForkChild struct {
+	// StartIndex is the first call index in Prog.Calls for this child.
+	StartIndex int
+	// EndIndex is one past the last call index for this child.
+	EndIndex int
+	// DelayUs is the start delay in microseconds applied before this child begins execution.
+	DelayUs int64
 }
 
 const ExtraCallName = ".extra"

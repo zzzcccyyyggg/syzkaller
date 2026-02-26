@@ -81,4 +81,3 @@ func isFileRelatedSyscall(name string) bool {
 
 	return fileRelated[baseName]
 }
-

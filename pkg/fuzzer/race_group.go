@@ -327,8 +327,6 @@ func HasSharedNamespace(p1, p2 *prog.Prog) bool {
 	return false
 }
 
-
-
 // ============================================================================
 // VarName Pair Registry - Limits stacks per VarName pair (default: 100)
 // ============================================================================

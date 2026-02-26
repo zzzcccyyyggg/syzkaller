@@ -204,6 +204,13 @@ func Complete(cfg *Config) error {
 	if err != nil {
 		return err
 	}
+	// When timing exploration is enabled, ensure syz_delay is in the enabled set.
+	// syz_delay is marked no_generate so it won't be randomly generated,
+	// but it must be enabled so programs containing it (saved by timing exploration)
+	// pass corpus validation in prepareEnabledSyscalls.
+	if cfg.Experimental.EnableTimingExploration {
+		cfg.ensureDelaySyscallEnabled()
+	}
 	cfg.NoMutateCalls, err = ParseNoMutateSyscalls(cfg.Target, cfg.NoMutateSyscalls)
 	if err != nil {
 		return err
@@ -257,6 +264,34 @@ func (cfg *Config) completeServices() error {
 func (cfg *Config) initBarrierMask() error {
 	if cfg.Experimental.UAFMode && !cfg.Experimental.BarrierMode {
 		return fmt.Errorf("experimental.uaf_mode requires barrier_mode to be enabled")
+	}
+	if cfg.Experimental.AlternateForkBarrierMode && !cfg.Experimental.ForkBarrierMode {
+		return fmt.Errorf("experimental.alternate_fork_barrier_mode requires fork_barrier_mode to be enabled")
+	}
+	if rr := cfg.Experimental.RaceRepro; rr != nil && rr.Enabled {
+		if !cfg.Experimental.BarrierMode {
+			return fmt.Errorf("experimental.race_repro requires barrier_mode to be enabled")
+		}
+		if !cfg.Experimental.EnableTimingExploration {
+			return fmt.Errorf("experimental.race_repro requires enable_timing_exploration to be enabled")
+		}
+		if rr.VMs < 0 {
+			return fmt.Errorf("experimental.race_repro.vms must be >= 0")
+		}
+		if rr.RepeatBudget == 0 {
+			rr.RepeatBudget = 50
+		}
+		if rr.StabilityThreshold == 0 {
+			rr.StabilityThreshold = 0.3
+		}
+		if rr.DelaySweep {
+			if rr.DelaySweepSteps == 0 {
+				rr.DelaySweepSteps = 5
+			}
+			if rr.DelayMaxUs == 0 {
+				rr.DelayMaxUs = 1000
+			}
+		}
 	}
 	if !cfg.Experimental.BarrierMode {
 		cfg.BarrierMask = 0
@@ -568,6 +603,25 @@ func ParseEnabledSyscalls(target *prog.Target, enabled, disabled []string,
 		arr = append(arr, id)
 	}
 	return arr, nil
+}
+
+// ensureDelaySyscallEnabled adds syz_delay to the enabled syscalls if not already present.
+// This is needed when timing exploration is enabled, because timing exploration saves
+// programs containing syz_delay calls to the corpus. Without syz_delay in the enabled set,
+// ChoiceTable rebuild (prepareEnabledSyscalls) would panic on "disabled syscall".
+func (cfg *Config) ensureDelaySyscallEnabled() {
+	for _, call := range cfg.Target.Syscalls {
+		if call.Name == "syz_delay" {
+			// Check if already in cfg.Syscalls.
+			for _, id := range cfg.Syscalls {
+				if id == call.ID {
+					return // already enabled
+				}
+			}
+			cfg.Syscalls = append(cfg.Syscalls, call.ID)
+			return
+		}
+	}
 }
 
 func ParseNoMutateSyscalls(target *prog.Target, syscalls []string) (map[int]bool, error) {

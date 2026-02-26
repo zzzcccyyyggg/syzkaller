@@ -50,10 +50,10 @@ type PairEvaluator struct {
 	pairRegistry *VarNamePairRegistry
 
 	// Stats
-	statsExploreSkippedByCorpus int
+	statsExploreSkippedByCorpus   int
 	statsExploreSkippedByAttempts int
-	statsSaveSkippedByCorpus    int
-	statsSaveSkippedByLimit     int
+	statsSaveSkippedByCorpus      int
+	statsSaveSkippedByLimit       int
 }
 
 // NewPairEvaluator creates a new PairEvaluator.

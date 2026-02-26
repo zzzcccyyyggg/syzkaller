@@ -840,5 +840,3 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 		affinityTable.RecordInteractionWithWeight(sig1, sig2, weight)
 	}
 }
-
-

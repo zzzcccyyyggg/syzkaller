@@ -38,6 +38,9 @@ type TimingExplorationInfo struct {
 	Phase TimingExplorationPhase
 	// TargetPair is the pair being explored
 	TargetPair *ddrd.MayUAFPair
+	// VarNamePairID is the unique ID used for queue dedup tracking.
+	// Must be passed back to OnJobCompleted so inQueue can be released.
+	VarNamePairID uint64
 	// AttemptNumber is the current attempt number for this pair
 	AttemptNumber int
 	// DelayPlan describes the delay insertions
@@ -71,7 +74,12 @@ type Request struct {
 	// When Barrier is true, BarrierParticipants identifies the proc set as a bitmask.
 	Barrier             bool
 	BarrierParticipants uint64
+	// ForkBarrier indicates the request uses the fork-barrier execution model.
+	// When true, req.Prog is a merged program containing a ForkPoint instruction.
+	// The executor will fork() internally instead of coordinating multiple procs.
+	ForkBarrier bool
 	// BarrierPrograms holds per-proc programs for barrier execution. Order matches BarrierProcList.
+	// In fork-barrier mode, these are the original unmerged programs (for solo filter reference).
 	BarrierPrograms []*prog.Prog
 	// BarrierProcList contains proc indices extracted from BarrierParticipants in ascending order.
 	BarrierProcList []int

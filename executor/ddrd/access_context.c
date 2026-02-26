@@ -162,9 +162,9 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
             pair->lock_status = lock_status;
 
             // Debug: log the tid and access_time from parsed RacePair
-            debug("[RACE-ANALYZE] pair[%d] first.tid=%d second.tid=%d first.time=%llu second.time=%llu\n",
-                pair_count, pair->first.tid, pair->second.tid,
-                (unsigned long long)pair->first.access_time, (unsigned long long)pair->second.access_time);
+            // debug("[RACE-ANALYZE] pair[%d] first.tid=%d second.tid=%d first.time=%llu second.time=%llu\n",
+            //     pair_count, pair->first.tid, pair->second.tid,
+            //     (unsigned long long)pair->first.access_time, (unsigned long long)pair->second.access_time);
 
             pair->thread1_history = access_context_find_thread(record_ctx, pair->first.tid);
             pair->thread2_history = access_context_find_thread(record_ctx, pair->second.tid);

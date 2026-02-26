@@ -39,17 +39,19 @@ var (
 )
 
 type storedUAFCorpusEntry struct {
-	Program    []byte                 `json:"program"`
-	Programs   [][]byte               `json:"programs,omitempty"`
-	CallIdx    int                    `json:"call_idx"`
-	Pair       ddrd.MayUAFPair        `json:"pair"`
-	Pairs      []ddrd.MayUAFPair      `json:"pairs,omitempty"`
-	Signals    []uint64               `json:"signals,omitempty"`
-	Barrier    fuzzer.BarrierSnapshot `json:"barrier"`
-	ReplayPlan *storedReplayPlan      `json:"replay_plan,omitempty"`
-	Profile    *storedPairProfile     `json:"profile,omitempty"`
-	Timestamp  time.Time              `json:"timestamp"`
-	Source     int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
+	Program     []byte                 `json:"program"`
+	Programs    [][]byte               `json:"programs,omitempty"`
+	MergedProg  []byte                 `json:"merged_prog,omitempty"`
+	ForkBarrier bool                   `json:"fork_barrier,omitempty"`
+	CallIdx     int                    `json:"call_idx"`
+	Pair        ddrd.MayUAFPair        `json:"pair"`
+	Pairs       []ddrd.MayUAFPair      `json:"pairs,omitempty"`
+	Signals     []uint64               `json:"signals,omitempty"`
+	Barrier     fuzzer.BarrierSnapshot `json:"barrier"`
+	ReplayPlan  *storedReplayPlan      `json:"replay_plan,omitempty"`
+	Profile     *storedPairProfile     `json:"profile,omitempty"`
+	Timestamp   time.Time              `json:"timestamp"`
+	Source      int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
 }
 
 type storedReplayPlan struct {

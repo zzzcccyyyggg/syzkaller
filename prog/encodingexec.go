@@ -33,6 +33,10 @@ const (
 	execInstrCopyin
 	execInstrCopyout
 	execInstrSetProps
+	// execInstrForkAndExec marks the fork-barrier point in a merged program.
+	// Format: execInstrForkAndExec, numChildren, [child0_numCalls, child0_delayUs, child1_numCalls, child1_delayUs, ...]
+	// After the header, each child's call sequence follows in order (copyin/syscall/copyout instructions).
+	execInstrForkAndExec
 )
 
 const (
@@ -72,6 +76,9 @@ func (p *Prog) SerializeForExec() ([]byte, error) {
 		buf:    make([]byte, 0, 4<<10),
 		args:   make(map[Arg]argInfo),
 	}
+	if p.ForkPoint != nil {
+		return p.serializeForExecFork(w)
+	}
 	w.write(uint64(len(p.Calls)))
 	for _, c := range p.Calls {
 		w.csumMap, w.csumUses = calcChecksumsCall(c)
@@ -82,6 +89,64 @@ func (p *Prog) SerializeForExec() ([]byte, error) {
 	w.write(execInstrEOF)
 	if len(w.buf) > ExecBufferSize {
 		return nil, fmt.Errorf("encodingexec: too large program (%v/%v)", len(w.buf), ExecBufferSize)
+	}
+	if w.copyoutSeq > execMaxCommands {
+		return nil, fmt.Errorf("encodingexec: too many resources (%v/%v)", w.copyoutSeq, execMaxCommands)
+	}
+	return w.buf, nil
+}
+
+// serializeForExecFork serializes a fork-barrier program.
+// Layout:
+//
+//	total_call_count (uint64)
+//	[setup calls serialized normally]
+//	execInstrForkAndExec
+//	  numChildren (uint64)
+//	  child0_numCalls (uint64)
+//	  child0_delayUs (uint64, signed reinterpreted)
+//	  child1_numCalls (uint64)
+//	  child1_delayUs (uint64)
+//	  ...
+//	[child0 calls serialized normally]
+//	[child1 calls serialized normally]
+//	execInstrEOF
+func (p *Prog) serializeForExecFork(w *execContext) ([]byte, error) {
+	fp := p.ForkPoint
+	if debug {
+		fmt.Printf("[FORK-BARRIER-SERIALIZE] totalCalls=%d setupCalls=%d children=%d\n",
+			len(p.Calls), fp.SetupCalls, len(fp.Children))
+		for i, ch := range fp.Children {
+			fmt.Printf("[FORK-BARRIER-SERIALIZE]   child[%d] calls=[%d,%d) delay=%dus\n",
+				i, ch.StartIndex, ch.EndIndex, ch.DelayUs)
+		}
+	}
+	w.write(uint64(len(p.Calls)))
+	// 1. Serialize setup calls.
+	for i := 0; i < fp.SetupCalls && i < len(p.Calls); i++ {
+		c := p.Calls[i]
+		w.csumMap, w.csumUses = calcChecksumsCall(c)
+		_ = w.serializeCall(c)
+	}
+	// 2. Write fork instruction header.
+	w.write(execInstrForkAndExec)
+	w.write(uint64(len(fp.Children)))
+	for _, child := range fp.Children {
+		numCalls := child.EndIndex - child.StartIndex
+		w.write(uint64(numCalls))
+		w.write(uint64(child.DelayUs))
+	}
+	// 3. Serialize each child's calls in order.
+	for _, child := range fp.Children {
+		for i := child.StartIndex; i < child.EndIndex && i < len(p.Calls); i++ {
+			c := p.Calls[i]
+			w.csumMap, w.csumUses = calcChecksumsCall(c)
+			_ = w.serializeCall(c)
+		}
+	}
+	w.write(execInstrEOF)
+	if len(w.buf) > ExecBufferSize {
+		return nil, fmt.Errorf("encodingexec: too large fork program (%v/%v)", len(w.buf), ExecBufferSize)
 	}
 	if w.copyoutSeq > execMaxCommands {
 		return nil, fmt.Errorf("encodingexec: too many resources (%v/%v)", w.copyoutSeq, execMaxCommands)

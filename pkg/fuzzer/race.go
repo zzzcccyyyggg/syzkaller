@@ -15,6 +15,7 @@ import (
 	"github.com/google/syzkaller/pkg/flatrpc"
 	queue "github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/hash"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/pkg/stat"
 	"github.com/google/syzkaller/prog"
@@ -58,10 +59,10 @@ type uafCorpus struct {
 	varnamesFromTiming map[uint64]struct{} // varnames from timing exploration
 	statSeeds          *stat.Val
 	statSeedsWithHist  *stat.Val
-	statCover           *stat.Val
-	statPairs           *stat.Val
-	statVarnames        *stat.Val
-	statSkippedByLimit  *stat.Val
+	statCover          *stat.Val
+	statPairs          *stat.Val
+	statVarnames       *stat.Val
+	statSkippedByLimit *stat.Val
 }
 
 type barrierSeed struct {
@@ -70,6 +71,8 @@ type barrierSeed struct {
 	execOpts        flatrpc.ExecOpts
 	barrierPrograms []*prog.Prog
 	replayPlan      UAFCorpusReplayPlan
+	mergedProg      *prog.Prog // Fork-barrier merged program for replay
+	forkBarrier     bool       // Whether this seed uses fork-barrier mode
 	syncable        bool
 	synced          bool
 }
@@ -78,6 +81,8 @@ type barrierSeed struct {
 type UAFCorpusEntry struct {
 	Prog          *prog.Prog
 	Programs      []*prog.Prog
+	MergedProg    *prog.Prog // Fork-barrier merged program (nil for legacy mode)
+	ForkBarrier   bool       // Whether this was a fork-barrier execution
 	CallIdx       int
 	Pairs         []*ddrd.MayUAFPair
 	PairBasicInfo ddrd.MayUAFPair
@@ -423,10 +428,21 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 
 	// DUAL-QUEUE: Enqueue NEW VarName pairs to Timing Exploration
 	if u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
+		// Extract pre-merged program for fork-barrier mode (nil for legacy).
+		var mergedProg *prog.Prog
+		if req != nil && req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier() {
+			mergedProg = req.Prog
+		}
+		newCount := 0
 		for _, pair := range batch {
 			if u.fuzzer.timingScheduler.IsNewVarNamePair(pair) {
-				u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, pair)
+				u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, mergedProg, pair)
+				newCount++
 			}
+		}
+		if newCount > 0 {
+			log.Logf(1, "[TIMING-FEED] handleFilteredPairs: fed %d/%d new VarName pairs to timing queue (source=%v)",
+				newCount, len(batch), source)
 		}
 	}
 
@@ -445,6 +461,14 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 	entry.ReplayPlan = plan.clone()
 	entry.Source = source
 
+	// In fork-barrier mode, save the merged program so seeds can be replayed correctly.
+	// Without this, enqueueSeed would only have prog1 and miss the fork-barrier structure.
+	isFork := req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier()
+	if isFork {
+		entry.ForkBarrier = true
+		entry.MergedProg = req.Prog.Clone()
+	}
+
 	// Get replay history if new pairs found
 	if historyCount > 0 && res != nil {
 		vmIndex := res.Executor.VM
@@ -461,12 +485,18 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 		u.mu.Unlock()
 		return
 	}
+	var seedMerged *prog.Prog
+	if isFork && entry.MergedProg != nil {
+		seedMerged = entry.MergedProg.Clone()
+	}
 	seed := &barrierSeed{
 		kind:            seedKindUAF,
 		entry:           entry,
 		execOpts:        req.ExecOpts,
 		replayPlan:      plan.clone(),
 		barrierPrograms: programs,
+		mergedProg:      seedMerged,
+		forkBarrier:     isFork,
 		syncable:        true,
 		synced:          false,
 	}
@@ -536,13 +566,25 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	entry.Source = SourceFuzz
 	entry.Programs = clonePrograms(group)
 	entry.ReplayPlan = plan.clone()
+
+	// In fork-barrier mode, save the merged program for correct replay.
+	isFork := req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier()
+	if isFork {
+		entry.ForkBarrier = true
+		entry.MergedProg = req.Prog.Clone()
+	}
+
 	seed := &barrierSeed{
-		kind:       seedKindCoverage,
-		entry:      entry,
-		execOpts:   req.ExecOpts,
-		replayPlan: plan.clone(),
-		syncable:   false,
-		synced:     true,
+		kind:        seedKindCoverage,
+		entry:       entry,
+		execOpts:    req.ExecOpts,
+		replayPlan:  plan.clone(),
+		forkBarrier: isFork,
+		syncable:    false,
+		synced:      true,
+	}
+	if isFork && entry.MergedProg != nil {
+		seed.mergedProg = entry.MergedProg.Clone()
 	}
 	if len(req.BarrierPrograms) != 0 {
 		seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
@@ -640,6 +682,39 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 		Prog:     seed.entry.Prog.Clone(),
 		ExecOpts: seed.execOpts,
 	}
+
+	// Fork-barrier replay: use the stored merged program directly.
+	isFork := seed.forkBarrier || seed.entry.ForkBarrier
+	if isFork {
+		var merged *prog.Prog
+		switch {
+		case seed.mergedProg != nil:
+			merged = seed.mergedProg
+		case seed.entry.MergedProg != nil:
+			merged = seed.entry.MergedProg
+		}
+		if merged != nil && merged.IsForkBarrier() {
+			req.Prog = merged.Clone()
+			req.ForkBarrier = true
+			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+			// Keep original separate programs for solo filter and result processing.
+			var programs []*prog.Prog
+			switch {
+			case len(seed.barrierPrograms) != 0:
+				programs = seed.barrierPrograms
+			case len(seed.entry.Programs) != 0:
+				programs = seed.entry.Programs
+			}
+			if len(programs) != 0 {
+				req.BarrierPrograms = clonePrograms(programs)
+			}
+			u.queue.Submit(req)
+			return
+		}
+		// Merged program unavailable or invalid — fall through to legacy path.
+	}
+
+	// Legacy multi-proc barrier replay.
 	if barrier := seed.entry.Barrier; barrier.Participants != 0 {
 		req.SetBarrier(barrier.Participants)
 		if len(barrier.ProcList) != 0 {
@@ -718,12 +793,16 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 			allPairs = append(allPairs, pair)
 		}
 		seed := &barrierSeed{
-			kind:       clone.Kind,
-			entry:      clone,
-			execOpts:   setFlags(flatrpc.ExecFlagCollectSignal),
-			replayPlan: clone.ReplayPlan.clone(),
-			syncable:   clone.Kind == seedKindUAF,
-			synced:     clone.Kind != seedKindUAF,
+			kind:        clone.Kind,
+			entry:       clone,
+			execOpts:    setFlags(flatrpc.ExecFlagCollectSignal),
+			replayPlan:  clone.ReplayPlan.clone(),
+			forkBarrier: clone.ForkBarrier,
+			syncable:    clone.Kind == seedKindUAF,
+			synced:      clone.Kind != seedKindUAF,
+		}
+		if clone.MergedProg != nil {
+			seed.mergedProg = clone.MergedProg.Clone()
 		}
 		if len(clone.Programs) != 0 {
 			seed.barrierPrograms = clonePrograms(clone.Programs)
@@ -884,6 +963,9 @@ func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
 	}
 	if len(entry.Programs) != 0 {
 		clone.Programs = clonePrograms(entry.Programs)
+	}
+	if entry.MergedProg != nil {
+		clone.MergedProg = entry.MergedProg.Clone()
 	}
 	if len(entry.Pairs) != 0 {
 		clone.Pairs = clonePairs(entry.Pairs)

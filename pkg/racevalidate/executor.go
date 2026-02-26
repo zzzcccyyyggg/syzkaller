@@ -66,6 +66,16 @@ func (e *ExecutorAdapter) Run(ctx context.Context, req *ExecutionRequest) (*Exec
 		log.Logf(0, "uafvalidate: vm=%d starting run barrier=%t", vmIndex, e.requiresBarrier(req.Entry))
 	}
 	if e.requiresBarrier(req.Entry) {
+		// Per-entry ForkBarrier field takes priority over global ForkBarrierMode.
+		// This allows entries from different sources (fork-barrier fuzzing vs
+		// multi-proc barrier fuzzing) to use the correct execution mode.
+		useForkBarrier := e.cfg.ForkBarrierMode
+		if req.Entry.ForkBarrier {
+			useForkBarrier = true
+		}
+		if useForkBarrier {
+			return e.runForkBarrier(ctx, req)
+		}
 		return e.runBarrier(ctx, req)
 	}
 	// If we are in verification phase (RepeatTimes > 0) and barrier is not required by default,
@@ -118,6 +128,79 @@ func (e *ExecutorAdapter) runSingle(ctx context.Context, req *ExecutionRequest) 
 	if e.cfg.Debug && e.inst.VMInstance != nil {
 		log.Logf(0, "uafvalidate: vm=%d finished single run duration=%s crashed=%t", e.inst.VMInstance.Index(), res.Duration, res.Report != nil)
 	}
+	result := &ExecutionResult{
+		Output:   append([]byte{}, res.Output...),
+		Duration: res.Duration,
+	}
+	if res.Report != nil {
+		result.Crashed = true
+		result.CrashTitle = res.Report.Title
+		if len(res.Report.Report) != 0 {
+			result.CrashReport = append([]byte{}, res.Report.Report...)
+		}
+	}
+	return result, nil
+}
+
+// runForkBarrier executes a barrier validation using the fork-barrier model.
+// Programs are merged into a single program with a ForkPoint instruction.
+// The executor forks internally, so only one proc is needed.
+func (e *ExecutorAdapter) runForkBarrier(ctx context.Context, execReq *ExecutionRequest) (*ExecutionResult, error) {
+	entry := execReq.Entry
+	mask := barrierMask(entry)
+
+	// Prepare programs same as runBarrier.
+	var programs []*prog.Prog
+	if execReq.TargetPair != nil && !e.cfg.DisableAsyncSplit {
+		programs = barrierProgramsForVerify(entry, mask)
+	} else {
+		programs = barrierPrograms(entry, mask)
+	}
+	if len(programs) < 2 {
+		return e.runSingle(ctx, execReq)
+	}
+
+	// Merge into a single fork-barrier program.
+	delays := barrierDelays(execReq.Delays, entry.ReplayPlan.DelaysMicros, len(programs))
+	log.Logf(0, "[FORK-BARRIER-VALIDATE] merging %d programs for fork-barrier", len(programs))
+	merged := prog.MergeForForkBarrier(programs, delays)
+	if merged == nil || !merged.IsForkBarrier() {
+		log.Logf(0, "[FORK-BARRIER-VALIDATE] merge failed, falling back to runSingle")
+		return e.runSingle(ctx, execReq)
+	}
+
+	vmIndex := -1
+	if e.inst.VMInstance != nil {
+		vmIndex = e.inst.VMInstance.Index()
+	}
+	log.Logf(0, "[FORK-BARRIER-VALIDATE] vm=%d merged: setup=%d children=%d totalCalls=%d serializedSize=%d",
+		vmIndex, merged.ForkPoint.SetupCalls, len(merged.ForkPoint.Children),
+		len(merged.Calls), len(merged.Serialize()))
+
+	// Execute as single program — the executor handles fork() internally.
+	opts := e.inst.DefaultExecOpts()
+	opts.Threaded = false
+	opts.Collide = false
+	opts.Repeat = false
+	opts.RepeatTimes = 0
+	opts.Procs = 1
+
+	if execReq.RepeatTimes > 0 {
+		opts.Repeat = true
+		opts.RepeatTimes = execReq.RepeatTimes
+	}
+
+	params := instance.ExecParams{
+		SyzProg:  merged.Serialize(),
+		Duration: e.cfg.ExecutionTimeout,
+		Opts:     opts,
+		UkcPair:  execReq.TargetPair,
+	}
+	res, err := e.inst.RunSyzProg(params)
+	if err != nil {
+		return nil, err
+	}
+
 	result := &ExecutionResult{
 		Output:   append([]byte{}, res.Output...),
 		Duration: res.Duration,

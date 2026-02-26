@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -30,6 +31,11 @@ type HighQualityProgramPair struct {
 	// The programs that discovered the race
 	Prog1 *prog.Prog
 	Prog2 *prog.Prog
+
+	// Pre-merged program for fork-barrier mode (nil for legacy mode).
+	// Stored at discovery time so that timing exploration reuses the exact
+	// same merged layout instead of re-merging (which must be identical).
+	MergedProg *prog.Prog
 
 	// The VarName pair that made this high-quality (for reference)
 	VarNamePairID uint64
@@ -65,16 +71,18 @@ type TimingExplorationQueue struct {
 	config TimingExplorationConfig
 
 	// Statistics
-	totalEnqueued   int
-	totalExplored   int
-	totalPairsFound int
-	totalValidated  int
+	totalEnqueued           int
+	totalExplored           int
+	totalPairsFound         int
+	totalValidated          int
+	totalValidationEnqueued int
 }
 
 // ValidationJob represents a Phase 2 validation job.
 type ValidationJob struct {
 	Prog1          *prog.Prog
 	Prog2          *prog.Prog
+	MergedProg     *prog.Prog // Pre-merged fork-barrier program (nil for legacy)
 	TargetPair     *ddrd.MayUAFPair
 	CandidatePairs []*ddrd.MayUAFPair
 	EnqueuedAt     time.Time
@@ -95,6 +103,7 @@ func NewTimingExplorationQueue(config TimingExplorationConfig) *TimingExploratio
 // Returns true if enqueued, false if duplicate or queue full.
 func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 	prog1, prog2 *prog.Prog,
+	mergedProg *prog.Prog, // Pre-merged fork-barrier program (nil for legacy)
 	discoveredPair *ddrd.MayUAFPair,
 ) bool {
 	if discoveredPair == nil || prog1 == nil {
@@ -108,11 +117,15 @@ func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 
 	// Check for duplicates (same VarName pair already in queue)
 	if q.inQueue[varNamePairID] {
+		log.Logf(1, "[TIMING-QUEUE] REJECT duplicate: vnPairID=0x%x, queueSize=%d, totalEnqueued=%d, inQueueMap=%d",
+			varNamePairID, len(q.entries), q.totalEnqueued, len(q.inQueue))
 		return false
 	}
 
 	// Check queue size limit
 	if len(q.entries) >= q.config.TimingExplorationQueueSize {
+		log.Logf(0, "[TIMING-QUEUE] REJECT full: vnPairID=0x%x, queueSize=%d/%d, totalEnqueued=%d",
+			varNamePairID, len(q.entries), q.config.TimingExplorationQueueSize, q.totalEnqueued)
 		return false
 	}
 
@@ -122,10 +135,15 @@ func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 	if prog2 != nil {
 		clonedProg2 = prog2.Clone()
 	}
+	var clonedMerged *prog.Prog
+	if mergedProg != nil {
+		clonedMerged = mergedProg.Clone()
+	}
 
 	entry := &HighQualityProgramPair{
 		Prog1:            clonedProg1,
 		Prog2:            clonedProg2,
+		MergedProg:       clonedMerged,
 		VarNamePairID:    varNamePairID,
 		OriginalPair:     discoveredPair,
 		DiscoveredAt:     time.Now(),
@@ -137,6 +155,9 @@ func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 	q.inQueue[varNamePairID] = true
 	q.totalEnqueued++
 
+	log.Logf(1, "[TIMING-QUEUE] ENQUEUED: vnPairID=0x%x, queueSize=%d, totalEnqueued=%d, inQueueMap=%d",
+		varNamePairID, len(q.entries), q.totalEnqueued, len(q.inQueue))
+
 	return true
 }
 
@@ -147,6 +168,8 @@ func (q *TimingExplorationQueue) DequeueForExploration() *HighQualityProgramPair
 	defer q.mu.Unlock()
 
 	if len(q.entries) == 0 {
+		log.Logf(1, "[TIMING-QUEUE] DEQUEUE empty: totalEnqueued=%d, totalExplored=%d, inQueueMap=%d, validationPending=%d",
+			q.totalEnqueued, q.totalExplored, len(q.inQueue), len(q.validationQueue))
 		return nil
 	}
 
@@ -157,6 +180,9 @@ func (q *TimingExplorationQueue) DequeueForExploration() *HighQualityProgramPair
 	entry.ExplorationCount++
 	entry.LastExploredAt = time.Now()
 	q.totalExplored++
+
+	log.Logf(1, "[TIMING-QUEUE] DEQUEUED: vnPairID=0x%x, remaining=%d, totalExplored=%d, validationPending=%d",
+		entry.VarNamePairID, len(q.entries), q.totalExplored, len(q.validationQueue))
 
 	return entry
 }
@@ -186,6 +212,20 @@ func (q *TimingExplorationQueue) MarkExplorationComplete(entry *HighQualityProgr
 	defer q.mu.Unlock()
 
 	delete(q.inQueue, entry.VarNamePairID)
+}
+
+// ReleaseFromInQueue removes a vnPairID from the inQueue dedup map,
+// allowing the same VarName pair to be re-enqueued from future feedback.
+// Called after a timing exploration job completes (Phase1 or Phase2).
+func (q *TimingExplorationQueue) ReleaseFromInQueue(vnPairID uint64) {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if q.inQueue[vnPairID] {
+		delete(q.inQueue, vnPairID)
+		log.Logf(1, "[TIMING-QUEUE] RELEASED from inQueue: vnPairID=0x%x, inQueueMap=%d",
+			vnPairID, len(q.inQueue))
+	}
 }
 
 // AddPendingPairs adds pairs found during widened-threshold exploration.
@@ -249,6 +289,13 @@ func (q *TimingExplorationQueue) GetStats() (enqueued, explored, pairsFound, cur
 	return q.totalEnqueued, q.totalExplored, q.totalPairsFound, len(q.entries)
 }
 
+// GetValidationStats returns validation queue statistics.
+func (q *TimingExplorationQueue) GetValidationStats() (validationEnqueued, validationDequeued, validationQueueLen int) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return q.totalValidationEnqueued, q.totalValidated, len(q.validationQueue)
+}
+
 // Clear removes all entries from the queue.
 func (q *TimingExplorationQueue) Clear() {
 	q.mu.Lock()
@@ -263,6 +310,7 @@ func (q *TimingExplorationQueue) Clear() {
 // Phase 2 uses normal threshold with delays to confirm the pair.
 func (q *TimingExplorationQueue) EnqueueForValidation(
 	prog1, prog2 *prog.Prog,
+	mergedProg *prog.Prog, // Pre-merged fork-barrier program (nil for legacy)
 	targetPair *ddrd.MayUAFPair,
 	candidatePairs []*ddrd.MayUAFPair,
 ) {
@@ -282,8 +330,15 @@ func (q *TimingExplorationQueue) EnqueueForValidation(
 	if prog2 != nil {
 		job.Prog2 = prog2.Clone()
 	}
+	if mergedProg != nil {
+		job.MergedProg = mergedProg.Clone()
+	}
 
 	q.validationQueue = append(q.validationQueue, job)
+	q.totalValidationEnqueued++
+	log.Logf(1, "[PHASE2-ENQUEUE] target=0x%x/0x%x candidates=%d validationQueueLen=%d totalValidationEnqueued=%d",
+		targetPair.UseAccessName, targetPair.FreeAccessName, len(candidatePairs),
+		len(q.validationQueue), q.totalValidationEnqueued)
 }
 
 // DequeueValidationJob returns the next validation job (Phase 2).

@@ -158,29 +158,137 @@ Controls how `syz_delay()` calls are mutated:
 ├─────────────────────────────────────────────────────────────────┤
 │                                                                  │
 │   ┌──────────────────────┐     ┌──────────────────────┐         │
-│   │  Pair Discovery      │     │  Timing Exploration   │        │
+│   │  Phase 1             │     │  Phase 2              │        │
+│   │  Pair Discovery      │     │  Timing Validation    │        │
 │   │  Queue               │     │  Queue                │        │
 │   │                      │     │                       │        │
 │   │  - Random pairing    │────▶│  - syz_delay() mut   │        │
-│   │  - Normal threshold  │     │  - Widened threshold │        │
+│   │  - Widened threshold │     │  - Normal threshold  │        │
 │   │  - New pair discovery│     │  - Timing optimization│        │
-│   └──────────────────────┘     └──────────────────────┘        │
-│            │                            │                        │
-│            ▼                            ▼                        │
+│   └──────────────────────┘     └──────────┬───────────┘        │
+│            │                               │                     │
+│            ▼                               ▼                     │
 │   ┌─────────────────────────────────────────────────────────┐   │
 │   │              VarNamePairRegistry                         │   │
-│   │                                                          │   │
 │   │  - Records timing attempts per pair                     │   │
 │   │  - Tracks best timing configurations                    │   │
-│   │  - Manages exploration queue additions                  │   │
 │   └─────────────────────────────────────────────────────────┘   │
+│                                                                  │
+└──────────────────────────────────┬──────────────────────────────┘
+                                   │ Phase 2 Success
+                                   │ (builds UAFCorpusEntry)
+                                   ▼
+┌─────────────────────────────────────────────────────────────────┐
+│                     Manager                                      │
+├─────────────────────────────────────────────────────────────────┤
+│                                                                  │
+│   ┌──────────────────────────────────────────┐                  │
+│   │  Phase 3: RaceValidateLoop               │                  │
+│   │  (wraps StageManager pipeline)           │                  │
+│   │                                           │                  │
+│   │  ┌────────────────────────────────┐      │                  │
+│   │  │ StageManager (online mode)      │      │                  │
+│   │  │ - Collection: find stable pairs │      │                  │
+│   │  │ - Verification: delay sweep     │      │                  │
+│   │  │ - Fork-barrier execution       │      │                  │
+│   │  │ - DDRD protocol (UkcPair)      │      │                  │
+│   │  └────────────┬───────────────────┘      │                  │
+│   │               │                           │                  │
+│   │               ▼                           │                  │
+│   │  ┌────────────────────────────────┐      │                  │
+│   │  │ ExecutorAdapter (per worker)    │      │                  │
+│   │  │ - pool.Run() → VM acquisition  │      │                  │
+│   │  │ - runForkBarrier() execution   │      │                  │
+│   │  │ - Close() → VM release         │      │                  │
+│   │  └────────────────────────────────┘      │                  │
+│   └──────────────────┬───────────────────────┘                  │
+│                      │                                           │
+│                      ▼                                           │
+│   ┌─────────────────────────┐    ┌──────────────────────┐       │
+│   │  ValidationResult        │    │  CrashReproLoop      │      │
+│   │  - StablePairs found    ├───▶│  (syzkaller native)  │      │
+│   │  - Crash detected       │    │  - C reproducer      │      │
+│   │  - Error/timeout        │    │  - syz-repro         │      │
+│   └─────────────────────────┘    └──────────────────────┘      │
+│                                                                  │
+│   VM Pool: [fuzzing VMs | raceValidate VMs | crashRepro VMs]    │
+│            ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^^      │
+│            Managed by dispatcher.Pool with ReserveForRun()      │
 │                                                                  │
 └─────────────────────────────────────────────────────────────────┘
 ```
 
+## Phase 3: Race Validation (via StageManager Pipeline)
+
+After Phase 2 validates a timing pair with delays, the validated program is automatically
+forwarded to the **RaceValidateLoop** in the Manager. This loop wraps the full
+**StageManager** pipeline from `pkg/racevalidate` — the same engine used in standalone
+UAF Validate mode. This ensures complete consistency between online validation and
+batch validation:
+
+**Execution pipeline** (identical to `uaf_validate` mode):
+- **Fork-Barrier execution**: Programs merged via `MergeForForkBarrier()`, executed with fork() for shared fd table
+- **DDRD protocol**: Proper `ExecFlagCollectDdrdUaf` + `UkcPair` for targeted detection
+- **Two-phase validation**: Collection (find stable pairs) → Verification (per-pair delay sweep)
+- **Delay sweep**: Progressive start_delay sweep with exponential curve
+
+**How it works**:
+
+1. Phase 2 success callback builds a `UAFCorpusEntry` from the validated timing pair
+   (Programs, MergedProg, Barrier, Pairs, ReplayPlan with delays)
+2. Entry is deduplicated and submitted via `StageManager.Enqueue()`
+3. StageManager workers acquire VMs from the **dispatcher pool's reserved slots**
+   (via `pool.Run()`, same mechanism as crash reproduction)
+4. Each worker creates an `ExecutorAdapter` with full barrier/fork-barrier support
+5. Collection phase: repeat execution to find stable DDRD pairs
+6. Verification phase: per-pair targeted verification with delay sweep
+7. Results (crash/stable pair detection/failure) are logged and reported
+
+### VM Acquisition Bridge
+
+The race validation ExecutorFactory bridges two different models:
+- **Dispatcher pool model**: `pool.Run(callback)` — acquires a reserved VM, runs callback, releases on return
+- **StageManager model**: `factory(ctx) → Executor` — returns an executor the caller uses freely
+
+The bridge (`pooledRaceExecutor`) works by:
+1. `pool.Run()` acquires VM in a goroutine, creates ExecutorAdapter, sends to channel
+2. Factory function reads from channel, returns executor to StageManager worker
+3. When StageManager calls `executor.Close()`, it signals the goroutine → `pool.Run` callback returns → VM released
+
+### Race Validation Configuration
+
+Configure under `experimental.race_repro`:
+
+```json
+{
+  "experimental": {
+    "race_repro": {
+      "enabled": true,
+      "vms": 2,
+      "repeat_budget": 100,
+      "delay_sweep": true,
+      "delay_sweep_steps": 5,
+      "delay_max_us": 1000,
+      "stability_threshold": 0.3
+    }
+  }
+}
+```
+
+| Field | Type | Default | Description |
+|-------|------|---------|-------------|
+| `enabled` | bool | `false` | Enable race validation pipeline |
+| `vms` | int | `0` | Number of VMs dedicated to race validation |
+| `repeat_budget` | int | `50` | RepeatCount for Collection phase |
+| `delay_sweep` | bool | `false` | Enable delay sweep during Verification phase |
+| `delay_sweep_steps` | int | `5` | Number of delay steps to sweep |
+| `delay_max_us` | int64 | `1000` | Max delay during sweep (μs) |
+| `stability_threshold` | float | `0.3` | Detection rate threshold for stable validation |
+| `enable_snapshot` | bool | `false` | Use VM snapshots for faster reset |
+
 ## Related Documentation
 
-- [DDRD Configuration Reference](ddrd_configuration_reference.md) - Complete configuration reference for all DDRD settings
+- [DDRD Configuration Reference](ddrd_configuration_reference.md) - Complete configuration reference for all DDRD settings (including Race Reproduction)
 - [Race Guided Fuzzing Design](race_guided_fuzzing_design.md)
 - [UAF Barrier Fuzzing](uaf_barrier_fuzzing.md)
 - [DDRD Integration](ddrd_integration_update.md)

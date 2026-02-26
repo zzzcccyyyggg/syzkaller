@@ -646,7 +646,7 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		allSignal[i] = int32(call)
 	}
 	opts := req.ExecOpts
-	if ctx.barrier != nil && !req.DisableDdrd {
+	if (ctx.barrier != nil || req.ForkBarrier) && !req.DisableDdrd {
 		opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
 	}
 	if runner.debug {

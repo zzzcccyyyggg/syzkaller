@@ -17,6 +17,8 @@ import (
 	"sync"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -30,6 +32,11 @@ type TimingExplorationJob struct {
 	Prog1 *prog.Prog
 	Prog2 *prog.Prog
 
+	// Pre-merged fork-barrier program (nil for legacy mode).
+	// For Phase 1: used directly as req.Prog (no re-merge needed).
+	// For Phase 2: re-merged after delay insertion (deterministic, same fd layout).
+	MergedProg *prog.Prog
+
 	// The original programs before delay mutation (for saving to corpus)
 	OriginalProg1 *prog.Prog
 	OriginalProg2 *prog.Prog
@@ -39,6 +46,9 @@ type TimingExplorationJob struct {
 
 	// VarName pair ID for tracking
 	VarNamePairID uint64
+
+	// Explicit phase: PhaseWidenedDiscovery (Phase 1) or PhaseValidation (Phase 2)
+	Phase queue.TimingExplorationPhase
 
 	// The delay plan applied
 	DelayPlan DelayPlan
@@ -154,6 +164,7 @@ func (ts *TimingScheduler) shouldSkipByCorpusCount(pair *ddrd.MayUAFPair) bool {
 // It enqueues the program pair for Timing Exploration.
 func (ts *TimingScheduler) OnNewVarNamePairDiscovered(
 	prog1, prog2 *prog.Prog,
+	mergedProg *prog.Prog, // Pre-merged fork-barrier program (nil for legacy)
 	pair *ddrd.MayUAFPair,
 ) {
 	ts.mu.Lock()
@@ -161,12 +172,23 @@ func (ts *TimingScheduler) OnNewVarNamePairDiscovered(
 
 	// Skip if this VarName pair already has enough corpus entries
 	if ts.shouldSkipByCorpusCount(pair) {
+		log.Logf(1, "[TIMING-SCHED] OnNewVarNamePair SKIP corpus-limit: free=0x%x use=0x%x",
+			pair.FreeAccessName, pair.UseAccessName)
 		return
 	}
 
+	// Sanitize merged baseline before Phase 1 enqueue so discovery/validation
+	// both use the same no-delay starting program.
+	sanitizedMerged := mergedProg
+	if mergedProg != nil && ts.mutator != nil {
+		sanitizedMerged = ts.mutator.SanitizeMergedForTiming(mergedProg)
+	}
+
 	// Enqueue for timing exploration
-	ts.explorationQueue.EnqueueHighQualityPair(prog1, prog2, pair)
+	ok := ts.explorationQueue.EnqueueHighQualityPair(prog1, prog2, sanitizedMerged, pair)
 	ts.stats.TotalNewVarNamePairs++
+	log.Logf(1, "[TIMING-SCHED] OnNewVarNamePair: free=0x%x use=0x%x enqueued=%v totalNew=%d queueSize=%d",
+		pair.FreeAccessName, pair.UseAccessName, ok, ts.stats.TotalNewVarNamePairs, ts.explorationQueue.Size())
 }
 
 // OnStackQuadrupleDiscovered is called when a new (VarName+Stack) quadruple is found.
@@ -213,6 +235,8 @@ func (ts *TimingScheduler) GetNextJob() *TimingExplorationJob {
 			break // No more validation jobs
 		}
 		if job := ts.createValidationJob(validationJob); job != nil {
+			log.Logf(1, "[TIMING-SCHED] GetNextJob: returning PHASE2 validation job, queueSize=%d",
+				ts.explorationQueue.Size())
 			return job
 		}
 		// This validation job was skipped (e.g., timing attempts exhausted)
@@ -220,7 +244,13 @@ func (ts *TimingScheduler) GetNextJob() *TimingExplorationJob {
 	}
 
 	// Priority 2: Phase 1 discovery jobs
-	return ts.createDiscoveryJob()
+	job := ts.createDiscoveryJob()
+	// Commented out: extremely high frequency (10K+/min) when queue is empty
+	// if job == nil {
+	// 	log.Logf(0, \"[TIMING-SCHED] GetNextJob: EMPTY - no Phase1 or Phase2 jobs available, queueSize=%d, totalGenerated=%d, totalCompleted=%d\",
+	// 		ts.explorationQueue.Size(), ts.stats.TotalJobsGenerated, ts.stats.TotalJobsCompleted)
+	// }
+	return job
 }
 
 // createValidationJob creates a Phase 2 validation job with delays.
@@ -240,10 +270,29 @@ func (ts *TimingScheduler) createValidationJob(vj *ValidationJob) *TimingExplora
 	// Generate delay plan for validation
 	delayPlan := ts.mutator.GenerateDelayPlan(targetPair, nil, ts.rnd)
 
-	// Apply delay plan to programs (insert syz_delay calls)
-	mutatedProg1, mutatedProg2 := ts.mutator.ApplyDelayPlan(
-		vj.Prog1, vj.Prog2, delayPlan,
-	)
+	log.Logf(1, "[PHASE2-CREATE] createValidationJob: hasDelaySyscall=%v delayPlanLen=%d target=0x%x/0x%x hasMerged=%v",
+		ts.mutator.HasDelaySyscall(), len(delayPlan), targetPair.UseAccessName, targetPair.FreeAccessName, vj.MergedProg != nil)
+
+	var mutatedProg1, mutatedProg2 *prog.Prog
+	var mutatedMerged *prog.Prog
+
+	if vj.MergedProg != nil {
+		// Fork-barrier mode: apply delays directly to the pre-merged program.
+		// This guarantees the same fd layout as discovery; only delays differ.
+		log.Logf(1, "[PHASE2-MERGED-BEFORE] merged program before delays (%d calls):\n%s",
+			len(vj.MergedProg.Calls), logMergedWithStructure(vj.MergedProg))
+		mutatedMerged = ts.mutator.ApplyDelayPlanToMerged(vj.MergedProg, delayPlan)
+		// Also prepare legacy (non-fork) mutated variants so dispatcher can
+		// alternate execution mode per attempt if configured.
+		mutatedProg1, mutatedProg2 = ts.mutator.ApplyDelayPlan(vj.Prog1, vj.Prog2, delayPlan)
+		log.Logf(1, "[PHASE2-MERGED-AFTER] merged program after delays (%d calls):\n%s",
+			len(mutatedMerged.Calls), logMergedWithStructure(mutatedMerged))
+	} else {
+		// Legacy mode: apply delays to separate programs
+		mutatedProg1, mutatedProg2 = ts.mutator.ApplyDelayPlan(
+			vj.Prog1, vj.Prog2, delayPlan,
+		)
+	}
 
 	attemptNum := ts.pairRegistry.GetTimingAttemptCount(targetPair)
 	ts.stats.TotalJobsGenerated++
@@ -251,56 +300,74 @@ func (ts *TimingScheduler) createValidationJob(vj *ValidationJob) *TimingExplora
 	return &TimingExplorationJob{
 		Prog1:          mutatedProg1,
 		Prog2:          mutatedProg2,
+		MergedProg:     mutatedMerged, // Pre-merged with delays (nil for legacy)
 		OriginalProg1:  vj.Prog1,
 		OriginalProg2:  vj.Prog2,
 		TargetPair:     targetPair,
 		VarNamePairID:  varNamePairID(targetPair.FreeAccessName, targetPair.UseAccessName),
-		DelayPlan:      delayPlan, // Phase 2 has delays
+		Phase:          queue.PhaseValidation, // Explicit Phase 2
+		DelayPlan:      delayPlan,             // Phase 2 has delays
 		AttemptNumber:  attemptNum + 1,
 		CandidatePairs: vj.CandidatePairs, // Pass candidate pairs from Phase 1
 	}
 }
 
 // createDiscoveryJob creates a Phase 1 discovery job (no delays, widened threshold).
+// Loops through queue entries to find one that passes all checks, avoiding silent discard.
 func (ts *TimingScheduler) createDiscoveryJob() *TimingExplorationJob {
-	// Try to get a program pair from the queue
-	hqPair := ts.explorationQueue.DequeueForExploration()
-	if hqPair == nil {
-		return nil
-	}
+	for {
+		// Try to get a program pair from the queue
+		hqPair := ts.explorationQueue.DequeueForExploration()
+		if hqPair == nil {
+			return nil // Queue empty
+		}
 
-	// Get the target pair
-	targetPair := hqPair.OriginalPair
-	if targetPair == nil {
-		targetPair = ts.explorationQueue.GetNextPendingPair(hqPair)
-	}
-	if targetPair == nil {
-		return nil
-	}
+		// Get the target pair
+		targetPair := hqPair.OriginalPair
+		if targetPair == nil {
+			targetPair = ts.explorationQueue.GetNextPendingPair(hqPair)
+		}
+		if targetPair == nil {
+			log.Logf(0, "[TIMING-SCHED] createDiscoveryJob SKIP nil-target: vnPairID=0x%x",
+				hqPair.VarNamePairID)
+			// Release from inQueue so it can re-enter later
+			ts.explorationQueue.ReleaseFromInQueue(hqPair.VarNamePairID)
+			continue // Try next entry
+		}
 
-	// Check corpus count: skip if this VarName pair already has enough entries
-	if ts.shouldSkipByCorpusCount(targetPair) {
-		return nil
-	}
+		// Check corpus count: skip if this VarName pair already has enough entries
+		if ts.shouldSkipByCorpusCount(targetPair) {
+			log.Logf(0, "[TIMING-SCHED] createDiscoveryJob SKIP corpus-limit: vnPairID=0x%x free=0x%x use=0x%x",
+				hqPair.VarNamePairID, targetPair.FreeAccessName, targetPair.UseAccessName)
+			// Release from inQueue — corpus count may decrease later
+			ts.explorationQueue.ReleaseFromInQueue(hqPair.VarNamePairID)
+			continue // Try next entry
+		}
 
-	// Check if we should attempt more timing exploration for this pair
-	if !ts.pairRegistry.ShouldAttemptTiming(targetPair) {
-		return nil
-	}
+		// Check if we should attempt more timing exploration for this pair
+		if !ts.pairRegistry.ShouldAttemptTiming(targetPair) {
+			log.Logf(0, "[TIMING-SCHED] createDiscoveryJob SKIP attempt-limit: vnPairID=0x%x stkPair attempts exhausted",
+				hqPair.VarNamePairID)
+			// Don't release — this pair has hit 20 attempts, permanently done
+			continue // Try next entry
+		}
 
-	attemptNum := ts.pairRegistry.GetTimingAttemptCount(targetPair)
-	ts.stats.TotalJobsGenerated++
+		attemptNum := ts.pairRegistry.GetTimingAttemptCount(targetPair)
+		ts.stats.TotalJobsGenerated++
 
-	// Phase 1: NO delays - just widened threshold to discover candidates
-	return &TimingExplorationJob{
-		Prog1:         hqPair.Prog1, // Use original programs, no mutation
-		Prog2:         hqPair.Prog2,
-		OriginalProg1: hqPair.Prog1,
-		OriginalProg2: hqPair.Prog2,
-		TargetPair:    targetPair,
-		VarNamePairID: hqPair.VarNamePairID,
-		DelayPlan:     nil, // Phase 1: no delays
-		AttemptNumber: attemptNum + 1,
+		// Phase 1: NO delays - just widened threshold to discover candidates
+		return &TimingExplorationJob{
+			Prog1:         hqPair.Prog1, // Use original programs, no mutation
+			Prog2:         hqPair.Prog2,
+			MergedProg:    hqPair.MergedProg, // Pre-merged (nil for legacy)
+			OriginalProg1: hqPair.Prog1,
+			OriginalProg2: hqPair.Prog2,
+			TargetPair:    targetPair,
+			VarNamePairID: hqPair.VarNamePairID,
+			Phase:         queue.PhaseWidenedDiscovery, // Explicit Phase 1
+			DelayPlan:     nil,                         // Phase 1: no delays
+			AttemptNumber: attemptNum + 1,
+		}
 	}
 }
 
@@ -318,6 +385,12 @@ func (ts *TimingScheduler) OnJobCompleted(result *TimingExplorationResult) {
 	// Record the attempt
 	ts.pairRegistry.RecordTimingAttempt(job.TargetPair, result.SuccessRate)
 
+	// Release the vnPairID from inQueue so the same VarName pair can be
+	// re-enqueued from future soloFilter feedback. This is critical for
+	// the timing queue feedback loop — without this, once all unique pairs
+	// are consumed, the queue permanently empties and never recovers.
+	ts.explorationQueue.ReleaseFromInQueue(job.VarNamePairID)
+
 	// Update stats
 	ts.stats.TotalJobsCompleted++
 	if result.TriggeredNewPairs {
@@ -332,6 +405,7 @@ func (ts *TimingScheduler) OnJobCompleted(result *TimingExplorationResult) {
 // Phase 2 will apply delays and use normal threshold to validate.
 func (ts *TimingScheduler) EnqueueForValidation(
 	prog1, prog2 *prog.Prog,
+	mergedProg *prog.Prog, // Pre-merged fork-barrier program (nil for legacy)
 	targetPair *ddrd.MayUAFPair,
 	candidatePairs []*ddrd.MayUAFPair,
 ) {
@@ -342,8 +416,14 @@ func (ts *TimingScheduler) EnqueueForValidation(
 		return
 	}
 
+	// Keep validation baseline consistent with Phase 1 baseline.
+	sanitizedMerged := mergedProg
+	if mergedProg != nil && ts.mutator != nil {
+		sanitizedMerged = ts.mutator.SanitizeMergedForTiming(mergedProg)
+	}
+
 	// Enqueue as high priority for validation
-	ts.explorationQueue.EnqueueForValidation(prog1, prog2, targetPair, candidatePairs)
+	ts.explorationQueue.EnqueueForValidation(prog1, prog2, sanitizedMerged, targetPair, candidatePairs)
 }
 
 // ============================================================================
@@ -383,6 +463,12 @@ func (ts *TimingScheduler) RecordJobExecution(job *TimingExplorationJob) {
 // GetQueueStats returns the exploration queue stats.
 func (ts *TimingScheduler) GetQueueStats() (enqueued, explored, pairsFound, currentSize int) {
 	return ts.explorationQueue.GetStats()
+}
+
+// ReleaseVarNamePairID releases a vnPairID from the inQueue dedup map.
+// Called from processTimingExplorationResult after Phase 1 completes.
+func (ts *TimingScheduler) ReleaseVarNamePairID(vnPairID uint64) {
+	ts.explorationQueue.ReleaseFromInQueue(vnPairID)
 }
 
 // ============================================================================

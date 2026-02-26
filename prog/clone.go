@@ -24,6 +24,14 @@ func (p *Prog) cloneWithMap(newargs map[*ResultArg]*ResultArg) *Prog {
 		Target: p.Target,
 		Calls:  cloneCalls(p.Calls, newargs),
 	}
+	if p.ForkPoint != nil {
+		children := make([]ForkChild, len(p.ForkPoint.Children))
+		copy(children, p.ForkPoint.Children)
+		p1.ForkPoint = &ForkPoint{
+			SetupCalls: p.ForkPoint.SetupCalls,
+			Children:   children,
+		}
+	}
 	p1.debugValidate()
 	return p1
 }

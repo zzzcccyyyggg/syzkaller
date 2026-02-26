@@ -10,6 +10,7 @@ import (
 	"math/rand"
 	"runtime"
 	"sort"
+	"strings"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -39,6 +40,8 @@ type Fuzzer struct {
 
 	// Dual-Queue Timing Exploration System
 	timingScheduler *TimingScheduler
+	timingNilCount  int // counter for genTimingExploration returning nil (for periodic logging)
+	barrierExecSeq  atomic.Uint64
 
 	// Unified pair evaluator for timing exploration and corpus saving decisions
 	pairEvaluator *PairEvaluator
@@ -426,23 +429,26 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 }
 
 type Config struct {
-	Debug          bool
-	Corpus         *corpus.Corpus
-	Logf           func(level int, msg string, args ...interface{})
-	Snapshot       bool
-	Coverage       bool
-	FaultInjection bool
-	Comparisons    bool
-	Collide        bool
-	EnabledCalls   map[*prog.Syscall]bool
-	NoMutateCalls  map[int]bool
-	FetchRawCover  bool
-	NewInputFilter func(call string) bool
-	PatchTest      bool
-	ModeKFuzzTest  bool
-	ModeUAF        bool
-	BarrierMode    bool
-	BarrierMask    uint64
+	Debug           bool
+	Corpus          *corpus.Corpus
+	Logf            func(level int, msg string, args ...interface{})
+	Snapshot        bool
+	Coverage        bool
+	FaultInjection  bool
+	Comparisons     bool
+	Collide         bool
+	EnabledCalls    map[*prog.Syscall]bool
+	NoMutateCalls   map[int]bool
+	FetchRawCover   bool
+	NewInputFilter  func(call string) bool
+	PatchTest       bool
+	ModeKFuzzTest   bool
+	ModeUAF         bool
+	BarrierMode     bool
+	BarrierMask     uint64
+	ForkBarrierMode bool // Use fork-barrier execution model (single-proc fork instead of multi-proc)
+	// Alternate between fork-barrier and legacy multi-proc barrier every run.
+	AlternateForkBarrierMode bool
 	// History buffer configuration for UAF mode
 	HistoryBufferSize            int // Size of per-VM history buffer (default: 1000)
 	NewVarNamePairHistory        int // Records to save for new VarName pair (default: 1000)
@@ -478,6 +484,39 @@ type Config struct {
 	SuccessThreshold float64
 	// ExecutionsPerAttempt is how many times to execute each delay plan
 	ExecutionsPerAttempt int
+
+	// ======== Race Reproduction Callback ========
+	// RaceReproCallback is called when Phase 2 validates a timing pair successfully.
+	// It forwards the validated pair to the RaceReproLoop for reproduction on VMs.
+	// Set by Manager during fuzzer initialization. Nil means race repro is disabled.
+	RaceReproCallback func(task *RaceReproTask)
+	// RaceReproBudget is the default repeat budget for race reproduction tasks.
+	// Defaults to 50 if unset.
+	RaceReproBudget int
+}
+
+// RaceReproTask mirrors manager.RaceReproTask for cross-package use.
+// The fuzzer creates these and passes them via RaceReproCallback to the manager.
+type RaceReproTask struct {
+	Prog1              *prog.Prog
+	Prog2              *prog.Prog
+	MergedProg         *prog.Prog
+	FreeAccessName     uint64
+	UseAccessName      uint64
+	VarNamePairID      uint64
+	DelayPlan          []DelayInsertionInfo
+	CandidatePairCount int
+	RepeatBudget       int
+	// ReplayHistory carries the execution history leading up to this pair's validation.
+	// Used by RaceReproLoop to replay system state before each validation attempt.
+	ReplayHistory []*BarrierExecutionRecord
+}
+
+// DelayInsertionInfo carries delay plan info from fuzzer to manager.
+type DelayInsertionInfo struct {
+	ProgIdx     int
+	BeforeCall  int
+	DelayMicros int64
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
@@ -566,7 +605,7 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	if fuzzer.uafReady() {
 		fuzzer.applyBarrier(req)
 		flags := ProgFlags(0)
-		if req.Barrier {
+		if req.Barrier || req.ForkBarrier {
 			flags |= ProgBarrier
 		}
 		fuzzer.prepare(req, flags, 0)
@@ -602,20 +641,27 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 	job := fuzzer.timingScheduler.GetNextJob()
 	if job == nil {
 		// No jobs available, fall back to regular fuzzing
+		// Commented out: periodic NIL logging still generates 100+/run
+		// fuzzer.timingNilCount++
+		// if fuzzer.timingNilCount%100 == 1 {
+		// 	enq, expl, _, qSize := fuzzer.timingScheduler.GetQueueStats()
+		// 	log.Logf(0, \"[TIMING-SCHED] genTimingExploration NIL (count=%d): queueSize=%d, totalEnqueued=%d, totalExplored=%d\",
+		// 		fuzzer.timingNilCount, qSize, enq, expl)
+		// }
 		return nil
 	}
+	fuzzer.timingNilCount = 0 // reset on success
 
 	// Get thresholds
 	widenedThreshold := fuzzer.timingScheduler.Config().WidenedThresholdMicros
 	normalThreshold := int64(0) // 0 means use default (2ms in executor)
 
-	// Determine phase based on whether delay plan exists
+	// Determine phase from job's explicit Phase field (not from DelayPlan length!)
 	// Phase 1: no delays, use widened threshold (discovery)
 	// Phase 2: has delays, use normal threshold (validation)
-	phase := queue.PhaseWidenedDiscovery
+	phase := job.Phase
 	threshold := widenedThreshold
-	if len(job.DelayPlan) > 0 {
-		phase = queue.PhaseValidation
+	if phase == queue.PhaseValidation {
 		threshold = normalThreshold // Use normal threshold for validation
 	}
 
@@ -648,6 +694,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 		TimingExplorationInfo: &queue.TimingExplorationInfo{
 			Phase:          phase,
 			TargetPair:     job.TargetPair,
+			VarNamePairID:  job.VarNamePairID,
 			AttemptNumber:  job.AttemptNumber,
 			DelayPlan:      delayInsertions,
 			OriginalProg1:  job.OriginalProg1,
@@ -660,15 +707,52 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 	if fuzzer.uafReady() && fuzzer.Config.BarrierMode {
 		mask := fuzzer.Config.BarrierMask
 		if mask != 0 {
-			req.SetBarrier(mask)
-			// Set barrier programs: mutated prog1 and prog2
-			programs := []*prog.Prog{job.Prog1, job.Prog2}
-			if err := req.SetBarrierPrograms(programs); err != nil {
-				log.Logf(0, "[TIMING-EXPLORE] Failed to set barrier programs: %v", err)
-				return nil
+			useForkMode, modeSeq := fuzzer.barrierModeDecision()
+			if job.MergedProg != nil && useForkMode {
+				// Fork-barrier mode with pre-merged program.
+				// Phase 1: MergedProg is the original merge (no delays).
+				// Phase 2: MergedProg already has delays inserted by ApplyDelayPlanToMerged.
+				// Either way, use it directly — no re-merge needed.
+				req.Prog = job.MergedProg
+				req.ForkBarrier = true
+				req.BarrierPrograms = []*prog.Prog{job.OriginalProg1, job.OriginalProg2}
+				req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+				log.Logf(1, "[TIMING-MODE] dispatch=fork phase=%d attempt=%d seq=%d alternated=%v",
+					phase, job.AttemptNumber, modeSeq, fuzzer.Config.AlternateForkBarrierMode)
+			} else if fuzzer.Config.ForkBarrierMode && useForkMode {
+				// Fork-barrier mode without pre-merged (shouldn't happen normally).
+				programs := []*prog.Prog{job.Prog1, job.Prog2}
+				delays := make([]int64, len(programs))
+				merged := prog.MergeForForkBarrier(programs, delays)
+				if merged == nil || !merged.IsForkBarrier() {
+					log.Logf(0, "[TIMING-EXPLORE] fork-barrier merge failed, skipping")
+					return nil
+				}
+				log.Logf(1, "[FORK-BARRIER-MERGE] timing-explore: %d programs -> merged (setup=%d children=%d totalCalls=%d)",
+					len(programs), merged.ForkPoint.SetupCalls, len(merged.ForkPoint.Children), len(merged.Calls))
+				for i, p := range programs {
+					log.Logf(1, "[FORK-BARRIER-MERGE] prog[%d] before merge (%d calls):\n%s", i, len(p.Calls), p.Serialize())
+				}
+				log.Logf(1, "[FORK-BARRIER-MERGE] merged program (%d calls):\n%s", len(merged.Calls), logMergedWithStructure(merged))
+				req.Prog = merged
+				req.ForkBarrier = true
+				req.BarrierPrograms = programs
+				req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+				log.Logf(1, "[TIMING-MODE] dispatch=fork-merged phase=%d attempt=%d seq=%d alternated=%v",
+					phase, job.AttemptNumber, modeSeq, fuzzer.Config.AlternateForkBarrierMode)
+			} else {
+				// Legacy multi-proc barrier model.
+				programs := []*prog.Prog{job.Prog1, job.Prog2}
+				req.SetBarrier(mask)
+				if err := req.SetBarrierPrograms(programs); err != nil {
+					log.Logf(0, "[TIMING-EXPLORE] Failed to set barrier programs: %v", err)
+					return nil
+				}
+				req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+				req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
+				log.Logf(1, "[TIMING-MODE] dispatch=legacy phase=%d attempt=%d seq=%d alternated=%v",
+					phase, job.AttemptNumber, modeSeq, fuzzer.Config.AlternateForkBarrierMode)
 			}
-			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
-			req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 		}
 	}
 
@@ -677,6 +761,12 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 
 	// Record timing exploration metrics
 	fuzzer.timingScheduler.RecordJobExecution(job)
+
+	if phase == queue.PhaseValidation {
+		log.Logf(1, "[PHASE2-DISPATCH] genTimingExploration returning Phase2 request: target=0x%x/0x%x forkBarrier=%v barrierProgs=%d progCalls=%d",
+			job.TargetPair.UseAccessName, job.TargetPair.FreeAccessName,
+			req.ForkBarrier, len(req.BarrierPrograms), len(req.Prog.Calls))
+	}
 
 	return req
 }
@@ -690,6 +780,9 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 	if info == nil {
 		return
 	}
+
+	log.Logf(1, "[PHASE-RESULT] processTimingExplorationResult: phase=%d status=%v hasDdrd=%v",
+		info.Phase, res.Status, res.Ddrd != nil)
 
 	targetPair := info.TargetPair
 	pairsFound := 0
@@ -741,10 +834,16 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 
 			// Enqueue for Phase 2 validation with delays
 			if fuzzer.timingScheduler != nil && len(req.BarrierPrograms) >= 2 {
+				// Extract pre-merged program for fork-barrier mode (nil for legacy).
+				var mergedProg *prog.Prog
+				if req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier() {
+					mergedProg = req.Prog
+				}
 				// Pass candidate pairs to scheduler for validation
 				fuzzer.timingScheduler.EnqueueForValidation(
 					req.BarrierPrograms[0],
 					req.BarrierPrograms[1],
+					mergedProg,
 					targetPair,
 					candidatePairs,
 				)
@@ -752,6 +851,12 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 		} else {
 			log.Logf(1, "[TIMING-EXPLORE-PHASE1] No candidates: attempt=%d, target=0x%x/0x%x, pairs=%d",
 				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName, pairsFound)
+		}
+
+		// Release inQueue for Phase 1 so this VarName pair can be re-enqueued
+		// from future soloFilter feedback. Phase 1 = one-shot discovery attempt.
+		if fuzzer.timingScheduler != nil && info.VarNamePairID != 0 {
+			fuzzer.timingScheduler.ReleaseVarNamePairID(info.VarNamePairID)
 		}
 
 	case queue.PhaseValidation:
@@ -792,12 +897,21 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 
 		// NOW we save programs if successful (have candidates or triggered target)
 		if len(candidatePairs) > 0 || triggeredTarget {
-			log.Logf(0, "[TIMING-EXPLORE-PHASE2-SUCCESS] VALIDATED with delays: attempt=%d, target=0x%x/0x%x, triggered=%v, new_pairs=%d, delays=[%s]",
+			enq, expl, _, qSize := fuzzer.timingScheduler.GetQueueStats()
+			log.Logf(0, "[TIMING-EXPLORE-PHASE2-SUCCESS] VALIDATED with delays: attempt=%d, target=0x%x/0x%x, triggered=%v, new_pairs=%d, delays=[%s], queue_before_feedback=[size=%d enqueued=%d explored=%d]",
 				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName,
-				triggeredTarget, len(candidatePairs), delayDesc)
+				triggeredTarget, len(candidatePairs), delayDesc, qSize, enq, expl)
 
-			// NOW save the programs with syz_delay to corpus
-			if len(req.BarrierPrograms) >= 2 {
+			// NOW save the programs with syz_delay to corpus.
+			// In fork-barrier mode, save the merged program (which already contains delays).
+			// In legacy mode, save the separate barrier programs.
+			if req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier() {
+				log.Logf(0, "[TIMING-EXPLORE-SAVE] Saving merged fork-barrier prog with delays to corpus (len=%d calls)", len(req.Prog.Calls))
+				fuzzer.Config.Corpus.Save(corpus.NewInput{
+					Prog: req.Prog.Clone(),
+					Call: -1,
+				})
+			} else if len(req.BarrierPrograms) >= 2 {
 				for i, p := range req.BarrierPrograms {
 					if p != nil {
 						log.Logf(0, "[TIMING-EXPLORE-SAVE] Saving validated prog%d with delays to corpus (len=%d calls)", i, len(p.Calls))
@@ -818,11 +932,72 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 				fuzzer.triggerSoloFilter(req, res, candidatePairs, SourceTiming)
 			}
 
+			// Forward to RaceReproLoop for reproduction on VMs
+			if fuzzer.Config.RaceReproCallback != nil {
+				budget := fuzzer.Config.RaceReproBudget
+				if budget <= 0 {
+					budget = 50
+				}
+				// Build delay plan info
+				delayInfos := make([]DelayInsertionInfo, len(info.DelayPlan))
+				for i, d := range info.DelayPlan {
+					delayInfos[i] = DelayInsertionInfo{
+						ProgIdx:     d.ProgIdx,
+						BeforeCall:  d.BeforeCall,
+						DelayMicros: d.DelayMicros,
+					}
+				}
+				// Determine which program to forward
+				var mergedClone *prog.Prog
+				if req.ForkBarrier && req.Prog != nil && req.Prog.IsForkBarrier() {
+					mergedClone = req.Prog.Clone()
+				}
+				var p1Clone, p2Clone *prog.Prog
+				if len(req.BarrierPrograms) >= 2 {
+					if req.BarrierPrograms[0] != nil {
+						p1Clone = req.BarrierPrograms[0].Clone()
+					}
+					if req.BarrierPrograms[1] != nil {
+						p2Clone = req.BarrierPrograms[1].Clone()
+					}
+				}
+				task := &RaceReproTask{
+					Prog1:              p1Clone,
+					Prog2:              p2Clone,
+					MergedProg:         mergedClone,
+					FreeAccessName:     targetPair.FreeAccessName,
+					UseAccessName:      targetPair.UseAccessName,
+					VarNamePairID:      info.VarNamePairID,
+					DelayPlan:          delayInfos,
+					CandidatePairCount: len(candidatePairs),
+					RepeatBudget:       budget,
+				}
+				// Attach execution history from the VM that validated this pair.
+				// This allows RaceReproLoop to replay the execution context (system state)
+				// before each validation attempt, matching the offline validate pipeline.
+				if fuzzer.uaf != nil && fuzzer.uaf.historyBuffer != nil && res != nil {
+					vmIndex := res.Executor.VM
+					histCount := fuzzer.Config.NewVarNamePairHistory
+					if histCount <= 0 {
+						histCount = DefaultNewVarNamePairHistory
+					}
+					task.ReplayHistory = fuzzer.uaf.historyBuffer.GetLatest(vmIndex, histCount)
+					if len(task.ReplayHistory) > 0 {
+						log.Logf(1, "[RACE-REPRO-SUBMIT] Attached %d history records from VM %d",
+							len(task.ReplayHistory), vmIndex)
+					}
+				}
+				log.Logf(0, "[RACE-REPRO-SUBMIT] Phase2 success → forwarding to RaceReproLoop: free=0x%x use=0x%x budget=%d delays=%d",
+					targetPair.FreeAccessName, targetPair.UseAccessName, budget, len(info.DelayPlan))
+				fuzzer.Config.RaceReproCallback(task)
+			}
+
 			// Report success to timing scheduler
 			if fuzzer.timingScheduler != nil {
 				result := &TimingExplorationResult{
 					Job: &TimingExplorationJob{
 						TargetPair:    targetPair,
+						VarNamePairID: info.VarNamePairID,
 						AttemptNumber: info.AttemptNumber,
 					},
 					TriggeredNewPairs: true,
@@ -832,7 +1007,7 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 				fuzzer.timingScheduler.OnJobCompleted(result)
 			}
 		} else {
-			log.Logf(1, "[TIMING-EXPLORE-PHASE2-FAIL] Not validated with delays: attempt=%d, target=0x%x/0x%x, pairs=%d, delays=[%s]",
+			log.Logf(0, "[TIMING-EXPLORE-PHASE2-FAIL] Not validated with delays: attempt=%d, target=0x%x/0x%x, pairs=%d, delays=[%s]",
 				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName, pairsFound, delayDesc)
 
 			// Report failure to timing scheduler
@@ -840,6 +1015,7 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 				result := &TimingExplorationResult{
 					Job: &TimingExplorationJob{
 						TargetPair:    targetPair,
+						VarNamePairID: info.VarNamePairID,
 						AttemptNumber: info.AttemptNumber,
 					},
 					TriggeredNewPairs: false,
@@ -865,17 +1041,91 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 		req.SetBarrier(0)
 		return
 	}
+	useForkMode, modeSeq := fuzzer.barrierModeDecision()
+	programs := fuzzer.buildBarrierPrograms(req, mask, useForkMode)
+
+	if useForkMode {
+		// Fork-barrier model: merge programs into a single program with ForkPoint.
+		// The executor will fork() internally instead of coordinating multiple procs.
+		delays := make([]int64, len(programs))
+		if len(req.BarrierStartDelayUs) == len(programs) {
+			copy(delays, req.BarrierStartDelayUs)
+		}
+		merged := prog.MergeForForkBarrier(programs, delays)
+		if merged == nil || !merged.IsForkBarrier() {
+			fuzzer.Logf(1, "fork-barrier merge failed, falling back to disabled")
+			req.SetBarrier(0)
+			return
+		}
+		log.Logf(1, "[FORK-BARRIER-MERGE] applyBarrier: %d programs -> merged (setup=%d children=%d totalCalls=%d)",
+			len(programs), merged.ForkPoint.SetupCalls, len(merged.ForkPoint.Children), len(merged.Calls))
+		for i, p := range programs {
+			log.Logf(1, "[FORK-BARRIER-MERGE] prog[%d] before merge (%d calls):\n%s", i, len(p.Calls), p.Serialize())
+		}
+		log.Logf(1, "[FORK-BARRIER-MERGE] merged program (%d calls):\n%s", len(merged.Calls), logMergedWithStructure(merged))
+		req.Prog = merged
+		req.ForkBarrier = true
+		req.BarrierPrograms = programs // Keep originals for solo filter
+		req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+		log.Logf(1, "[BARRIER-MODE] dispatch=fork seq=%d alternated=%v", modeSeq, fuzzer.Config.AlternateForkBarrierMode)
+		// Do NOT set req.Barrier or ExecFlagBarrier — fork-barrier runs as single proc,
+		// not through the multi-proc barrier dispatch path.
+		return
+	}
+
+	// Legacy multi-proc barrier model.
 	req.SetBarrier(mask)
-	programs := fuzzer.buildBarrierPrograms(req, mask)
 	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)
 	}
+	log.Logf(1, "[BARRIER-MODE] dispatch=legacy seq=%d alternated=%v", modeSeq, fuzzer.Config.AlternateForkBarrierMode)
 }
 
-func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*prog.Prog {
+func (fuzzer *Fuzzer) barrierModeDecision() (useFork bool, seq uint64) {
+	if !fuzzer.Config.ForkBarrierMode {
+		return false, 0
+	}
+	if !fuzzer.Config.AlternateForkBarrierMode {
+		return true, 0
+	}
+	seq = fuzzer.barrierExecSeq.Add(1)
+	return seq%2 == 1, seq
+}
+
+// logMergedWithStructure formats a merged fork-barrier program with clear
+// annotations showing which calls belong to Setup, Child 0, and Child 1.
+func logMergedWithStructure(merged *prog.Prog) string {
+	if merged == nil || merged.ForkPoint == nil {
+		return string(merged.Serialize())
+	}
+	fp := merged.ForkPoint
+	// Split serialized output into per-call lines (skip empty trailing line)
+	raw := strings.TrimRight(string(merged.Serialize()), "\n")
+	lines := strings.Split(raw, "\n")
+	var buf strings.Builder
+	for i, line := range lines {
+		// Annotate phase boundaries
+		if i == 0 && fp.SetupCalls > 0 {
+			buf.WriteString("  ── Setup Phase ──\n")
+		}
+		for ci, child := range fp.Children {
+			if i == child.StartIndex {
+				if child.DelayUs > 0 {
+					fmt.Fprintf(&buf, "  ── FORK POINT ── Child %d (delay=%dμs, calls %d-%d) ──\n", ci, child.DelayUs, child.StartIndex, child.EndIndex-1)
+				} else {
+					fmt.Fprintf(&buf, "  ── FORK POINT ── Child %d (calls %d-%d) ──\n", ci, child.StartIndex, child.EndIndex-1)
+				}
+			}
+		}
+		fmt.Fprintf(&buf, "  [%2d] %s\n", i, line)
+	}
+	return buf.String()
+}
+
+func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64, useForkMode bool) []*prog.Prog {
 	count := bits.OnesCount64(mask)
 	if count == 0 {
 		return nil
@@ -895,8 +1145,11 @@ func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*p
 			continue
 		}
 		partner := candidate.Clone()
-		// Apply Object-Level Linking V2 to ensure shared kernel objects
-		if fuzzer.raceGroup != nil {
+		// Apply Object-Level Linking V2 to ensure shared kernel objects.
+		// Skip in fork-barrier mode: MergeForForkBarrier already unifies fds
+		// at the resource level via rewriteAndClone, making path-level
+		// linking redundant and potentially harmful to diversity.
+		if fuzzer.raceGroup != nil && !useForkMode {
 			if ol := fuzzer.raceGroup.GetObjectLinker(); ol != nil {
 				partner = ol.LinkProgramsV2(req.Prog, partner)
 			}
@@ -956,7 +1209,7 @@ func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, n
 			Name: "solo-filter",
 			Type: "solo-filter",
 		},
-		source:       source,
+		source: source,
 	}
 	fuzzer.startJob(fuzzer.statJobsSoloFilter, job)
 }

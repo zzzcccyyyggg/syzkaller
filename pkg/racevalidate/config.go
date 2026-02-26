@@ -39,6 +39,8 @@ type Config struct {
 	// VerifyDelaySweep enables progressive start_delay sweep during verification.
 	// When enabled, multiple verify requests are generated with different delays,
 	// from 0 to VerifyDelayMaxUs using an exponential curve.
+	// This is an exhaustive strategy that tries many delay values, which can be expensive.
+	// Consider using VerifyDelayMultiplier instead for a more targeted approach.
 	VerifyDelaySweep bool
 	// VerifyDelaySteps specifies how many delay steps to try during sweep.
 	// Each step uses a different delay value. Defaults to 10 if unset or zero.
@@ -50,6 +52,16 @@ type Config struct {
 	// Higher values = slower start, faster end. Defaults to 2.0.
 	// delay(i) = maxDelay * (i/n)^power
 	VerifyDelayPower float64
+	// VerifyDelayMultiplier enables TimeDiff-based delay for verification.
+	// When set (> 0), the verification phase uses delays computed from the actual
+	// time difference observed during collection, scaled by this multiplier.
+	// For example, with multiplier=2.0 and a collected TimeDiff of 50µs,
+	// three verify requests are generated: 1x (50µs), 2x (100µs), and 0.5x (25µs).
+	// This is more targeted and cheaper than VerifyDelaySweep.
+	// When both VerifyDelaySweep and VerifyDelayMultiplier are set,
+	// VerifyDelayMultiplier takes priority.
+	// Defaults to 0 (disabled; use VerifyDelaySweep or single-shot).
+	VerifyDelayMultiplier float64
 	// EnableReplay enables replay of execution history before validation.
 	// When enabled, the saved barrier execution history from fuzzing is replayed
 	// to reconstruct the system state before testing each entry.
@@ -84,6 +96,11 @@ type Config struct {
 	// subset of history records required to reproduce the race condition.
 	// This makes the reproducer smaller and easier to analyze.
 	EnableHistoryMinimization bool
+
+	// ForkBarrierMode uses fork-barrier execution instead of multi-proc barrier.
+	// When enabled, barrier programs are merged into a single program and the executor
+	// uses fork() to create child processes that share the parent's fd table.
+	ForkBarrierMode bool
 
 	// MinimizationMaxAttempts limits the number of execution attempts per minimization step.
 	// Each subset of history is tested this many times to account for race non-determinism.

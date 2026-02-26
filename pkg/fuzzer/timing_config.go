@@ -109,7 +109,7 @@ func DefaultTimingExplorationConfig() TimingExplorationConfig {
 		// Strategy
 		TimingMutationStrategy:   "targeted",
 		MaxAttemptsPerPair:       20,
-		MaxCorpusCountPerVarName: 0, // 0 = no limit (default)
+		MaxCorpusCountPerVarName: 0,   // 0 = no limit (default)
 		SuccessThreshold:         0.1, // 10% trigger rate = success
 
 		// Execution

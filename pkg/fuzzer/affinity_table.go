@@ -261,7 +261,6 @@ func ExtractSyscallSignature(p *prog.Prog, callIdx int32) SyscallSignature {
 	}
 }
 
-
 // ExtractSignaturesFromPair extracts syscall signatures from a UAF pair.
 func ExtractSignaturesFromPair(prog1, prog2 *prog.Prog, pair *ddrd.MayUAFPair) (sig1, sig2 SyscallSignature) {
 	if pair == nil {

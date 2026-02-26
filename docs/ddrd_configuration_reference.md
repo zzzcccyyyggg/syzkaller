@@ -14,6 +14,7 @@
 - [3. 历史记录与限制配置](#3-历史记录与限制配置)
 - [4. Race-Guided 选择策略配置](#4-race-guided-选择策略配置)
 - [5. Timing Exploration 双队列配置](#5-timing-exploration-双队列配置)
+- [5.5 Race Reproduction 复现管线配置](#55-race-reproduction-复现管线配置)
 - [6. UAF Validate 验证管线配置](#6-uaf-validate-验证管线配置)
 - [7. 配置交互关系](#7-配置交互关系)
 - [8. 完整配置示例](#8-完整配置示例)
@@ -446,6 +447,108 @@ delay 变异策略，控制如何生成 `syz_delay()` 调用。
 
 ---
 
+## 5.5 Race Reproduction 复现管线配置
+
+Race Reproduction（竞争复现）管线在 `experimental.race_repro` 节下配置。当 Phase 2 验证成功发现有效的 timing pair 后，该管线会自动在专用 VM 上反复执行含 `syz_delay()` 的合并程序，尝试触发可观察的内核崩溃（KASAN/KCSAN）或达到稳定的 DDRD 检测。
+
+**数据流**：Phase 2 验证成功 → `RaceReproLoop.Enqueue()` → 在 VM 上执行 → 检测 crash 或稳定 DDRD pair
+
+**复现级别**：
+- `ReproCrash`：触发内核 crash（KASAN/KCSAN），自动送入 CrashReproLoop 生成 C reproducer
+- `ReproProg`：通过 DDRD 框架稳定检测到目标 pair（无 crash），保存 syzlang 程序级 reproducer
+- `ReproNone`：未复现
+
+### `race_repro.enabled`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"enabled"` |
+
+启用 Race Reproduction 管线。
+
+**前置条件**：`barrier_mode` 和 `enable_timing_exploration` 必须为 `true`
+
+### `race_repro.vms`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `int` |
+| **默认值** | `0` |
+| **JSON key** | `"vms"` |
+
+专用于竞争复现的 VM 数量。这些 VM 从总 VM 池中分配：
+
+```
+total VMs = fuzzing VMs + raceRepro VMs + crashRepro VMs
+crashRepro VMs = total - fuzzing - raceRepro (自动计算)
+```
+
+**建议值**：总 VM 数的 20-30%（例如 10 个 VM 中分配 2 个）
+
+### `race_repro.repeat_budget`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `int` |
+| **默认值** | `50` |
+| **JSON key** | `"repeat_budget"` |
+
+每个验证成功的 pair 在 VM 上反复执行的次数上限。更高的值增加触发 crash 的概率，但消耗更多资源。
+
+### `race_repro.delay_sweep`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"delay_sweep"` |
+
+启用 delay 扫描模式。复现过程中自动尝试不同的 delay 值以找到最有效的时序窗口。
+
+### `race_repro.delay_sweep_steps`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `int` |
+| **默认值** | `5` |
+| **JSON key** | `"delay_sweep_steps"` |
+
+Delay 扫描步数（仅在 `delay_sweep` 启用时生效）。
+
+### `race_repro.delay_max_us`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `int64` |
+| **默认值** | `1000` |
+| **JSON key** | `"delay_max_us"` |
+
+扫描时的最大 delay 值（微秒，仅在 `delay_sweep` 启用时生效）。
+
+### `race_repro.stability_threshold`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `float64` |
+| **默认值** | `0.3` (30%) |
+| **JSON key** | `"stability_threshold"` |
+
+ProgRepro 级别判定的稳定性阈值。在 `repeat_budget` 次执行中，如果 DDRD 检测到目标 pair 的比率达到此值，则认为该程序是 syzlang 程序级 reproducer。
+
+### `race_repro.enable_snapshot`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"enable_snapshot"` |
+
+启用 VM 快照以加速复现尝试间的 VM 重置。需要 QEMU 配置支持。
+
+---
+
 ## 6. UAF Validate 验证管线配置
 
 验证管线在 `experimental.uaf_validate` 节下配置，用于重放和验证 UAF corpus 中的候选 pair。
@@ -645,6 +748,37 @@ random_baseline_mode = true
   }
 }
 ```
+
+### 全功能 Fuzzing + Race Reproduction
+
+```json
+{
+  "fuzzing_vms": 6,
+  "experimental": {
+    "barrier_mode": true,
+    "barrier_procs": [0, 1],
+    "uaf_mode": true,
+    "enable_timing_exploration": true,
+    "timing_exploration_ratio": 0.1,
+    "timing_mutation_strategy": "targeted",
+    "skip_duplicate_data_races": true,
+    "history_buffer_size": 1000,
+    "new_varname_pair_history": 1000,
+    "race_repro": {
+      "enabled": true,
+      "vms": 2,
+      "repeat_budget": 100,
+      "delay_sweep": true,
+      "delay_sweep_steps": 5,
+      "delay_max_us": 1000,
+      "stability_threshold": 0.3
+    }
+  }
+}
+```
+
+> **VM 分配说明**：上例中 `vm.count=10, fuzzing_vms=6, race_repro.vms=2`，
+> 则 crashRepro VMs = 10 - 6 - 2 = 2。
 
 > **注意**：`enable_partner_selection`、`enable_race_yield_feedback`、`cooldown_threshold`、
 > `new_stack_penalty`、`no_discovery_penalty` 已废弃，不再需要配置。

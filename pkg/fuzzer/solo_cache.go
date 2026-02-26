@@ -194,5 +194,3 @@ func (c *SoloPairCache) removeFromOrder(sig string) {
 func currentTimestamp() int64 {
 	return time.Now().Unix()
 }
-
-

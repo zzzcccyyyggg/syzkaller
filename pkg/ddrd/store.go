@@ -9,8 +9,8 @@ import "sync"
 type PairSource int
 
 const (
-	SourceFuzz    PairSource = iota // From normal fuzzing
-	SourceTiming                    // From timing exploration (Phase 2 validated)
+	SourceFuzz   PairSource = iota // From normal fuzzing
+	SourceTiming                   // From timing exploration (Phase 2 validated)
 )
 
 // Store keeps track of unique DDRD pairs observed during fuzzing runs.

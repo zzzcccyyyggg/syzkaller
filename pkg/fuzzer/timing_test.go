@@ -102,7 +102,7 @@ func TestTimingExplorationQueueEnqueue(t *testing.T) {
 	}
 
 	// Enqueue
-	ok := queue.EnqueueHighQualityPair(prog1, prog2, testPair)
+	ok := queue.EnqueueHighQualityPair(prog1, prog2, nil, testPair)
 	if !ok {
 		t.Error("EnqueueHighQualityPair should succeed")
 	}
@@ -133,8 +133,8 @@ func TestTimingExplorationQueueNoDuplicates(t *testing.T) {
 		UseAccessName:  0x87654321,
 	}
 
-	ok1 := queue.EnqueueHighQualityPair(prog1, nil, testPair)
-	ok2 := queue.EnqueueHighQualityPair(prog1, nil, testPair)
+	ok1 := queue.EnqueueHighQualityPair(prog1, nil, nil, testPair)
+	ok2 := queue.EnqueueHighQualityPair(prog1, nil, nil, testPair)
 
 	if !ok1 {
 		t.Error("First enqueue should succeed")
@@ -164,7 +164,7 @@ func TestTimingExplorationQueueDequeue(t *testing.T) {
 		UseAccessName:  0x87654321,
 	}
 
-	queue.EnqueueHighQualityPair(prog1, nil, testPair)
+	queue.EnqueueHighQualityPair(prog1, nil, nil, testPair)
 
 	// Dequeue
 	hqPair := queue.DequeueForExploration()
@@ -197,7 +197,7 @@ func TestTimingExplorationQueueRequeue(t *testing.T) {
 		UseAccessName:  0x87654321,
 	}
 
-	queue.EnqueueHighQualityPair(prog1, nil, testPair)
+	queue.EnqueueHighQualityPair(prog1, nil, nil, testPair)
 	hqPair := queue.DequeueForExploration()
 
 	// Requeue
@@ -331,7 +331,7 @@ func TestTimingSchedulerOnNewVarNamePairDiscovered(t *testing.T) {
 		UseAccessName:  0x87654321,
 	}
 
-	scheduler.OnNewVarNamePairDiscovered(prog1, nil, testPair)
+	scheduler.OnNewVarNamePairDiscovered(prog1, nil, nil, testPair)
 
 	if !scheduler.HasPendingJobs() {
 		t.Error("After OnNewVarNamePairDiscovered, should have pending jobs")
@@ -473,7 +473,7 @@ func TestTimingExplorationFullFlow(t *testing.T) {
 	}
 
 	// Step 2: Enqueue for timing exploration
-	scheduler.OnNewVarNamePairDiscovered(prog1, prog2, testPair)
+	scheduler.OnNewVarNamePairDiscovered(prog1, prog2, nil, testPair)
 
 	// Step 3: Get a job
 	job := scheduler.GetNextJob()

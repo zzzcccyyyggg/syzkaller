@@ -18,7 +18,7 @@
 │  │ • race_guided_fuzzing.md     ← Race-Guided Fuzzing 概览（已更新）     │
 │  │ • race_guided_fuzzing_design.md ← 历史设计（M1'/M2 已移除）         │
 │  │ • genfuzz_redesign.md        ← ★ GenFuzz 重设计（M1'/M2 移除说明）   │
-│  │ • timing_exploration_config.md ← Timing Exploration 双队列配置指南    │
+│  │ • timing_exploration_config.md ← Timing Exploration + Race Repro 架构 │
 │  │ • barrier_dispatch_flow.md   ← Barrier 派发与 DDRD 集成流程          │
 │  │ • ddrd_executor_flow.md      ← Executor/Runner 中的 DDRD 处理流程    │
 │  │ • ddrd_configuration_reference.md ← ★ 完整配置参考手册              │
@@ -127,15 +127,16 @@
 ---
 
 #### [`timing_exploration_config.md`](timing_exploration_config.md)
-**定位**: Timing Exploration 双队列配置指南
+**定位**: Timing Exploration + Race Reproduction 三阶段架构指南
 
 **内容**:
-- Pair Discovery Queue 与 Timing Exploration Queue 双队列架构
+- 三阶段架构：Fuzzer Phase 1（Pair Discovery）→ Phase 2（Timing Exploration）→ Manager Phase 3（Race Reproduction）
 - `syz_delay()` 插入策略与配置
 - 4 种变异策略（targeted/timediff/binary_search/random）
-- 完整配置字段说明与示例
+- Phase 3: RaceReproLoop → VM 级别复现 → CrashReproLoop C reproducer
+- 完整配置字段说明与示例（含 `race_repro` 配置）
 
-**适合**: 配置 Timing Exploration 参数
+**适合**: 配置 Timing Exploration 及 Race Reproduction 参数
 
 ---
 
@@ -279,10 +280,10 @@
 ### 深入理解实现
 1. [`genfuzz_redesign.md`](genfuzz_redesign.md) - M1'/M2 移除说明与未来改进方向
 2. [`race_guided_fuzzing_design.md`](race_guided_fuzzing_design.md) - 历史 M1'/M2 设计（参考）
-3. [`timing_exploration_config.md`](timing_exploration_config.md) - Timing Exploration 双队列配置
-3. [`barrier_dispatch_flow.md`](barrier_dispatch_flow.md) - Barrier 调度机制
-4. [`ddrd_executor_flow.md`](ddrd_executor_flow.md) - DDRD 数据流
-5. [`DDRD_BARRIER_IMPLEMENTATION_STATUS.md`](../DDRD_BARRIER_IMPLEMENTATION_STATUS.md) - 代码入口点
+3. [`timing_exploration_config.md`](timing_exploration_config.md) - Timing Exploration + Race Reproduction 三阶段架构
+4. [`barrier_dispatch_flow.md`](barrier_dispatch_flow.md) - Barrier 调度机制
+5. [`ddrd_executor_flow.md`](ddrd_executor_flow.md) - DDRD 数据流
+6. [`DDRD_BARRIER_IMPLEMENTATION_STATUS.md`](../DDRD_BARRIER_IMPLEMENTATION_STATUS.md) - 代码入口点
 
 ### 问题排查
 1. [`ddrd_tools_usage.md`](ddrd_tools_usage.md) - 调试技巧章节
@@ -305,6 +306,10 @@
 | Pair Evaluation | `pkg/fuzzer/pair_evaluator.go` |
 | UAF Corpus | `pkg/fuzzer/race.go` |
 | UAF Store (Go) | `pkg/manager/uaf_store.go` |
+| RaceReproLoop | `pkg/manager/race_repro.go` |
+| RunRaceRepro (VM) | `syz-manager/race_repro_runner.go` |
+| RaceReproConfig | `pkg/mgrconfig/config.go` (`RaceReproConfig` struct) |
+| RaceRepro Callback | `syz-manager/manager.go` (`raceReproCallback`) |
 | Validate Manager | `pkg/racevalidate/manager.go` (package `uafvalidate`) |
 | Executor Adapter | `pkg/racevalidate/executor.go` (package `uafvalidate`) |
 
@@ -316,4 +321,4 @@
 - 新功能需在本索引中添加条目
 - 过时内容应标记或删除，避免误导
 
-**最后更新**: 2026-02-14
+**最后更新**: 2026-02-25

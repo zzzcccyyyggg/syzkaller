@@ -2306,7 +2306,7 @@ static long syz_memcpy_off(volatile long a0, volatile long a1, volatile long a2,
 static long syz_delay(volatile long microseconds)
 {
 	struct timeval start_tv, end_tv;
-	
+
 	// Clamp to reasonable range: 0 to 10 seconds
 	if (microseconds < 0)
 		microseconds = 0;
@@ -2315,7 +2315,7 @@ static long syz_delay(volatile long microseconds)
 
 	// Get start time
 	gettimeofday(&start_tv, NULL);
-	
+
 	// Log before delay
 	fprintf(stderr, "[syz_delay] START: requested=%ld us, time=%ld.%06ld\n",
 		microseconds, (long)start_tv.tv_sec, (long)start_tv.tv_usec);
@@ -2326,11 +2326,11 @@ static long syz_delay(volatile long microseconds)
 
 	// Get end time
 	gettimeofday(&end_tv, NULL);
-	
+
 	// Calculate actual delay
-	long actual_us = (end_tv.tv_sec - start_tv.tv_sec) * 1000000 + 
-	                 (end_tv.tv_usec - start_tv.tv_usec);
-	
+	long actual_us = (end_tv.tv_sec - start_tv.tv_sec) * 1000000 +
+			 (end_tv.tv_usec - start_tv.tv_usec);
+
 	// Log after delay
 	fprintf(stderr, "[syz_delay] END: actual=%ld us, time=%ld.%06ld\n",
 		actual_us, (long)end_tv.tv_sec, (long)end_tv.tv_usec);
@@ -4032,13 +4032,14 @@ static void sandbox_common_mount_tmpfs(void)
 		fail("mount(syz-inputs) failed");
 
 	if (mkdir("./syz-tmp/newroot/mnt", 0700))
-    	fail("mkdir(/mnt) failed");
+		fail("mkdir(/mnt) failed");
 
 	if (mkdir("./syz-tmp/newroot/mnt/kccwf", 0700))
 		fail("mkdir(/mnt/kccwf) failed");
 
 	if (mount("/mnt/kccwf", "./syz-tmp/newroot/mnt/kccwf", NULL,
-			bind_mount_flags /* MS_BIND|MS_REC|MS_PRIVATE */, NULL) && errno != ENOENT)
+		  bind_mount_flags /* MS_BIND|MS_REC|MS_PRIVATE */, NULL) &&
+	    errno != ENOENT)
 		fail("mount(/mnt/kccwf) failed");
 
 #if SYZ_EXECUTOR || SYZ_CGROUPS
