@@ -351,9 +351,18 @@ pin_to_cores() {
 }
 
 cleanup_cpuset() {
-    if $USE_CSET && command -v cset &>/dev/null; then
-        cset set -d "$1" &>/dev/null || true
-    fi
+    command -v cset &>/dev/null || return 0
+    local name="$1"
+    cset set -d -s "$name" &>/dev/null || cset set -d -s "/$name" &>/dev/null || true
+}
+
+cleanup_all_ddrd_cpusets() {
+    command -v cset &>/dev/null || return 0
+    local n
+    while read -r n; do
+        [[ -n "$n" ]] || continue
+        cleanup_cpuset "$n"
+    done < <(cset set -l 2>/dev/null | awk '$1 ~ /^ddrd-/ {print $1}')
 }
 
 # ---------------------------------------------------------------------------
@@ -506,7 +515,6 @@ do_stop() {
     remove_state "$slug"
     cleanup_cpuset "ddrd-${slug}-fuzz"
     cleanup_cpuset "ddrd-${slug}-validate"
-    maybe_teardown_cpuset_layout
     log_ok "[$slug] 实验已停止"
 }
 
@@ -669,10 +677,14 @@ case "$ACTION" in
             done
         fi
         if [[ ${#TARGETS[@]} -eq 0 ]]; then
-            log_warn "无运行中的实验"
+            log_warn "无运行中的实验，尝试清理残留 cpuset"
+            cleanup_all_ddrd_cpusets
+            maybe_teardown_cpuset_layout
             exit 0
         fi
         for t in "${TARGETS[@]}"; do do_stop "$t"; done
+        cleanup_all_ddrd_cpusets
+        maybe_teardown_cpuset_layout
         ;;
     status)
         do_status

@@ -15,6 +15,7 @@ DDRD-syzkaller/
 │   ├── create_image.sh         # 创建/导入磁盘镜像
 │   ├── run_fuzz.sh             # 启动/停止/查看 fuzz
 │   ├── run_validate.sh         # 启动/停止/查看 validate
+│   ├── config_bundle.sh        # 配置打包导出/导入 (跨设备迁移)
 │   ├── manage_corpus.sh        # corpus 备份/导入/迁移/统计
 │   └── Makefile                # 顶层快捷入口
 ├── exp/                        # 实验目录 (每个模块一个子目录)
@@ -139,6 +140,24 @@ python3 scripts/generate_config.py --all --force
 # 或: make corpus-backup
 # 备份到: corpus-backup/<timestamp>/<slug>/<mode>-corpus.db
 ```
+
+## 配置导入/导出 (跨设备)
+
+```bash
+# 导出所有模块配置到 bundle
+./scripts/config_bundle.sh export /tmp/ddrd-configs.tar.gz --all
+
+# 仅导出指定模块
+./scripts/config_bundle.sh export /tmp/ddrd-configs.tar.gz xfs btrfs
+
+# 在另一台机器导入并自动修复路径
+./scripts/config_bundle.sh import /tmp/ddrd-configs.tar.gz
+
+# 覆盖已存在配置
+./scripts/config_bundle.sh import /tmp/ddrd-configs.tar.gz --force
+```
+
+导入时会自动修复配置中绝对路径（例如 `workdir`、`syzkaller`、`image`、`vmlinux`、`vm.kernel`、`qemu_args` 中的旧项目路径）。
 
 ## 配置定制
 

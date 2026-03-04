@@ -950,7 +950,7 @@ func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, n
 			Name: "solo-filter",
 			Type: "solo-filter",
 		},
-		source:       source,
+		source: source,
 	}
 	fuzzer.startJob(fuzzer.statJobsSoloFilter, job)
 }
@@ -1133,11 +1133,11 @@ func (fuzzer *Fuzzer) EnqueueUAFCorpus(entries []*UAFCorpusEntry) int {
 
 func (fuzzer *Fuzzer) ActivateUAFMode() bool {
 	if fuzzer == nil || fuzzer.uaf == nil {
-		log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: fuzzer or uaf is nil")
+		log.Logf(2, "[DEBUG-UAF] ActivateUAFMode: fuzzer or uaf is nil")
 		return false
 	}
 	if !fuzzer.uafBootstrapDone.CompareAndSwap(false, true) {
-		log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: already activated")
+		log.Logf(2, "[DEBUG-UAF] ActivateUAFMode: already activated")
 		return false
 	}
 	log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: enabling barrier fuzzing, corpus=%d", len(fuzzer.Config.Corpus.Programs()))

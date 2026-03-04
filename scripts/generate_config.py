@@ -8,8 +8,11 @@ generate_config.py — 为指定模块生成 fuzz.cfg 和 validate.cfg
     python3 scripts/generate_config.py --all
     python3 scripts/generate_config.py --list
     python3 scripts/generate_config.py --validate-only xfs
+    python3 scripts/generate_config.py --vanilla-only xfs
 
-配置生成到: exp/<slug>/fuzz.cfg 和 exp/<slug>/validate.cfg
+配置生成到:
+    默认:      exp/<slug>/fuzz.cfg / validate.cfg
+    纯净版:    exp/<slug>/fuzz-vanilla.cfg / validate-vanilla.cfg
 """
 import argparse
 import json
@@ -181,7 +184,7 @@ def build_sshkey_path():
     return os.path.join(KERNEL_IMAGES, "bookworm.id_rsa")
 
 
-def generate_config(slug: str, mode: str = "fuzz") -> dict:
+def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = True) -> dict:
     """
     生成配置字典
     mode: "fuzz" | "validate"
@@ -269,16 +272,22 @@ def generate_config(slug: str, mode: str = "fuzz") -> dict:
         "enable_syscalls": syscalls,
     }
 
+    # 纯净配置: 去掉 fork 扩展字段, 保留上游 syzkaller 可识别项
+    if not include_experimental:
+        config.pop("vm_running_time", None)
+        config.pop("ignore_warning_crashes", None)
+
     # experimental section
-    if is_validate:
-        config["experimental"] = json.loads(json.dumps(VALIDATE_EXPERIMENTAL))
-    else:
-        # 使用模块自带的 experimental 或默认
-        mod_exp = overrides.get("experimental", {})
-        if mod_exp:
-            config["experimental"] = mod_exp
+    if include_experimental:
+        if is_validate:
+            config["experimental"] = json.loads(json.dumps(VALIDATE_EXPERIMENTAL))
         else:
-            config["experimental"] = json.loads(json.dumps(FUZZ_EXPERIMENTAL))
+            # 使用模块自带的 experimental 或默认
+            mod_exp = overrides.get("experimental", {})
+            if mod_exp:
+                config["experimental"] = mod_exp
+            else:
+                config["experimental"] = json.loads(json.dumps(FUZZ_EXPERIMENTAL))
 
     return config
 
@@ -300,9 +309,15 @@ def main():
     parser.add_argument("--list", action="store_true", help="列出可用模块")
     parser.add_argument("--fuzz-only", action="store_true", help="仅生成 fuzz 配置")
     parser.add_argument("--validate-only", action="store_true", help="仅生成 validate 配置")
+    parser.add_argument("--vanilla", action="store_true", help="额外生成纯净配置(不含 experimental), 文件名为 *-vanilla.cfg")
+    parser.add_argument("--vanilla-only", action="store_true", help="仅生成纯净配置(不含 experimental)")
     parser.add_argument("--force", "-f", action="store_true", help="覆盖已存在的配置")
     parser.add_argument("--dry-run", action="store_true", help="仅打印, 不写入文件")
     args = parser.parse_args()
+
+    if args.vanilla and args.vanilla_only:
+        print("ERROR: --vanilla 和 --vanilla-only 不能同时使用", file=sys.stderr)
+        sys.exit(1)
 
     if args.list:
         print("可用模块:")
@@ -326,26 +341,35 @@ def main():
     else:
         modes = ["fuzz", "validate"]
 
+    profiles = []
+    if args.vanilla_only:
+        profiles = [("-vanilla", False)]
+    elif args.vanilla:
+        profiles = [("", True), ("-vanilla", False)]
+    else:
+        profiles = [("", True)]
+
     ok = 0
     for slug in targets:
         for mode in modes:
-            cfg = generate_config(slug, mode)
-            out_path = os.path.join(EXP_DIR, slug, f"{mode}.cfg")
+            for suffix, include_exp in profiles:
+                cfg = generate_config(slug, mode, include_exp)
+                out_path = os.path.join(EXP_DIR, slug, f"{mode}{suffix}.cfg")
 
-            if os.path.exists(out_path) and not args.force:
-                print(f"SKIP {out_path} (已存在, 使用 --force 覆盖)")
-                continue
+                if os.path.exists(out_path) and not args.force:
+                    print(f"SKIP {out_path} (已存在, 使用 --force 覆盖)")
+                    continue
 
-            if args.dry_run:
-                print(f"--- {out_path} ---")
-                print(json.dumps(cfg, indent=4))
-                continue
+                if args.dry_run:
+                    print(f"--- {out_path} ---")
+                    print(json.dumps(cfg, indent=4))
+                    continue
 
-            os.makedirs(os.path.dirname(out_path), exist_ok=True)
-            with open(out_path, "w") as f:
-                json.dump(cfg, f, indent=4)
-            print(f"OK {out_path}")
-            ok += 1
+                os.makedirs(os.path.dirname(out_path), exist_ok=True)
+                with open(out_path, "w") as f:
+                    json.dump(cfg, f, indent=4)
+                print(f"OK {out_path}")
+                ok += 1
 
     if not args.dry_run:
         print(f"\n生成完成: {ok} 个配置文件")
