@@ -39,5 +39,10 @@ executor/syscalls.h
 syzkaller-old/
 repro/
 DDRD/
+corpus-backup/
+# ddrd-tools/ 的构建产物由其自带 .gitignore 管理
 tools/syz-race-collector/__pycache__/
 *.png
+images/
+kernels/
+exp/

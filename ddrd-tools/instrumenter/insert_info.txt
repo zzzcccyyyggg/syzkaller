@@ -1,0 +1,2 @@
+LoadInst 0 0 0 0
+StoreInst 0 1 1 0

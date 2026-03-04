@@ -1,0 +1,37 @@
+# 锁函数配置文件示例
+# 格式: <require_function> <release_function> <lock_attribute>
+# lock_attribute: 0=普通锁, 1=读锁, 2=写锁
+
+# POSIX 互斥锁
+pthread_mutex_lock pthread_mutex_unlock 0
+pthread_mutex_trylock pthread_mutex_unlock 0
+
+# POSIX 读写锁
+pthread_rwlock_rdlock pthread_rwlock_unlock 1
+pthread_rwlock_wrlock pthread_rwlock_unlock 2
+pthread_rwlock_tryrdlock pthread_rwlock_unlock 1
+pthread_rwlock_trywrlock pthread_rwlock_unlock 2
+
+# 自旋锁
+pthread_spin_lock pthread_spin_unlock 0
+pthread_spin_trylock pthread_spin_unlock 0
+
+# 内核自旋锁
+spin_lock spin_unlock 0
+spin_lock_irq spin_unlock_irq 0
+spin_lock_irqsave spin_unlock_irqrestore 0
+
+# 内核读写锁  
+read_lock read_unlock 1
+write_lock write_unlock 2
+read_lock_irq read_unlock_irq 1
+write_lock_irq write_unlock_irq 2
+
+# 内核互斥锁
+mutex_lock mutex_unlock 0
+mutex_trylock mutex_unlock 0
+
+# 内核信号量
+down up 0
+down_interruptible up 0
+down_trylock up 0

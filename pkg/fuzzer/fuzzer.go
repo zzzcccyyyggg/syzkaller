@@ -796,18 +796,12 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 				info.AttemptNumber, targetPair.UseAccessName, targetPair.FreeAccessName,
 				triggeredTarget, len(candidatePairs), delayDesc)
 
-			// NOW save the programs with syz_delay to corpus
-			if len(req.BarrierPrograms) >= 2 {
-				for i, p := range req.BarrierPrograms {
-					if p != nil {
-						log.Logf(0, "[TIMING-EXPLORE-SAVE] Saving validated prog%d with delays to corpus (len=%d calls)", i, len(p.Calls))
-						fuzzer.Config.Corpus.Save(corpus.NewInput{
-							Prog: p.Clone(),
-							Call: -1,
-						})
-					}
-				}
-			}
+			// NOTE: Do NOT save to normal corpus here.
+			// Programs with syz_delay calls would pollute normal corpus and waste
+			// execution time on usleep during regular fuzzing mutations.
+			// The full program (with delays) is saved to UAF corpus via
+			// triggerSoloFilter → handleFilteredPairs, which preserves Programs,
+			// ReplayPlan.DelaysMicros, Pairs, and ReplayHistory.
 
 			// Add validated pairs to the store with timing source and trigger solo filter
 			if len(candidatePairs) > 0 {

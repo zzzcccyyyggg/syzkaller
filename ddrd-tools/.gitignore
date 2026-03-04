@@ -1,0 +1,18 @@
+# 构建产物
+build/
+*.o
+
+# 编译出的二进制 (从源码重新编译)
+compiler/kernel_compiler
+compiler/ddrace-cc
+compiler/ddrace-cxx
+compiler/userspace-compiler
+
+# 临时文件
+*.ll
+*.instrumented.ll
+*.tmp
+
+# 编辑器
+*.swp
+*~

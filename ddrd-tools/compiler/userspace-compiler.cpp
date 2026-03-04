@@ -1,0 +1,494 @@
+#include <cstring>
+#include <getopt.h>
+#include <iostream>
+#include <string>
+#include <sys/types.h>
+#include <sys/wait.h>
+#include <unistd.h>
+#include <vector>
+#include <sys/stat.h>
+#include <exception>
+
+using namespace std;
+
+// --- 配置常量 (通过宏来区分 C 和 C++) ---
+#ifdef DDRACE_CXX
+// C++ 版本配置
+constexpr auto COMPILER_PATH = "/home/zzzccc/llvm-project/build/bin/clang++";
+#else
+// C 版本配置
+constexpr auto COMPILER_PATH = "/home/zzzccc/llvm-project/build/bin/clang";
+#endif
+
+constexpr auto INSTRUMENTER_PATH = "/home/zzzccc/DDRD/build/bin/instrumenter";
+constexpr auto LOCK_FILE = "/home/zzzccc/DDRD/instrumenter/examples/locks.txt";
+
+// ddrace运行时库路径（在LLVM项目中）
+constexpr auto DDRACE_RUNTIME_LIB_PATH = "/home/zzzccc/llvm-15/llvm-project/lib/clang/15.0.7/lib/linux/libclang_rt.ddrace-x86_64.a";
+
+// 插桩选项结构
+struct InstrumentationOptions {
+    bool enable_functions = false;
+    bool enable_variables = false;
+    bool enable_basic_blocks = false;
+    bool enable_locks = false;
+    bool enable_all = false;
+    string lock_file = LOCK_FILE;
+    string trylock_file = "";
+    bool debug_mode = false;
+
+    // 检查是否需要插桩
+    bool needsInstrumentation() const
+    {
+        return enable_functions || enable_variables || enable_basic_blocks || enable_locks || enable_all;
+    }
+};
+
+// 编译目标信息
+struct BuildTarget {
+    string output;
+    vector<string> sources;
+    string base_name;
+    string ll_file;
+    string instrumented_file;
+    bool is_compile_only = false;
+};
+
+// 全局变量
+InstrumentationOptions g_instr_opts;
+
+// 添加ddrace运行时库链接参数
+void add_ddrace_runtime_args(vector<const char*>& clang_args)
+{
+    clang_args.push_back("-fsanitize=ddrace");
+    
+#ifndef DDRACE_CXX
+    // C编译时需要额外链接C++标准库，因为ddrace运行时库使用了C++功能
+    clang_args.push_back("-lstdc++");
+#endif
+    
+    // 显式添加ddrace运行时库
+    // clang_args.push_back(DDRACE_RUNTIME_LIB_PATH);
+}
+
+// 检查文件是否存在
+bool file_exists(const char* path)
+{
+    struct stat buffer;
+    return (stat(path, &buffer) == 0);
+}
+
+// 验证必要的工具和文件是否存在
+bool validate_environment()
+{
+    if (!file_exists(COMPILER_PATH)) {
+        cerr << "Error: Compiler not found at: " << COMPILER_PATH << endl;
+        return false;
+    }
+    
+    if (!file_exists(INSTRUMENTER_PATH)) {
+        cerr << "Error: Instrumenter not found at: " << INSTRUMENTER_PATH << endl;
+        return false;
+    }
+    
+    return true;
+}
+
+// 执行命令的封装函数
+int execute_command(const vector<const char*>& args, bool show_output = false)
+{
+    if (show_output || g_instr_opts.debug_mode) {
+        cout << "Executing: ";
+        for (const auto& arg : args) {
+            if (arg)
+                cout << arg << " ";
+        }
+        cout << endl;
+    }
+
+    pid_t pid = fork();
+    if (pid == 0) {
+        vector<char*> exec_args;
+        for (const auto& arg : args) {
+            if (arg)
+                exec_args.push_back(const_cast<char*>(arg));
+        }
+        exec_args.push_back(nullptr);
+
+        execvp(exec_args[0], exec_args.data());
+        cerr << "Failed to execute: " << exec_args[0] << endl;
+        exit(EXIT_FAILURE);
+    }
+
+    int status;
+    waitpid(pid, &status, 0);
+    return WEXITSTATUS(status);
+}
+
+// 显示帮助信息
+void show_help(const char* prog_name)
+{
+    cout << "Usage: " << prog_name << " [DDRACE_OPTIONS] [COMPILER_OPTIONS]\n\n";
+    cout << "DDRACE Instrumentation Options:\n";
+    cout << "  --ddrace-functions       Enable function enter/exit instrumentation\n";
+    cout << "  --ddrace-variables       Enable shared variable access instrumentation\n";
+    cout << "  --ddrace-basic-blocks    Enable basic block instrumentation\n";
+    cout << "  --ddrace-locks [file]    Enable lock instrumentation (optional file)\n";
+    cout << "  --ddrace-all [file]      Enable all instrumentations (optional lock file)\n";
+    cout << "  --ddrace-debug           Enable debug output\n";
+    cout << "  --ddrace-help            Show this help\n\n";
+    cout << "Examples:\n";
+    cout << "  # Compile with function and variable instrumentation\n";
+    cout << "  " << prog_name << " --ddrace-functions --ddrace-variables -o test test.c\n\n";
+#ifdef DDRACE_CXX
+    cout << "All other options are passed directly to clang++.\n";
+#else
+    cout << "All other options are passed directly to clang.\n";
+#endif
+}
+
+// 解析插桩选项
+vector<char*> parse_ddrace_options(int argc, char** argv)
+{
+    vector<char*> remaining_args;
+    remaining_args.push_back(argv[0]); // 保留程序名
+
+    for (int i = 1; i < argc; i++) {
+        string arg = argv[i];
+
+        if (arg == "--ddrace-help") {
+            show_help(argv[0]);
+            exit(0);
+        } else if (arg == "--ddrace-functions")
+            g_instr_opts.enable_functions = true;
+        else if (arg == "--ddrace-variables")
+            g_instr_opts.enable_variables = true;
+        else if (arg == "--ddrace-basic-blocks")
+            g_instr_opts.enable_basic_blocks = true;
+        else if (arg == "--ddrace-locks")
+            g_instr_opts.enable_locks = true;
+        else if (arg.rfind("--ddrace-locks=", 0) == 0) {
+            g_instr_opts.enable_locks = true;
+            g_instr_opts.lock_file = arg.substr(15);
+        } else if (arg == "--ddrace-all")
+            g_instr_opts.enable_all = true;
+        else if (arg.rfind("--ddrace-all=", 0) == 0) {
+            g_instr_opts.enable_all = true;
+            g_instr_opts.lock_file = arg.substr(13);
+        } else if (arg == "--ddrace-debug")
+            g_instr_opts.debug_mode = true;
+        else {
+            remaining_args.push_back(argv[i]);
+        }
+    }
+
+    return remaining_args;
+}
+
+// 检测源文件类型 (现在只用于辅助判断)
+bool is_cpp_file(const string& filename)
+{
+    size_t dot_pos = filename.rfind('.');
+    if (dot_pos == string::npos)
+        return false;
+
+    string ext = filename.substr(dot_pos);
+    return (ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".cp" || ext == ".c++" || ext == ".C");
+}
+
+// 解析编译目标信息
+BuildTarget parse_build_target(const vector<char*>& args)
+{
+    BuildTarget target;
+
+    for (size_t i = 0; i < args.size(); i++) {
+        if (!args[i])
+            continue;
+        string arg = args[i];
+
+        if (arg == "-o") {
+            if (i + 1 < args.size()) {
+                target.output = args[i + 1];
+                i++; // 跳过文件名
+            }
+            continue;
+        }
+
+        if (arg == "-c") {
+            target.is_compile_only = true;
+            continue;
+        }
+
+        // 查找 C/C++ 源文件
+        if (arg.length() > 2) {
+            size_t dot_pos = arg.rfind('.');
+            if (dot_pos != string::npos) {
+                string ext = arg.substr(dot_pos);
+                if (ext == ".c" || ext == ".C" || ext == ".cpp" || ext == ".cxx" || ext == ".cc" || ext == ".cp" || ext == ".c++") {
+                    target.sources.push_back(arg);
+                }
+            }
+        }
+    }
+
+    // 如果是 -c 并且只有一个源文件，但没有 -o，自动生成输出文件名
+    if (target.output.empty() && target.is_compile_only && target.sources.size() == 1) {
+        string source_file = target.sources[0];
+        size_t dot_pos = source_file.rfind('.');
+        size_t slash_pos = source_file.rfind('/');
+
+        string base_name = source_file.substr(slash_pos == string::npos ? 0 : slash_pos + 1,
+            dot_pos == string::npos ? string::npos : dot_pos - (slash_pos == string::npos ? 0 : slash_pos + 1));
+        target.output = base_name + ".o";
+    }
+
+    // 生成中间文件名 (仅当有输出文件时才有意义)
+    if (!target.output.empty()) {
+        size_t dot_pos = target.output.rfind('.');
+        size_t slash_pos = target.output.rfind('/');
+
+        string output_dir = (slash_pos == string::npos) ? "" : target.output.substr(0, slash_pos + 1);
+        string base_name = (slash_pos == string::npos) ? target.output : target.output.substr(slash_pos + 1);
+
+        if (dot_pos != string::npos && dot_pos > slash_pos) {
+            base_name = base_name.substr(0, base_name.rfind('.'));
+        }
+
+        target.base_name = base_name;
+        target.ll_file = output_dir + base_name + ".ll";
+        target.instrumented_file = output_dir + base_name + ".instrumented.ll";
+    }
+
+    if (g_instr_opts.debug_mode) {
+        for (const auto& src : target.sources)
+            cout << "Detected source file: " << src << endl;
+        if (!target.output.empty())
+            cout << "Output file: " << target.output << endl;
+        if (target.is_compile_only)
+            cout << "Compile only mode enabled" << endl;
+        if (!target.ll_file.empty())
+            cout << "LLVM IR file: " << target.ll_file << endl;
+    }
+
+    return target;
+}
+
+// 生成 LLVM IR
+int generate_llvm_ir(const vector<char*>& args, const BuildTarget& target)
+{
+    if (g_instr_opts.debug_mode)
+        cout << "Generating LLVM IR..." << endl;
+
+    vector<const char*> clang_args = { COMPILER_PATH, "-S", "-emit-llvm", "-g" };
+#ifdef DDRACE_CXX
+    clang_args.push_back("-std=c++14");
+#endif
+
+    for (size_t i = 1; i < args.size(); i++) {
+        clang_args.push_back(args[i]);
+    }
+
+    clang_args.push_back("-o");
+    clang_args.push_back(target.ll_file.c_str());
+
+    return execute_command(clang_args, g_instr_opts.debug_mode);
+}
+
+// 根据插桩选项生成插桩器命令行参数
+void add_instrumenter_args(vector<const char*>& instr_args)
+{
+    if (g_instr_opts.enable_all) {
+        instr_args.push_back("-a");
+        if (!g_instr_opts.lock_file.empty()) {
+            instr_args.push_back("-l");
+            instr_args.push_back(g_instr_opts.lock_file.c_str());
+        }
+    } else {
+        if (g_instr_opts.enable_functions)
+            instr_args.push_back("-f");
+        if (g_instr_opts.enable_variables)
+            instr_args.push_back("-v");
+        if (g_instr_opts.enable_basic_blocks)
+            instr_args.push_back("-b");
+        if (g_instr_opts.enable_locks) {
+            instr_args.push_back("-l");
+            instr_args.push_back(g_instr_opts.lock_file.c_str());
+        }
+    }
+}
+
+// 运行插桩工具
+int run_instrumenter(const BuildTarget& target)
+{
+    if (g_instr_opts.debug_mode)
+        cout << "Running instrumenter..." << endl;
+
+    vector<const char*> instr_args = { INSTRUMENTER_PATH, target.ll_file.c_str() };
+    
+    // 添加插桩选项参数
+    add_instrumenter_args(instr_args);
+    
+    // 添加固定的运行时函数名参数
+    instr_args.push_back("--func-name");
+    instr_args.push_back("__rec_mem_access");
+    instr_args.push_back("--enter-name");
+    instr_args.push_back("__ddrace_func_entry");
+    instr_args.push_back("--exit-name");
+    instr_args.push_back("__ddrace_func_exit");
+    
+    return execute_command(instr_args, g_instr_opts.debug_mode);
+}
+
+// 编译插桩后的代码
+int compile_instrumented_code(const vector<char*>& args, const BuildTarget& target)
+{
+    if (g_instr_opts.debug_mode) {
+        cout << "Compiling instrumented code..." << endl;
+    }
+
+    vector<const char*> clang_args = { COMPILER_PATH };
+
+#ifdef DDRACE_CXX
+    clang_args.push_back("-std=c++14");
+#endif
+
+    // 1. 明确地将 `-o` 和目标输出文件名放在最前面
+    clang_args.push_back("-o");
+    clang_args.push_back(target.output.c_str());
+
+    // 2. 将插桩后的 .ll 文件作为主要输入源
+    clang_args.push_back(target.instrumented_file.c_str());
+
+    // 3. 添加所有其他原始参数，但跳过我们已经处理过的和不需要的参数
+    for (size_t i = 1; i < args.size(); i++) {
+        if (!args[i])
+            continue;
+        string arg = args[i];
+
+        // 跳过源文件、-o 和 -o 的参数
+        bool is_source_or_output = false;
+        if (arg == "-o") {
+            is_source_or_output = true;
+            i++; // 同时跳过 -o 后面的文件名
+        } else {
+            for (const auto& src : target.sources) {
+                if (arg == src) {
+                    is_source_or_output = true;
+                    break;
+                }
+            }
+        }
+
+        // 跳过编译时不需要的参数（因为我们编译的是LLVM IR而不是源代码）
+        bool is_preprocessing_arg = false;
+        if (arg.rfind("-I", 0) == 0 ||           // 包含路径
+            arg == "-isystem" ||                 // 系统包含路径(单独参数)
+            arg.rfind("-isystem", 0) == 0 ||     // 系统包含路径(组合参数)
+            arg == "-MD" ||                      // 依赖生成
+            arg == "-MT" ||                      // 依赖目标
+            arg == "-MF") {                      // 依赖文件
+            is_preprocessing_arg = true;
+            // 对于 -isystem, -MT 和 -MF 作为单独参数时，它们的路径在下一个位置，也需要跳过
+            if (arg == "-isystem" || arg == "-MT" || arg == "-MF") {
+                i++; // 跳过下一个参数
+            }
+        }
+        // 特别检查是否是 -MT 或 -MF 的参数值
+        else if (i > 0 && args[i-1]) {
+            string prev_arg = args[i-1];
+            if (prev_arg == "-MT" || prev_arg == "-MF") {
+                is_preprocessing_arg = true;
+            }
+        }
+
+        if (!is_source_or_output && !is_preprocessing_arg) {
+            clang_args.push_back(args[i]);
+        }
+    }
+    add_ddrace_runtime_args(clang_args);
+    
+    // 在 -c 编译目标文件阶段，不需要链接任何库
+    // 但是需要确保插桩后的代码能正确编译为目标文件
+    return execute_command(clang_args, g_instr_opts.debug_mode);
+}
+
+// 清理临时文件 (当前为保留)
+void cleanup_temp_files(const BuildTarget& target)
+{
+    if (g_instr_opts.debug_mode) {
+        cout << "Keeping intermediate files:" << endl;
+        cout << "  LLVM IR: " << target.ll_file << endl;
+        cout << "  Instrumented: " << target.instrumented_file << endl;
+    }
+}
+
+int main(int argc, char** argv)
+{
+    // 验证环境配置
+    if (!validate_environment()) {
+        return 1;
+    }
+    
+    vector<char*> remaining_args = parse_ddrace_options(argc, argv);
+    BuildTarget target = parse_build_target(remaining_args);
+
+    // 如果不需要插桩，或者不是标准的“单源文件编译”场景，则直接调用 clang
+    if (!g_instr_opts.needsInstrumentation() || target.sources.size() != 1 || target.output.empty()) {
+        if (g_instr_opts.debug_mode) {
+            cout << "Passthrough mode: Not exactly one source file or instrumentation disabled." << endl;
+        }
+        
+        vector<const char*> clang_args;
+        clang_args.push_back(COMPILER_PATH);
+
+        for (size_t i = 1; i < remaining_args.size(); i++) {
+            clang_args.push_back(remaining_args[i]);
+        }
+
+        // 仅在链接阶段，并且需要插桩时，才添加运行时库
+        // if (g_instr_opts.needsInstrumentation() && !target.is_compile_only) {
+        //     add_ddrace_runtime_args(clang_args);
+        // }
+        add_ddrace_runtime_args(clang_args);
+        return execute_command(clang_args, g_instr_opts.debug_mode);
+    }
+
+    // --- 标准插桩流程 ---
+    if (g_instr_opts.debug_mode) {
+        cout << "Instrumentation pipeline started for: " << target.sources[0] << endl;
+    }
+
+    int result = 0;
+
+    // 1. 生成 LLVM IR
+    result = generate_llvm_ir(remaining_args, target);
+    if (result != 0) {
+        cerr << "Failed to generate LLVM IR" << endl;
+        return result;
+    }
+
+    // 2. 运行插桩
+    result = run_instrumenter(target);
+    if (result != 0) {
+        cerr << "Failed to run instrumenter" << endl;
+        cleanup_temp_files(target);
+        return result;
+    }
+
+    // 3. 编译插桩后的代码
+    result = compile_instrumented_code(remaining_args, target);
+    if (result != 0) {
+        cerr << "Failed to compile instrumented code" << endl;
+        cleanup_temp_files(target);
+        return result;
+    }
+
+    // 4. 清理临时文件
+    cleanup_temp_files(target);
+
+    if (g_instr_opts.debug_mode) {
+        cout << "Instrumentation compilation completed successfully" << endl;
+    }
+
+    return 0;
+}
