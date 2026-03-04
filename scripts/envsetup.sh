@@ -38,6 +38,10 @@ export DDRD_KERNEL_SRC="${DDRD_KERNEL_SRC:-/home/zzzccc/Linux-Kernel/DDRD-Kernel
 export DDRD_TOOLCHAIN="${DDRD_TOOLCHAIN:-$PROJECT_HOME/ddrd-tools}"
 # LLVM 路径 (LD_LIBRARY_PATH 需要)
 export DDRD_LLVM="${DDRD_LLVM:-/home/zzzccc/llvm-15/llvm-project/build}"
+# Go 环境 (apt 安装 golang-go 后可直接使用)
+export GOPATH="${GOPATH:-$HOME/go}"
+export GOBIN="${GOBIN:-$GOPATH/bin}"
+export GOCACHE="${GOCACHE:-$HOME/.cache/go-build}"
 
 # --------------- 项目内路径 ---------------
 export SYZKALLER_DIR="$PROJECT_HOME"
@@ -61,7 +65,7 @@ export LD_LIBRARY_PATH="${DDRD_LLVM}/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
 
 # --------------- 确保关键目录存在 ---------------
 mkdir -p "$KERNEL_BUILDS_DIR" "$KERNEL_OUTPUT_DIR" "$KERNEL_CONFIGS_DIR" \
-         "$KERNEL_IMAGES_DIR" "$EXP_DIR"
+         "$KERNEL_IMAGES_DIR" "$EXP_DIR" "$GOBIN" "$GOCACHE"
 
 # --------------- 加入 PATH ---------------
 _add_path() {
@@ -72,8 +76,11 @@ _add_path() {
 }
 _add_path "$SYZKALLER_BIN"
 _add_path "$DDRD_TOOLCHAIN/compiler"
+_add_path "/usr/local/go/bin"
+_add_path "$GOBIN"
 
 echo "[envsetup] PROJECT_HOME = $PROJECT_HOME"
 echo "[envsetup] KERNEL_SRC   = $DDRD_KERNEL_SRC"
 echo "[envsetup] TOOLCHAIN    = $DDRD_TOOLCHAIN"
+echo "[envsetup] GO_PATH      = $GOPATH"
 echo "[envsetup] Environment ready."

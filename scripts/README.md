@@ -49,6 +49,19 @@ cd /home/zzzccc/BASS/DDRD-syzkaller
 make -f scripts/Makefile setup
 ```
 
+### 0. Ubuntu 一键安装工具链
+
+```bash
+# 完整安装 (推荐)
+./scripts/install_toolchain_ubuntu.sh
+
+# 最小安装
+./scripts/install_toolchain_ubuntu.sh --minimal
+
+# 仅预览命令
+./scripts/install_toolchain_ubuntu.sh --dry-run
+```
+
 ### 2. 编译
 
 ```bash

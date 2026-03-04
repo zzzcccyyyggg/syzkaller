@@ -14,6 +14,7 @@
 #   4. sudo ./scripts/run_experiment.sh stop btrfs       停止全部
 #
 # 用法:
+#   sudo ./scripts/run_experiment.sh [--vanilla] <command> [...]
 #   sudo ./scripts/run_experiment.sh start    <mod> [...]  启动 fuzz
 #   sudo ./scripts/run_experiment.sh validate <mod> [...]  启动 validate
 #   sudo ./scripts/run_experiment.sh stop     [mod ...]    停止 fuzz+validate
@@ -173,7 +174,7 @@ maybe_teardown_cpuset_layout() {
         return 0
     fi
 
-    if pgrep -f "syz-manager.*$EXP_DIR/.*/exp-fuzz\\.cfg|syz-manager.*$EXP_DIR/.*/exp-validate\\.cfg" >/dev/null 2>&1; then
+    if pgrep -f "syz-manager.*$EXP_DIR/.*/exp-fuzz(-vanilla)?\\.cfg|syz-manager.*$EXP_DIR/.*/exp-validate(-vanilla)?\\.cfg" >/dev/null 2>&1; then
         log_warn "仍有实验进程存活，跳过 cset shield --reset"
         return 0
     fi
@@ -196,22 +197,34 @@ MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
 # ---------------------------------------------------------------------------
 ACTION="${1:-help}"; shift || true
 ALL_MODE=false
+USE_VANILLA=false
 TARGETS=()
+
+# 支持将 --vanilla 放在命令前: run_experiment.sh --vanilla start ...
+if [[ "$ACTION" == "--vanilla" ]]; then
+    USE_VANILLA=true
+    ACTION="${1:-help}"
+    shift || true
+fi
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --all|-a)   ALL_MODE=true; shift ;;
+        --vanilla)  USE_VANILLA=true; shift ;;
         -*) die "未知选项: $1" ;;
         *)  TARGETS+=("$1"); shift ;;
     esac
 done
+
+CFG_SUFFIX=""
+$USE_VANILLA && CFG_SUFFIX="-vanilla"
 
 # --all: 找出同时有 fuzz.cfg + validate.cfg 的模块
 if $ALL_MODE; then
     mapfile -t TARGETS < <(
         for d in "$EXP_DIR"/*/; do
             local_slug=$(basename "$d")
-            [[ -f "$d/fuzz.cfg" ]] && [[ -f "$d/validate.cfg" ]] && echo "$local_slug"
+            [[ -f "$d/fuzz${CFG_SUFFIX}.cfg" ]] && [[ -f "$d/validate${CFG_SUFFIX}.cfg" ]] && echo "$local_slug"
         done
     )
 fi
@@ -221,10 +234,16 @@ fi
 # ---------------------------------------------------------------------------
 gen_exp_config() {
     local slug=$1 mode=$2
-    local src="$EXP_DIR/$slug/${mode}.cfg"
-    local dst="$EXP_DIR/$slug/exp-${mode}.cfg"
+    local src="$EXP_DIR/$slug/${mode}${CFG_SUFFIX}.cfg"
+    local dst="$EXP_DIR/$slug/exp-${mode}${CFG_SUFFIX}.cfg"
 
-    [[ -f "$src" ]] || die "配置不存在: $src (请先运行: python3 scripts/generate_config.py $slug)"
+    if [[ ! -f "$src" ]]; then
+        if [[ -n "$CFG_SUFFIX" ]]; then
+            die "配置不存在: $src (请先运行: python3 scripts/generate_config.py --vanilla-only $slug)"
+        else
+            die "配置不存在: $src (请先运行: python3 scripts/generate_config.py $slug)"
+        fi
+    fi
 
     python3 - "$src" "$dst" "$EXP_VM_COUNT" "$EXP_VM_CPU" "$EXP_VM_MEM" "$EXP_PROCS" "$mode" <<'PYEOF'
 import json, sys, os
@@ -267,11 +286,11 @@ calc_cores() {
 # 进程 / 状态管理
 # ---------------------------------------------------------------------------
 get_exp_fuzz_pid() {
-    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-fuzz\\.cfg" 2>/dev/null | head -1 || true
+    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-fuzz(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
 }
 
 get_exp_validate_pid() {
-    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-validate\\.cfg" 2>/dev/null | head -1 || true
+    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-validate(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
 }
 
 get_any_regular_pid() {
@@ -392,14 +411,14 @@ do_start() {
     # 生成实验配置
     gen_exp_config "$slug" "fuzz"
 
-    local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz.cfg"
+    local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz${CFG_SUFFIX}.cfg"
     local log_dir="$EXP_DIR/$slug/logs"
     mkdir -p "$log_dir"
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
 
     # --- 启动 fuzz ---
-    local fuzz_log="$log_dir/exp-fuzz-${ts}.log"
+    local fuzz_log="$log_dir/exp-fuzz${CFG_SUFFIX}-${ts}.log"
     nohup "$SYZ_MANAGER" -config "$fuzz_cfg" > "$fuzz_log" 2>&1 &
     local fuzz_pid=$!
     pin_to_cores "$fuzz_pid" "$ALL_CORES" "ddrd-${slug}-fuzz"
@@ -413,7 +432,11 @@ do_start() {
 
     save_state "$slug" "$idx" "$fuzz_pid" ""
     log_ok "[$slug] fuzz 已启动  PID=$fuzz_pid  cores=$ALL_CORES"
-    log_info "[$slug] fuzz 跑够后运行: sudo $0 validate $slug"
+    if $USE_VANILLA; then
+        log_info "[$slug] fuzz 跑够后运行: sudo $0 --vanilla validate $slug"
+    else
+        log_info "[$slug] fuzz 跑够后运行: sudo $0 validate $slug"
+    fi
     return 0
 }
 
@@ -458,12 +481,12 @@ do_validate() {
         ln -sf "$main_workdir/uaf-corpus.db" "$val_workdir/uaf-corpus.db"
     fi
 
-    local val_cfg="$EXP_DIR/$slug/exp-validate.cfg"
+    local val_cfg="$EXP_DIR/$slug/exp-validate${CFG_SUFFIX}.cfg"
     local log_dir="$EXP_DIR/$slug/logs"
     mkdir -p "$log_dir"
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
-    local val_log="$log_dir/exp-validate-${ts}.log"
+    local val_log="$log_dir/exp-validate${CFG_SUFFIX}-${ts}.log"
 
     nohup "$SYZ_MANAGER" -mode=uaf-validate -config "$val_cfg" > "$val_log" 2>&1 &
     local val_pid=$!
@@ -529,7 +552,7 @@ do_status() {
     for d in "$EXP_DIR"/*/; do
         local slug
         slug=$(basename "$d")
-        [[ -f "$d/fuzz.cfg" ]] || continue
+        [[ -f "$d/fuzz${CFG_SUFFIX}.cfg" ]] || continue
 
         local fp vp fs vs cores="—"
         fp=$(get_exp_fuzz_pid "$slug")
@@ -627,7 +650,9 @@ do_log() {
     local slug=$1 mode=${2:-fuzz}
     local log_dir="$EXP_DIR/$slug/logs"
     local latest
-    latest=$(ls -t "$log_dir"/exp-${mode}-*.log 2>/dev/null | head -1)
+    latest=$(ls -t "$log_dir"/exp-${mode}${CFG_SUFFIX}-*.log 2>/dev/null | head -1)
+    [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/exp-${mode}-*.log 2>/dev/null | head -1)
+    [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/exp-${mode}-vanilla-*.log 2>/dev/null | head -1)
     # 回退到常规日志
     [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/${mode}-*.log 2>/dev/null | head -1)
     [[ -z "$latest" ]] && die "[$slug] 无 ${mode} 日志"
@@ -647,7 +672,11 @@ case "$ACTION" in
         if (( ${#TARGETS[@]} > MAX_MODULES )); then
             die "模块数 ${#TARGETS[@]} 超过最大 $MAX_MODULES (${AVAIL_CORES} 可用核 ÷ ${CORES_PER_MODULE} 核/模块)"
         fi
-        log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+        if $USE_VANILLA; then
+            log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+        else
+            log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+        fi
         echo ""
         for t in "${TARGETS[@]}"; do do_start "$t"; echo ""; done
         echo "========================================="
@@ -658,7 +687,11 @@ case "$ACTION" in
         detect_available_cores
         MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
-        log_info "启动 validate: ${#TARGETS[@]} 个模块"
+        if $USE_VANILLA; then
+            log_info "启动 validate(vanilla): ${#TARGETS[@]} 个模块"
+        else
+            log_info "启动 validate: ${#TARGETS[@]} 个模块"
+        fi
         echo ""
         for t in "${TARGETS[@]}"; do do_validate "$t"; echo ""; done
         echo "========================================="
@@ -704,10 +737,14 @@ case "$ACTION" in
     list)
         detect_available_cores true
         MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
-        echo "可用模块 (有 fuzz.cfg + validate.cfg):"
+        if $USE_VANILLA; then
+            echo "可用模块 (有 fuzz-vanilla.cfg + validate-vanilla.cfg):"
+        else
+            echo "可用模块 (有 fuzz.cfg + validate.cfg):"
+        fi
         for d in "$EXP_DIR"/*/; do
             slug=$(basename "$d")
-            [[ -f "$d/fuzz.cfg" ]] && [[ -f "$d/validate.cfg" ]] && echo "  $slug"
+            [[ -f "$d/fuzz${CFG_SUFFIX}.cfg" ]] && [[ -f "$d/validate${CFG_SUFFIX}.cfg" ]] && echo "  $slug"
         done
         echo ""
         echo "CPU: 核心 ${AVAIL_DESC} 可用 (${AVAIL_CORES}核), 每模块 ${CORES_PER_MODULE} 核, 最多同时 ${MAX_MODULES} 个模块"

@@ -22,7 +22,7 @@ MODULES ?=
 # 模块参数 (空格分隔转为命令参数)
 MOD_ARGS := $(if $(MODULES),$(MODULES),)
 
-.PHONY: help setup build-syzkaller build-tools build-kernel config \
+.PHONY: help setup install-toolchain install-toolchain-min build-syzkaller build-tools build-kernel config \
         fuzz fuzz-stop fuzz-status fuzz-log \
         validate validate-stop validate-status validate-log \
         corpus-stat corpus-backup corpus-import corpus-migrate \
@@ -31,6 +31,9 @@ MOD_ARGS := $(if $(MODULES),$(MODULES),)
 help:
 	@echo "DDRD Experiment Workflow"
 	@echo "======================="
+	@echo ""
+	@echo "  make install-toolchain      Ubuntu 一键安装完整工具链"
+	@echo "  make install-toolchain-min  Ubuntu 一键安装最小工具链"
 	@echo ""
 	@echo "  make setup                 首次设置: 导入镜像 + 提取模块数据 + 生成配置"
 	@echo "  make build-tools           编译 DDRD 插桩工具链 (instrumenter + compiler)"
@@ -61,6 +64,12 @@ help:
 	@echo ""
 
 # ---- 首次设置 ----
+install-toolchain:
+	bash $(SCRIPTS)/install_toolchain_ubuntu.sh
+
+install-toolchain-min:
+	bash $(SCRIPTS)/install_toolchain_ubuntu.sh --minimal
+
 setup: extract-data import-images config
 	@echo "[setup] 完成! 接下来可以:"
 	@echo "  1. make build-syzkaller    # 编译 fuzzer"
