@@ -5,19 +5,25 @@
 # 用法:
 #   ./scripts/install_toolchain_ubuntu.sh                 # 完整安装
 #   ./scripts/install_toolchain_ubuntu.sh --minimal       # 最小安装
+#   ./scripts/install_toolchain_ubuntu.sh --go-only       # 仅安装/升级 Go
 #   ./scripts/install_toolchain_ubuntu.sh --dry-run       # 仅打印将执行命令
 #   ./scripts/install_toolchain_ubuntu.sh --no-update     # 跳过 apt update
+#   ./scripts/install_toolchain_ubuntu.sh --go-version 1.24.4
 #
 # 说明:
 #   - 默认安装完整依赖: syzkaller + 内核编译 + DDRD 工具链 + QEMU/镜像工具
 #   - 自动检测 clang-18; 若仓库无 clang-18 则回退安装默认 clang/llvm
+#   - 自动检测 Go 版本, 若低于最低要求则从 go.dev 安装指定版本
 # ============================================================================
 set -euo pipefail
 
 DRY_RUN=false
 MINIMAL=false
+GO_ONLY=false
 NO_UPDATE=false
 FORCE_DISTRO=false
+GO_MIN_VERSION="1.24.0"
+GO_INSTALL_VERSION="1.24.4"
 
 usage() {
     sed -n '3,20p' "$0" | sed 's/^# //' | sed 's/^#//'
@@ -36,12 +42,72 @@ run() {
     fi
 }
 
+version_lt() {
+    # return 0 if $1 < $2
+    [[ "$(printf '%s\n%s\n' "$1" "$2" | sort -V | head -1)" != "$2" ]]
+}
+
+detect_go_version() {
+    if ! command -v go >/dev/null 2>&1; then
+        echo ""
+        return 0
+    fi
+    go version 2>/dev/null | awk '{print $3}' | sed 's/^go//'
+}
+
+install_go_from_tarball() {
+    local gov="$1"
+    local uname_s uname_m goarch url tmp
+    uname_s=$(uname -s | tr '[:upper:]' '[:lower:]')
+    uname_m=$(uname -m)
+
+    case "$uname_m" in
+        x86_64|amd64) goarch="amd64" ;;
+        aarch64|arm64) goarch="arm64" ;;
+        *) log_err "不支持的架构: $uname_m"; return 1 ;;
+    esac
+
+    [[ "$uname_s" == "linux" ]] || { log_err "仅支持 Linux 自动安装 Go"; return 1; }
+
+    url="https://go.dev/dl/go${gov}.${uname_s}-${goarch}.tar.gz"
+    tmp="/tmp/go${gov}.${uname_s}-${goarch}.tar.gz"
+
+    log_info "安装 Go ${gov} (官方二进制)"
+    run curl -fL "$url" -o "$tmp"
+    run "${SUDO[@]}" rm -rf /usr/local/go
+    run "${SUDO[@]}" tar -C /usr/local -xzf "$tmp"
+    run rm -f "$tmp"
+
+    export PATH="/usr/local/go/bin:$PATH"
+}
+
+ensure_go_version() {
+    local cur
+    export PATH="/usr/local/go/bin:$PATH"
+    cur=$(detect_go_version)
+
+    if [[ -z "$cur" ]]; then
+        log_warn "未检测到 go，准备安装 Go ${GO_INSTALL_VERSION}"
+        install_go_from_tarball "$GO_INSTALL_VERSION"
+        return 0
+    fi
+
+    if version_lt "$cur" "$GO_MIN_VERSION"; then
+        log_warn "当前 Go 版本过低: $cur (需要 >= $GO_MIN_VERSION)"
+        install_go_from_tarball "$GO_INSTALL_VERSION"
+    else
+        log_ok "Go 版本满足要求: $cur"
+    fi
+}
+
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --minimal)      MINIMAL=true; shift ;;
+        --go-only)      GO_ONLY=true; shift ;;
         --dry-run|-n)   DRY_RUN=true; shift ;;
         --no-update)    NO_UPDATE=true; shift ;;
         --force-distro) FORCE_DISTRO=true; shift ;;
+        --go-version)   GO_INSTALL_VERSION="$2"; shift 2 ;;
         --help|-h)      usage; exit 0 ;;
         *)              log_err "未知选项: $1"; usage; exit 1 ;;
     esac
@@ -106,9 +172,14 @@ fi
 
 EXTRA_PKGS=(jq tree unzip zip)
 
+GO_ONLY_PKGS=(curl ca-certificates)
+
 PKGS=("${BASE_PKGS[@]}" "${KERNEL_PKGS[@]}" "${VM_PKGS[@]}" "${DDRD_PKGS[@]}" "${CPUSET_PKGS[@]}" "${LLVM_PKGS[@]}")
 if ! $MINIMAL; then
     PKGS+=("${FS_PKGS[@]}" "${EXTRA_PKGS[@]}")
+fi
+if $GO_ONLY; then
+    PKGS=("${GO_ONLY_PKGS[@]}")
 fi
 
 # 去重
@@ -121,7 +192,11 @@ for p in "${PKGS[@]}"; do
 done
 
 log_info "系统: ${PRETTY_NAME:-$ID}"
-log_info "模式: $($MINIMAL && echo minimal || echo full)"
+if $GO_ONLY; then
+    log_info "模式: go-only"
+else
+    log_info "模式: $($MINIMAL && echo minimal || echo full)"
+fi
 log_info "包数量: ${#DEDUP_PKGS[@]}"
 
 if ! $NO_UPDATE; then
@@ -129,8 +204,12 @@ if ! $NO_UPDATE; then
     run "${SUDO[@]}" apt-get update
 fi
 
-log_info "安装依赖包..."
-run "${SUDO[@]}" apt-get install -y --no-install-recommends "${DEDUP_PKGS[@]}"
+if (( ${#DEDUP_PKGS[@]} > 0 )); then
+    log_info "安装依赖包..."
+    run "${SUDO[@]}" apt-get install -y --no-install-recommends "${DEDUP_PKGS[@]}"
+fi
+
+ensure_go_version
 
 if ! $DRY_RUN; then
     log_ok "安装完成"

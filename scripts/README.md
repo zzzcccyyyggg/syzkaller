@@ -58,6 +58,9 @@ make -f scripts/Makefile setup
 # 最小安装
 ./scripts/install_toolchain_ubuntu.sh --minimal
 
+# 仅安装/升级 Go 环境
+./scripts/install_toolchain_ubuntu.sh --go-only
+
 # 仅预览命令
 ./scripts/install_toolchain_ubuntu.sh --dry-run
 ```
