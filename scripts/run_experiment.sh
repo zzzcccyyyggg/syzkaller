@@ -57,10 +57,48 @@ CPUS_AVAILABLE=()
 AVAIL_CORES=0
 AVAIL_DESC=""
 USE_CSET=false
+declare -a BATCH_RESERVED_IDXS=()
 
 join_by_comma() {
     local IFS=,
     echo "$*"
+}
+
+normalize_module_slug() {
+    case "$1" in
+        usb) echo "usb-driver" ;;
+        bluetooth|bt) echo "bt-stack" ;;
+        *) echo "$1" ;;
+    esac
+}
+
+canonicalize_targets() {
+    [[ ${#TARGETS[@]} -gt 0 ]] || return 0
+    local normalized=()
+    local raw slug
+    for raw in "${TARGETS[@]}"; do
+        slug=$(normalize_module_slug "$raw")
+        if [[ "$slug" != "$raw" ]]; then
+            log_info "模块别名映射: $raw -> $slug"
+        fi
+        normalized+=("$slug")
+    done
+    TARGETS=("${normalized[@]}")
+}
+
+ensure_mode_configs_exist() {
+    local mode=$1
+    local slug cfg
+    for slug in "${TARGETS[@]}"; do
+        cfg="$EXP_DIR/$slug/${mode}${CFG_SUFFIX}.cfg"
+        [[ -f "$cfg" ]] || {
+            if [[ -n "$CFG_SUFFIX" ]]; then
+                die "配置不存在: $cfg (请先运行: python3 scripts/generate_config.py --vanilla-only $slug)"
+            else
+                die "配置不存在: $cfg (请先运行: python3 scripts/generate_config.py $slug)"
+            fi
+        }
+    done
 }
 
 # ---------------------------------------------------------------------------
@@ -216,6 +254,8 @@ while [[ $# -gt 0 ]]; do
     esac
 done
 
+canonicalize_targets
+
 CFG_SUFFIX=""
 $USE_VANILLA && CFG_SUFFIX="-vanilla"
 
@@ -286,11 +326,29 @@ calc_cores() {
 # 进程 / 状态管理
 # ---------------------------------------------------------------------------
 get_exp_fuzz_pid() {
-    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-fuzz(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
+    local sfile="$STATE_DIR/$1.state"
+    if [[ -f "$sfile" ]]; then
+        local _idx _fp _vp
+        read -r _idx _fp _vp < "$sfile" || true
+        if [[ -n "${_fp:-}" ]] && [[ "${_fp:-0}" != "0" ]] && kill -0 "$_fp" 2>/dev/null; then
+            echo "$_fp"
+            return 0
+        fi
+    fi
+    pgrep -f "$EXP_DIR/$1/exp-fuzz(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
 }
 
 get_exp_validate_pid() {
-    pgrep -f "syz-manager.*$EXP_DIR/$1/exp-validate(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
+    local sfile="$STATE_DIR/$1.state"
+    if [[ -f "$sfile" ]]; then
+        local _idx _fp _vp
+        read -r _idx _fp _vp < "$sfile" || true
+        if [[ -n "${_vp:-}" ]] && [[ "${_vp:-0}" != "0" ]] && kill -0 "$_vp" 2>/dev/null; then
+            echo "$_vp"
+            return 0
+        fi
+    fi
+    pgrep -f "$EXP_DIR/$1/exp-validate(-vanilla)?\\.cfg" 2>/dev/null | head -1 || true
 }
 
 get_any_regular_pid() {
@@ -336,6 +394,10 @@ next_module_index() {
             used+=($(awk '{print $1}' "$f"))
         done
     fi
+    local b
+    for b in "${BATCH_RESERVED_IDXS[@]+${BATCH_RESERVED_IDXS[@]}}"; do
+        used+=("$b")
+    done
     local i
     for ((i = 0; i < MAX_MODULES; i++)); do
         local found=false
@@ -405,6 +467,7 @@ do_start() {
     # 分配核心
     local idx
     idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+    BATCH_RESERVED_IDXS+=("$idx")
     calc_cores "$idx"
     log_info "[$slug] 分配核心: $ALL_CORES"
 
@@ -669,6 +732,8 @@ case "$ACTION" in
         detect_available_cores
         MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
+        ensure_mode_configs_exist "fuzz"
+        BATCH_RESERVED_IDXS=()
         if (( ${#TARGETS[@]} > MAX_MODULES )); then
             die "模块数 ${#TARGETS[@]} 超过最大 $MAX_MODULES (${AVAIL_CORES} 可用核 ÷ ${CORES_PER_MODULE} 核/模块)"
         fi
@@ -687,6 +752,7 @@ case "$ACTION" in
         detect_available_cores
         MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
+        ensure_mode_configs_exist "validate"
         if $USE_VANILLA; then
             log_info "启动 validate(vanilla): ${#TARGETS[@]} 个模块"
         else
