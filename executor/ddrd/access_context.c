@@ -108,8 +108,8 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
     return record_count;
 }
 
-// Default threshold in nanoseconds (2ms)
-#define DEFAULT_TIME_THRESHOLD_NS 2000000
+// Default threshold in nanoseconds (10ms, unified with collector)
+#define DEFAULT_TIME_THRESHOLD_NS 10000000
 
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {

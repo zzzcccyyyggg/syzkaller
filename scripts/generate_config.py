@@ -60,6 +60,7 @@ PORT_MAP = {
     "bt-stack": 62011,
     "ext4": 62012,
     "overlayfs": 62013,
+    "ocfs2": 62014,
 }
 
 # Validate 端口 = fuzz 端口 + 100

@@ -153,7 +153,7 @@ VM_PKGS=(
 )
 
 FS_PKGS=(
-    xfsprogs btrfs-progs f2fs-tools jfsutils e2fsprogs dosfstools
+    xfsprogs btrfs-progs f2fs-tools jfsutils e2fsprogs dosfstools ocfs2-tools
 )
 
 DDRD_PKGS=(

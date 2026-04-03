@@ -42,7 +42,19 @@ DDRD/
 corpus-backup/
 # ddrd-tools/ 的构建产物由其自带 .gitignore 管理
 tools/syz-race-collector/__pycache__/
+tools/syz-race-collector/syz-race-collector
+tools/syz-race-collector/syz-race-collector-static
+tools/syz-validatedb/syz-validatedb
+tools/syz-validatedb/*.log
 *.png
 images/
 kernels/
 exp/
+--output-dir/
+batch_repros/
+graph/
+graph.tar.gz
+scripts/__pycache__/
+.experiment/*.state
+.experiment/.cpuset_owned
+config.tar.gz

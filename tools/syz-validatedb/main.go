@@ -128,6 +128,7 @@ func printHistoryStatistics(records []*RecordInfo) {
 		fmt.Printf("Max reduction ratio: %.1f%%\n", maxReduction*100)
 	}
 	fmt.Printf("=================================\n\n")
+}
 
 func initReporter(path string) (*report.Reporter, error) {
 	if path == "" {

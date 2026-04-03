@@ -60,7 +60,7 @@ static void print_usage(const char* prog) {
         "\n"
         "Detection Thresholds:\n"
         "  --race-threshold <ns>     Time threshold for race pair detection in nanoseconds\n"
-        "                            (default: 4270000, ~4.27ms)\n"
+        "                            (default: 10000000, 10ms)\n"
         "  --uaf-threshold <ns>      Time threshold for UAF detection in nanoseconds\n"
         "                            (default: 10000000000, 10s)\n"
         "\n"
@@ -479,7 +479,7 @@ int main(int argc, char* argv[]) {
         
         // 7. 重新开启 LOG 模式（继续采集）
         if (g_running) {
-            if (!collector_enable_log_mode(&collector)) {
+            if (collector_enable_log_mode(&collector) != 0) {
                 LOG_ERROR("Failed to re-enable LOG mode at iteration %lu", (unsigned long)iteration);
             }
         }

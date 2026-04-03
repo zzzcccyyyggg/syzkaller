@@ -53,7 +53,7 @@ static inline void config_set_defaults(CollectorConfig* cfg) {
     cfg->interval_ms = 1000;
     cfg->duration_sec = 0;
     
-    cfg->race_time_threshold_ns = 4270000ULL;      // ~4.27ms
+    cfg->race_time_threshold_ns = 10000000ULL;     // 10ms (unified with executor)
     cfg->uaf_time_threshold_ns = 10000000000ULL;   // 10s
     
     cfg->trace_buffer_size_kb = 16384;             // 16MB per CPU

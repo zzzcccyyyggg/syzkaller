@@ -14,15 +14,22 @@
 #   4. sudo ./scripts/run_experiment.sh stop btrfs       停止全部
 #
 # 用法:
-#   sudo ./scripts/run_experiment.sh [--vanilla] <command> [...]
+#   sudo ./scripts/run_experiment.sh [--vanilla] [--no-pin] <command> [...]
 #   sudo ./scripts/run_experiment.sh start    <mod> [...]  启动 fuzz
 #   sudo ./scripts/run_experiment.sh validate <mod> [...]  启动 validate
 #   sudo ./scripts/run_experiment.sh stop     [mod ...]    停止 fuzz+validate
 #   sudo ./scripts/run_experiment.sh status                查看运行状态
 #   sudo ./scripts/run_experiment.sh clean    <mod> [--all] 清除 uaf corpus
 #   sudo ./scripts/run_experiment.sh clean-log <mod> [--all] 清除日志
+#   sudo ./scripts/run_experiment.sh clean-validate <mod> [--all] 清除 validate 数据
 #   sudo ./scripts/run_experiment.sh log      <mod> [fuzz|validate] 查看日志
 #   sudo ./scripts/run_experiment.sh list                  列出可用模块
+#
+# 选项:
+#   --all / -a     操作所有可用模块
+#   --vanilla      使用 vanilla 配置
+#   --no-pin       不绑定 CPU，不使用 cset / taskset，直接运行
+#   --except / -e  排除指定模块 (与 --all 搭配: --all --except floppy usb-driver)
 #
 # 环境变量 (可选覆盖):
 #   CORES_PER_MODULE=2        每模块 CPU 核心数
@@ -31,6 +38,7 @@
 #   EXP_VM_CPU=2              每 VM vCPU
 #   EXP_VM_MEM=4096           每 VM 内存 (MB)
 #   EXP_PROCS=2               syz-manager procs
+#   NO_PIN=true               不绑定 CPU，直接运行
 #
 # 自动检测/创建 cset 布局, 使用未被 /system 占用的核心
 # ============================================================================
@@ -49,6 +57,7 @@ EXP_VM_COUNT=${EXP_VM_COUNT:-2}
 EXP_VM_CPU=${EXP_VM_CPU:-2}
 EXP_VM_MEM=${EXP_VM_MEM:-4096}
 EXP_PROCS=${EXP_PROCS:-2}
+NO_PIN=${NO_PIN:-false}
 
 STATE_DIR="$PROJECT_HOME/.experiment"
 CPUSETS_OWNED_MARKER="$STATE_DIR/.cpuset_owned"
@@ -57,6 +66,7 @@ CPUS_AVAILABLE=()
 AVAIL_CORES=0
 AVAIL_DESC=""
 USE_CSET=false
+MAX_MODULES=0
 declare -a BATCH_RESERVED_IDXS=()
 
 join_by_comma() {
@@ -109,30 +119,34 @@ detect_available_cores() {
     local quiet=${1:-false}
     local cpusets_root="/cpusets"
     CPUS_AVAILABLE=()
+
     if [[ -f "$cpusets_root/system/cpus" ]]; then
-        # 读取 /system 占用的核心, 计算剩余
         local system_cpus root_cpus
         root_cpus=$(cat "$cpusets_root/cpus" 2>/dev/null || echo "")
         system_cpus=$(cat "$cpusets_root/system/cpus" 2>/dev/null || echo "")
         if [[ -n "$system_cpus" ]] && [[ -n "$root_cpus" ]]; then
-            # 展开 CPU 列表为数组, 求差集
             local -a all_cores=() sys_cores=() avail=()
+
             _expand_cpulist() {
-                local list=$1; shift
-                local -n _arr=$1
+                local list=$1
+                local -n _arr=$2
                 local part
                 for part in ${list//,/ }; do
                     if [[ "$part" == *-* ]]; then
                         local lo=${part%-*} hi=${part#*-}
                         local c
-                        for ((c=lo; c<=hi; c++)); do _arr+=("$c"); done
+                        for ((c=lo; c<=hi; c++)); do
+                            _arr+=("$c")
+                        done
                     else
                         _arr+=("$part")
                     fi
                 done
             }
+
             _expand_cpulist "$root_cpus" all_cores
             _expand_cpulist "$system_cpus" sys_cores
+
             local c
             for c in "${all_cores[@]}"; do
                 local in_sys=false s
@@ -141,6 +155,7 @@ detect_available_cores() {
                 done
                 $in_sys || avail+=("$c")
             done
+
             if (( ${#avail[@]} > 0 )); then
                 CPUS_AVAILABLE=("${avail[@]}")
                 AVAIL_CORES=${#CPUS_AVAILABLE[@]}
@@ -151,7 +166,7 @@ detect_available_cores() {
             fi
         fi
     fi
-    # 回退: 使用全部核心
+
     local total c
     total=$(nproc)
     for ((c=0; c<total; c++)); do
@@ -164,6 +179,10 @@ detect_available_cores() {
 }
 
 ensure_cpuset_layout() {
+    if $NO_PIN; then
+        return 0
+    fi
+
     if ! command -v cset &>/dev/null; then
         log_warn "未安装 cset，回退 taskset（无法提供硬隔离）"
         return 0
@@ -186,6 +205,7 @@ ensure_cpuset_layout() {
     local user_start user_end system_desc user_desc
     user_start=$reserved
     user_end=$((total - 1))
+
     if (( reserved == 1 )); then
         system_desc="0"
     else
@@ -217,7 +237,8 @@ maybe_teardown_cpuset_layout() {
         return 0
     fi
 
-    if cset set -l 2>/dev/null | grep -q 'ddrd-'; then
+    # 使用 -v 规避 cset 版本中的 list 输出 bug
+    if cset set -l -v 2>/dev/null | grep -q 'ddrd-'; then
         log_warn "仍存在 ddrd-* cpuset，跳过自动 reset"
         return 0
     fi
@@ -227,28 +248,38 @@ maybe_teardown_cpuset_layout() {
     rm -f "$CPUSETS_OWNED_MARKER"
 }
 
-detect_available_cores
-MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
-
 # ---------------------------------------------------------------------------
 # 命令行解析
+# 支持:
+#   ./run_experiment.sh --vanilla --no-pin start ...
+#   ./run_experiment.sh start --vanilla --no-pin ...
 # ---------------------------------------------------------------------------
-ACTION="${1:-help}"; shift || true
+ACTION="help"
 ALL_MODE=false
 USE_VANILLA=false
+EXCEPT_MODULES=()
 TARGETS=()
 
-# 支持将 --vanilla 放在命令前: run_experiment.sh --vanilla start ...
-if [[ "$ACTION" == "--vanilla" ]]; then
-    USE_VANILLA=true
-    ACTION="${1:-help}"
-    shift || true
-fi
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --vanilla) USE_VANILLA=true; shift ;;
+        --no-pin)  NO_PIN=true; shift ;;
+        *) ACTION="$1"; shift; break ;;
+    esac
+done
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --all|-a)   ALL_MODE=true; shift ;;
         --vanilla)  USE_VANILLA=true; shift ;;
+        --no-pin)   NO_PIN=true; shift ;;
+        --except|-e)
+            shift
+            while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
+                EXCEPT_MODULES+=("$1")
+                shift
+            done
+            ;;
         -*) die "未知选项: $1" ;;
         *)  TARGETS+=("$1"); shift ;;
     esac
@@ -256,10 +287,21 @@ done
 
 canonicalize_targets
 
+if [[ ${#EXCEPT_MODULES[@]} -gt 0 ]]; then
+    FILTERED=()
+    for t in "${TARGETS[@]}"; do
+        skip=false
+        for e in "${EXCEPT_MODULES[@]}"; do
+            [[ "$t" == "$e" ]] && { skip=true; break; }
+        done
+        $skip || FILTERED+=("$t")
+    done
+    TARGETS=("${FILTERED[@]}")
+fi
+
 CFG_SUFFIX=""
 $USE_VANILLA && CFG_SUFFIX="-vanilla"
 
-# --all: 找出同时有 fuzz.cfg + validate.cfg 的模块
 if $ALL_MODE; then
     mapfile -t TARGETS < <(
         for d in "$EXP_DIR"/*/; do
@@ -294,7 +336,6 @@ cfg["vm"]["count"] = int(vm_count)
 cfg["vm"]["cpu"]   = int(vm_cpu)
 cfg["vm"]["mem"]   = int(vm_mem)
 cfg["procs"]       = int(procs)
-# validate 模式: 使用独立 workdir 避免 VM 镜像写锁冲突
 if mode == "validate":
     cfg["workdir"] = os.path.join(cfg["workdir"], "validate-run")
     if "experimental" in cfg:
@@ -302,6 +343,7 @@ if mode == "validate":
         uv = exp.get("uaf_validate", {})
         uv["continuous_mode"] = False
         uv["streaming_load"] = True
+        uv["continue_after_hb"] = True
         exp["uaf_validate"] = uv
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=4)
@@ -361,16 +403,19 @@ save_state() {
     echo "$2 $3 $4" > "$STATE_DIR/$1.state"
 }
 
-remove_state() { rm -f "$STATE_DIR/$1.state"; }
+remove_state() {
+    rm -f "$STATE_DIR/$1.state"
+}
 
 load_state() {
-    STATE_IDX="" ; STATE_FUZZ_PID="" ; STATE_VAL_PID=""
+    STATE_IDX=""
+    STATE_FUZZ_PID=""
+    STATE_VAL_PID=""
     [[ -f "$STATE_DIR/$1.state" ]] && \
         read -r STATE_IDX STATE_FUZZ_PID STATE_VAL_PID < "$STATE_DIR/$1.state"
     return 0
 }
 
-# 清理过期 state (进程已死但 state 文件残留)
 purge_stale_states() {
     [[ -d "$STATE_DIR" ]] || return 0
     for f in "$STATE_DIR"/*.state; do
@@ -384,20 +429,22 @@ purge_stale_states() {
     done
 }
 
-# 获取下一个可用的模块索引 (核心槽位)
 next_module_index() {
     purge_stale_states
     local used=()
+
     if [[ -d "$STATE_DIR" ]]; then
         for f in "$STATE_DIR"/*.state; do
             [[ -f "$f" ]] || continue
             used+=($(awk '{print $1}' "$f"))
         done
     fi
+
     local b
     for b in "${BATCH_RESERVED_IDXS[@]+${BATCH_RESERVED_IDXS[@]}}"; do
         used+=("$b")
     done
+
     local i
     for ((i = 0; i < MAX_MODULES; i++)); do
         local found=false
@@ -410,24 +457,21 @@ next_module_index() {
     return 1
 }
 
-# CPU 绑定 (优先 cset, 回退 taskset)
 pin_to_cores() {
     local pid=$1 cores=$2 label=$3
 
+    $NO_PIN && return 0
+
     if $USE_CSET && command -v cset &>/dev/null; then
-        # 先清理同名旧 cpuset
-        cset set -d "$label" &>/dev/null || true
-        # 创建 cpuset 并移动进程
+        cset set -d -s "$label" &>/dev/null || cset set -d -s "/$label" &>/dev/null || true
         if cset set -c "$cores" -s "$label" &>/dev/null; then
             if cset proc -m -p "$pid" -t "$label" &>/dev/null; then
                 return 0
             fi
         fi
-        # cset 创建失败: 移进程到 root cpuset 再用 taskset
         echo "$pid" > /cpusets/tasks 2>/dev/null || true
     fi
 
-    # 回退: taskset
     taskset -p -c "$cores" "$pid" >/dev/null 2>&1 || true
 }
 
@@ -443,7 +487,7 @@ cleanup_all_ddrd_cpusets() {
     while read -r n; do
         [[ -n "$n" ]] || continue
         cleanup_cpuset "$n"
-    done < <(cset set -l 2>/dev/null | awk '$1 ~ /^ddrd-/ {print $1}')
+    done < <(cset set -l -v 2>/dev/null | awk '$1 ~ /^ddrd-/ {print $1}')
 }
 
 # ---------------------------------------------------------------------------
@@ -452,26 +496,30 @@ cleanup_all_ddrd_cpusets() {
 do_start() {
     local slug=$1
 
-    # 冲突检测
     local fp rp
     fp=$(get_exp_fuzz_pid "$slug")
     if [[ -n "$fp" ]]; then
         log_warn "[$slug] fuzz 已在运行 (PID=$fp)"
         return 0
     fi
+
     rp=$(get_any_regular_pid "$slug")
     if [[ -n "$rp" ]]; then
         die "[$slug] 常规 fuzz/validate 正在运行 (PID=$rp), 请先停止"
     fi
 
-    # 分配核心
     local idx
-    idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
-    BATCH_RESERVED_IDXS+=("$idx")
-    calc_cores "$idx"
-    log_info "[$slug] 分配核心: $ALL_CORES"
+    if $NO_PIN; then
+        idx="-1"
+        ALL_CORES="unbound"
+        log_info "[$slug] 不绑定 CPU，直接启动"
+    else
+        idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+        BATCH_RESERVED_IDXS+=("$idx")
+        calc_cores "$idx"
+        log_info "[$slug] 分配核心: $ALL_CORES"
+    fi
 
-    # 生成实验配置
     gen_exp_config "$slug" "fuzz"
 
     local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz${CFG_SUFFIX}.cfg"
@@ -480,11 +528,13 @@ do_start() {
     local ts
     ts=$(date +%Y%m%d-%H%M%S)
 
-    # --- 启动 fuzz ---
     local fuzz_log="$log_dir/exp-fuzz${CFG_SUFFIX}-${ts}.log"
     nohup "$SYZ_MANAGER" -config "$fuzz_cfg" > "$fuzz_log" 2>&1 &
     local fuzz_pid=$!
-    pin_to_cores "$fuzz_pid" "$ALL_CORES" "ddrd-${slug}-fuzz"
+
+    if ! $NO_PIN; then
+        pin_to_cores "$fuzz_pid" "$ALL_CORES" "ddrd-${slug}-fuzz"
+    fi
 
     sleep 2
 
@@ -496,9 +546,7 @@ do_start() {
     save_state "$slug" "$idx" "$fuzz_pid" ""
     log_ok "[$slug] fuzz 已启动  PID=$fuzz_pid  cores=$ALL_CORES"
     if $USE_VANILLA; then
-        log_info "[$slug] fuzz 跑够后运行: sudo $0 --vanilla validate $slug"
-    else
-        log_info "[$slug] fuzz 跑够后运行: sudo $0 validate $slug"
+        log_info "[$slug] fuzz 跑够后运行: sudo $0 --vanilla ${NO_PIN:+} $( $NO_PIN && echo '--no-pin' ) validate $slug" >/dev/null 2>&1 || true
     fi
     return 0
 }
@@ -509,7 +557,6 @@ do_start() {
 do_validate() {
     local slug=$1
 
-    # 检查 validate 是否已在运行
     local vp
     vp=$(get_exp_validate_pid "$slug")
     if [[ -n "$vp" ]]; then
@@ -517,27 +564,29 @@ do_validate() {
         return 0
     fi
 
-    # 检查 corpus 文件是否存在
     local main_workdir="$EXP_DIR/$slug/workdir"
     if [[ ! -f "$main_workdir/uaf-corpus.db" ]]; then
         die "[$slug] corpus 文件不存在: $main_workdir/uaf-corpus.db — 请先运行 fuzz 产生 corpus"
     fi
 
-    # 查找核心分配: 优先复用已有 state (fuzz 在跑时), 否则分配新槽位
     local idx
-    load_state "$slug"
-    if [[ -n "${STATE_IDX:-}" ]]; then
-        idx=$STATE_IDX
+    if $NO_PIN; then
+        idx="-1"
+        ALL_CORES="unbound"
+        log_info "[$slug] validate 不绑定 CPU，直接启动"
     else
-        idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+        load_state "$slug"
+        if [[ -n "${STATE_IDX:-}" ]] && [[ "$STATE_IDX" != "-1" ]]; then
+            idx=$STATE_IDX
+        else
+            idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+        fi
+        calc_cores "$idx"
+        log_info "[$slug] validate 使用核心: $ALL_CORES"
     fi
-    calc_cores "$idx"
-    log_info "[$slug] validate 使用核心: $ALL_CORES"
 
-    # 生成实验配置
     gen_exp_config "$slug" "validate"
 
-    # 准备 validate 独立 workdir (避免 VM 镜像写锁冲突)
     local val_workdir="$main_workdir/validate-run"
     mkdir -p "$val_workdir"
     if [[ ! -e "$val_workdir/uaf-corpus.db" ]]; then
@@ -553,7 +602,10 @@ do_validate() {
 
     nohup "$SYZ_MANAGER" -mode=uaf-validate -config "$val_cfg" > "$val_log" 2>&1 &
     local val_pid=$!
-    pin_to_cores "$val_pid" "$ALL_CORES" "ddrd-${slug}-validate"
+
+    if ! $NO_PIN; then
+        pin_to_cores "$val_pid" "$ALL_CORES" "ddrd-${slug}-validate"
+    fi
 
     sleep 2
 
@@ -562,7 +614,6 @@ do_validate() {
         return 1
     fi
 
-    # 更新 state (保留 fuzz PID 如果有)
     local fp
     fp=$(get_exp_fuzz_pid "$slug")
     save_state "$slug" "$idx" "${fp:-0}" "$val_pid"
@@ -612,6 +663,7 @@ do_status() {
         "MODULE" "FUZZ" "F-PID" "VALIDATE" "V-PID" "CORES"
     printf "%-14s %-9s %-8s %-9s %-8s %-10s\n" \
         "------" "----" "-----" "--------" "-----" "-----"
+
     for d in "$EXP_DIR"/*/; do
         local slug
         slug=$(basename "$d")
@@ -625,8 +677,12 @@ do_status() {
 
         load_state "$slug"
         if [[ -n "${STATE_IDX:-}" ]]; then
-            calc_cores "$STATE_IDX"
-            cores="$ALL_CORES"
+            if [[ "$STATE_IDX" == "-1" ]]; then
+                cores="unbound"
+            else
+                calc_cores "$STATE_IDX"
+                cores="$ALL_CORES"
+            fi
         fi
 
         printf "%-14s %-9s %-8s %-9s %-8s %-10s\n" \
@@ -646,7 +702,6 @@ do_clean() {
         die "[$slug] 正在运行, 请先停止: sudo ./scripts/run_experiment.sh stop $slug"
     fi
 
-    # 也检查常规进程
     local rp
     rp=$(get_any_regular_pid "$slug")
     if [[ -n "$rp" ]]; then
@@ -656,18 +711,20 @@ do_clean() {
     local workdir="$EXP_DIR/$slug/workdir"
     local val_workdir="$workdir/validate-run"
     local cnt=0
+
     for f in "$workdir"/uaf-corpus.db "$workdir"/*-uaf-corpus.db; do
         [[ -f "$f" ]] || continue
         rm -f "$f"
         log_ok "[$slug] 已删除 $(basename "$f")"
         ((cnt++)) || true
     done
-    # 清理 validate-run 子目录
+
     if [[ -d "$val_workdir" ]]; then
         rm -rf "$val_workdir"
         log_ok "[$slug] 已清理 validate-run 目录"
         ((cnt++)) || true
     fi
+
     if (( cnt == 0 )); then
         log_warn "[$slug] workdir 中无 uaf corpus 文件"
     fi
@@ -707,18 +764,63 @@ do_clean_log() {
 }
 
 # ---------------------------------------------------------------------------
+# clean-validate — 清除 validate 相关数据库文件 (保留 uaf corpus)
+# ---------------------------------------------------------------------------
+do_clean_validate() {
+    local slug=$1
+    local fp vp
+    fp=$(get_exp_fuzz_pid "$slug")
+    vp=$(get_exp_validate_pid "$slug")
+    if [[ -n "$fp" ]] || [[ -n "$vp" ]]; then
+        die "[$slug] 正在运行, 请先停止: sudo ./scripts/run_experiment.sh stop $slug"
+    fi
+
+    local workdir="$EXP_DIR/$slug/workdir"
+    local val_workdir="$workdir/validate-run"
+    local cnt=0
+
+    local db_files=(
+        "invalid_uaf.db"
+        "validated_uaf.db"
+        "varname_hb_stats.db"
+    )
+
+    for dir in "$workdir" "$val_workdir"; do
+        [[ -d "$dir" ]] || continue
+        for dbf in "${db_files[@]}"; do
+            if [[ -f "$dir/$dbf" ]]; then
+                rm -f "$dir/$dbf"
+                log_ok "[$slug] 已删除 $dir/$dbf"
+                ((cnt++)) || true
+            fi
+        done
+    done
+
+    if [[ -d "$val_workdir" ]]; then
+        rm -rf "$val_workdir"
+        log_ok "[$slug] 已清理 validate-run 目录"
+        ((cnt++)) || true
+    fi
+
+    if (( cnt == 0 )); then
+        log_warn "[$slug] 无 validate 数据可清理"
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # log — 查看实验日志
 # ---------------------------------------------------------------------------
 do_log() {
     local slug=$1 mode=${2:-fuzz}
     local log_dir="$EXP_DIR/$slug/logs"
     local latest
+
     latest=$(ls -t "$log_dir"/exp-${mode}${CFG_SUFFIX}-*.log 2>/dev/null | head -1)
     [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/exp-${mode}-*.log 2>/dev/null | head -1)
     [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/exp-${mode}-vanilla-*.log 2>/dev/null | head -1)
-    # 回退到常规日志
     [[ -z "$latest" ]] && latest=$(ls -t "$log_dir"/${mode}-*.log 2>/dev/null | head -1)
     [[ -z "$latest" ]] && die "[$slug] 无 ${mode} 日志"
+
     log_info "查看: $latest"
     tail -f "$latest"
 }
@@ -728,44 +830,76 @@ do_log() {
 # ---------------------------------------------------------------------------
 case "$ACTION" in
     start)
-        ensure_cpuset_layout
-        detect_available_cores
-        MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+        if ! $NO_PIN; then
+            ensure_cpuset_layout
+            detect_available_cores
+            MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+        fi
+
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
         ensure_mode_configs_exist "fuzz"
         BATCH_RESERVED_IDXS=()
-        if (( ${#TARGETS[@]} > MAX_MODULES )); then
+
+        if ! $NO_PIN && (( ${#TARGETS[@]} > MAX_MODULES )); then
             die "模块数 ${#TARGETS[@]} 超过最大 $MAX_MODULES (${AVAIL_CORES} 可用核 ÷ ${CORES_PER_MODULE} 核/模块)"
         fi
+
         if $USE_VANILLA; then
-            log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+            if $NO_PIN; then
+                log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (no CPU pinning)"
+            else
+                log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+            fi
         else
-            log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+            if $NO_PIN; then
+                log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (no CPU pinning)"
+            else
+                log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+            fi
         fi
+
         echo ""
-        for t in "${TARGETS[@]}"; do do_start "$t"; echo ""; done
+        for t in "${TARGETS[@]}"; do
+            do_start "$t"
+            echo ""
+        done
         echo "========================================="
         do_status
         ;;
     validate)
-        ensure_cpuset_layout
-        detect_available_cores
-        MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+        if ! $NO_PIN; then
+            ensure_cpuset_layout
+            detect_available_cores
+            MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+        fi
+
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
         ensure_mode_configs_exist "validate"
+
         if $USE_VANILLA; then
-            log_info "启动 validate(vanilla): ${#TARGETS[@]} 个模块"
+            if $NO_PIN; then
+                log_info "启动 validate(vanilla): ${#TARGETS[@]} 个模块 (no CPU pinning)"
+            else
+                log_info "启动 validate(vanilla): ${#TARGETS[@]} 个模块"
+            fi
         else
-            log_info "启动 validate: ${#TARGETS[@]} 个模块"
+            if $NO_PIN; then
+                log_info "启动 validate: ${#TARGETS[@]} 个模块 (no CPU pinning)"
+            else
+                log_info "启动 validate: ${#TARGETS[@]} 个模块"
+            fi
         fi
+
         echo ""
-        for t in "${TARGETS[@]}"; do do_validate "$t"; echo ""; done
+        for t in "${TARGETS[@]}"; do
+            do_validate "$t"
+            echo ""
+        done
         echo "========================================="
         do_status
         ;;
     stop)
         if [[ ${#TARGETS[@]} -eq 0 ]] && ! $ALL_MODE; then
-            # 自动发现运行中的实验
             for d in "$EXP_DIR"/*/; do
                 slug=$(basename "$d")
                 fp=$(get_exp_fuzz_pid "$slug")
@@ -775,13 +909,17 @@ case "$ACTION" in
                 fi
             done
         fi
+
         if [[ ${#TARGETS[@]} -eq 0 ]]; then
             log_warn "无运行中的实验，尝试清理残留 cpuset"
             cleanup_all_ddrd_cpusets
             maybe_teardown_cpuset_layout
             exit 0
         fi
-        for t in "${TARGETS[@]}"; do do_stop "$t"; done
+
+        for t in "${TARGETS[@]}"; do
+            do_stop "$t"
+        done
         cleanup_all_ddrd_cpusets
         maybe_teardown_cpuset_layout
         ;;
@@ -790,39 +928,59 @@ case "$ACTION" in
         ;;
     clean)
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
-        for t in "${TARGETS[@]}"; do do_clean "$t"; done
+        for t in "${TARGETS[@]}"; do
+            do_clean "$t"
+        done
         ;;
     clean-log)
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
-        for t in "${TARGETS[@]}"; do do_clean_log "$t"; done
+        for t in "${TARGETS[@]}"; do
+            do_clean_log "$t"
+        done
+        ;;
+    clean-validate)
+        [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
+        for t in "${TARGETS[@]}"; do
+            do_clean_validate "$t"
+        done
         ;;
     log)
         [[ ${#TARGETS[@]} -gt 0 ]] || die "用法: $0 log <module> [fuzz|validate]"
         do_log "${TARGETS[0]}" "${TARGETS[1]:-fuzz}"
         ;;
     list)
-        detect_available_cores true
-        MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
         if $USE_VANILLA; then
             echo "可用模块 (有 fuzz-vanilla.cfg + validate-vanilla.cfg):"
         else
             echo "可用模块 (有 fuzz.cfg + validate.cfg):"
         fi
+
         for d in "$EXP_DIR"/*/; do
             slug=$(basename "$d")
             [[ -f "$d/fuzz${CFG_SUFFIX}.cfg" ]] && [[ -f "$d/validate${CFG_SUFFIX}.cfg" ]] && echo "  $slug"
         done
+
         echo ""
-        echo "CPU: 核心 ${AVAIL_DESC} 可用 (${AVAIL_CORES}核), 每模块 ${CORES_PER_MODULE} 核, 最多同时 ${MAX_MODULES} 个模块"
+        if $NO_PIN; then
+            echo "当前模式: no CPU pinning"
+        else
+            detect_available_cores true
+            MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+            echo "CPU: 核心 ${AVAIL_DESC} 可用 (${AVAIL_CORES}核), 每模块 ${CORES_PER_MODULE} 核, 最多同时 ${MAX_MODULES} 个模块"
+        fi
         ;;
     help|--help|-h)
-        sed -n '2,28p' "$0" | sed 's/^# //' | sed 's/^#//'
+        sed -n '2,31p' "$0" | sed 's/^# //' | sed 's/^#//'
         echo ""
-        detect_available_cores true
-        MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
-        echo "当前系统: 核心 ${AVAIL_DESC} 可用 (${AVAIL_CORES}核), 每模块 ${CORES_PER_MODULE} 核, 最多同时 ${MAX_MODULES} 个模块"
+        if $NO_PIN; then
+            echo "当前模式: no CPU pinning"
+        else
+            detect_available_cores true
+            MAX_MODULES=$((AVAIL_CORES / CORES_PER_MODULE))
+            echo "当前系统: 核心 ${AVAIL_DESC} 可用 (${AVAIL_CORES}核), 每模块 ${CORES_PER_MODULE} 核, 最多同时 ${MAX_MODULES} 个模块"
+        fi
         ;;
     *)
-        die "未知命令: $ACTION (start|validate|stop|status|clean|clean-log|log|list|help)"
+        die "未知命令: $ACTION (start|validate|stop|status|clean|clean-log|clean-validate|log|list|help)"
         ;;
 esac

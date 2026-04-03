@@ -109,6 +109,10 @@ type StageManager struct {
 	currentVNIndex int                        // round-robin index
 	vnScheduleCond *sync.Cond                 // condition variable for task availability
 
+	// ContinueAfterHB support: re-test HB-skipped entries after initial pass
+	hbSkippedEntries []*fuzzer.UAFCorpusEntry // entries skipped by shouldSkipEntry during HB phase
+	hbPhaseComplete  bool                     // true after initial HB pass; disables HB skip for re-enqueued entries
+
 	closeOnce sync.Once
 }
 
@@ -611,10 +615,18 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 
 	// Pre-check: if all pairs have high HB confidence, skip entire entry
 	// Skip this check in debug mode (TargetVarNamePair or TargetCorpusKey is set)
-	// Also skip if DisableHBSkip is enabled
-	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableHBSkip {
+	// Also skip if DisableHBSkip is enabled or HB phase is already complete (re-enqueue phase)
+	sm.mu.Lock()
+	hbDone := sm.hbPhaseComplete
+	sm.mu.Unlock()
+	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableHBSkip && !hbDone {
 		if skip, reason := sm.shouldSkipEntry(clone); skip {
 			log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
+			if sm.cfg.ContinueAfterHB {
+				sm.mu.Lock()
+				sm.hbSkippedEntries = append(sm.hbSkippedEntries, clone)
+				sm.mu.Unlock()
+			}
 			return nil
 		}
 	}
@@ -895,10 +907,58 @@ func (sm *StageManager) complete(task *validationTask) {
 
 func (sm *StageManager) maybeCloseTasksLocked() {
 	if sm.closed && !sm.tasksClosed && len(sm.pending) == 0 {
+		// ContinueAfterHB: re-enqueue HB-skipped entries before closing
+		if sm.cfg.ContinueAfterHB && !sm.hbPhaseComplete && len(sm.hbSkippedEntries) > 0 {
+			sm.hbPhaseComplete = true
+			skipped := sm.hbSkippedEntries
+			sm.hbSkippedEntries = nil
+			// Reset closed so prepareTask() and dispatch() accept new entries
+			sm.closed = false
+			log.Logf(0, "uafvalidate: HB phase complete, scheduling %d skipped entries for exhaustive testing", len(skipped))
+			// Wake up VarName workers that may be waiting
+			if sm.vnScheduleCond != nil {
+				sm.vnScheduleCond.Broadcast()
+			}
+			go sm.reEnqueueHBSkipped(skipped)
+			return
+		}
 		log.Logf(0, "uafvalidate: closing tasks channel")
 		close(sm.tasks)
 		sm.tasksClosed = true
 	}
+}
+
+// isHBPhaseComplete returns true if the initial HB-guided pass has completed
+// and we are now in the exhaustive re-testing phase.
+func (sm *StageManager) isHBPhaseComplete() bool {
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	return sm.hbPhaseComplete
+}
+
+// reEnqueueHBSkipped re-enqueues entries that were skipped by entry-level HB check.
+// Entries are shuffled to randomize testing order.
+func (sm *StageManager) reEnqueueHBSkipped(entries []*fuzzer.UAFCorpusEntry) {
+	// Shuffle for random testing order
+	rand.Shuffle(len(entries), func(i, j int) {
+		entries[i], entries[j] = entries[j], entries[i]
+	})
+
+	enqueued := 0
+	for _, entry := range entries {
+		sm.Enqueue(entry)
+		enqueued++
+	}
+	log.Logf(0, "uafvalidate: re-enqueued %d/%d HB-skipped entries for exhaustive testing", enqueued, len(entries))
+
+	// Signal close again — no more entries to enqueue
+	sm.mu.Lock()
+	sm.closed = true
+	sm.maybeCloseTasksLocked()
+	if sm.vnScheduleCond != nil {
+		sm.vnScheduleCond.Broadcast()
+	}
+	sm.mu.Unlock()
 }
 
 // runReplayOnExecutor replays the execution history on a given executor.
@@ -1497,11 +1557,16 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			StopOnSuccess: true,
 		}
 
+		// closeExec returns the VM to the pool. Must not be called until we
+		// are completely done with exec (including any minimize phase).
+		closeExec := func() {
+			if closer, ok := exec.(interface{ Close() error }); ok {
+				closer.Close()
+			}
+		}
+
 		// Use batch execution to run replay + verification in a single RPC session
 		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
-		if closer, ok := exec.(interface{ Close() error }); ok {
-			closer.Close()
-		}
 
 		// Extract crash info
 		crashInfo := ""
@@ -1510,6 +1575,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		if runErr != nil {
+			closeExec()
 			// Log run error with any available crash info
 			if crashInfo != "" {
 				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
@@ -1581,10 +1647,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 				reportPreview = reportPreview[:2000] + "...[truncated]"
 			}
 			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
+			closeExec()
 			continue
 		}
 
 		// ========== Failure: increase HB confidence ==========
+		closeExec()
+
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
 
@@ -1633,9 +1702,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			}
 			log.Logf(1, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
 				i+1, len(stablePairs), vnKey, fullKey)
-		} else if !sm.cfg.DisableHBSkip {
+		} else if !sm.cfg.DisableHBSkip && !sm.isHBPhaseComplete() {
 			// ========== Normal mode: Layer 1 & 2 skip checks ==========
-			// (Skipped when DisableHBSkip is enabled)
+			// (Skipped when DisableHBSkip is enabled or HB phase already complete)
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
 				log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
@@ -1699,11 +1768,16 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			AccessDelayUs: spd.AccessDelayUs,
 		}
 
+		// closeExec returns the VM to the pool. Must not be called until we
+		// are completely done with exec (including any minimize phase).
+		closeExec := func() {
+			if closer, ok := exec.(interface{ Close() error }); ok {
+				closer.Close()
+			}
+		}
+
 		// Use batch execution to run replay + verification in a single RPC session
 		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
-		if closer, ok := exec.(interface{ Close() error }); ok {
-			closer.Close()
-		}
 
 		// Extract crash info
 		crashInfo := ""
@@ -1712,6 +1786,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		if runErr != nil {
+			closeExec()
 			// Log run error with any available crash info
 			if crashInfo != "" {
 				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
@@ -1807,10 +1882,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				reportPreview = reportPreview[:2000] + "...[truncated]"
 			}
 			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
+			closeExec()
 			continue
 		}
 
 		// ========== Failure: increase HB confidence ==========
+		closeExec()
+
 		// In debug mode, only log but don't update databases
 		if debugMode {
 			log.Logf(1, "uafvalidate: [debug mode] FAILED vnkey=%s triggered=0/%d (not updating databases)",

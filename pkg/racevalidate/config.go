@@ -79,6 +79,13 @@ type Config struct {
 	// This is useful when you want to retry entries that were previously skipped.
 	DisableHBSkip bool
 
+	// ContinueAfterHB controls whether to continue testing HB-skipped entries after the
+	// initial HB-guided validation pass completes. When enabled, entries that were skipped
+	// by the HB inference (shouldSkipEntry) are re-enqueued with HB skip disabled, allowing
+	// all pairs to be tested. This is useful for modules with few pairs where HB skipping
+	// causes validation to finish too quickly during long experiments (e.g., 24h runs).
+	ContinueAfterHB bool
+
 	// EnableHistoryMinimization enables replay history minimization after successful validation.
 	// When enabled, after a pair is validated, the system will try to find the minimum
 	// subset of history records required to reproduce the race condition.

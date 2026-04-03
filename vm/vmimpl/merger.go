@@ -57,6 +57,16 @@ func (merger *OutputMerger) AddDecoder(name string, r io.ReadCloser,
 	decoder func(data []byte) (start, size int, decoded []byte)) {
 	merger.wg.Add(1)
 	go func() {
+		defer merger.wg.Done()
+		// Defensive: recover from panic if Output channel is already closed.
+		// This can happen when the VM is returned to the pool while a new
+		// AddDecoder goroutine is still running against a recycled merger.
+		defer func() {
+			if r := recover(); r != nil {
+				// send on closed channel — silently ignore
+			}
+		}()
+
 		var pending []byte
 		var proto []byte
 		var buf [4 << 10]byte
@@ -68,7 +78,12 @@ func (merger *OutputMerger) AddDecoder(name string, r io.ReadCloser,
 					start, size, decoded := decoder(proto)
 					proto = proto[start+size:]
 					if len(decoded) != 0 {
-						merger.Output <- decoded // note: this can block
+						merger.closeMu.Lock()
+						ch := !merger.closed
+						merger.closeMu.Unlock()
+						if ch {
+							merger.Output <- decoded
+						}
 					}
 				}
 				// Remove all carriage returns.
@@ -84,11 +99,16 @@ func (merger *OutputMerger) AddDecoder(name string, r io.ReadCloser,
 						merger.tee.Write(out)
 						merger.teeMu.Unlock()
 					}
-					select {
-					case merger.Output <- append([]byte{}, out...):
-						r := copy(pending, pending[pos+1:])
-						pending = pending[:r]
-					default:
+					merger.closeMu.Lock()
+					ch := !merger.closed
+					merger.closeMu.Unlock()
+					if ch {
+						select {
+						case merger.Output <- append([]byte{}, out...):
+							rc := copy(pending, pending[pos+1:])
+							pending = pending[:rc]
+						default:
+						}
 					}
 				}
 			}
@@ -100,9 +120,14 @@ func (merger *OutputMerger) AddDecoder(name string, r io.ReadCloser,
 						merger.tee.Write(pending)
 						merger.teeMu.Unlock()
 					}
-					select {
-					case merger.Output <- pending:
-					default:
+					merger.closeMu.Lock()
+					ch := !merger.closed
+					merger.closeMu.Unlock()
+					if ch {
+						select {
+						case merger.Output <- pending:
+						default:
+						}
 					}
 				}
 				r.Close()
@@ -110,7 +135,6 @@ func (merger *OutputMerger) AddDecoder(name string, r io.ReadCloser,
 				case merger.Err <- MergerError{name, r, err}:
 				default:
 				}
-				merger.wg.Done()
 				return
 			}
 		}

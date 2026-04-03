@@ -494,6 +494,13 @@ type UAFValidateConfig struct {
 	// accumulated failure statistics.
 	DisableHBSkip bool `json:"disable_hb_skip,omitempty"`
 
+	// ContinueAfterHB continues testing HB-skipped entries after the initial HB-guided
+	// validation pass completes. When enabled, entries that were skipped by HB inference
+	// are re-enqueued (in random order) with HB skip disabled, allowing all pairs to be
+	// tested. This maximizes experiment utilization for modules with few pairs where HB
+	// skipping causes validation to finish too quickly during long experiments (e.g., 24h).
+	ContinueAfterHB bool `json:"continue_after_hb,omitempty"`
+
 	// StreamingLoad enables memory-efficient streaming load for large uaf-corpus.db files.
 	// When enabled, entries are loaded in batches instead of all at once,
 	// preventing OOM errors on large corpora (e.g., > 1GB).

@@ -47,7 +47,7 @@ PREINSTALL_PKGS+=",debian-ports-archive-keyring"
 EXTRA_PKGS="make,g++,cmake,openssl,fio,util-linux"
 
 # 所有需要创建的文件系统类型 (从 modules.conf 中提取有 FS_IMAGE 的)
-ALL_FS_TYPES=(xfs btrfs f2fs jfs ext4)
+ALL_FS_TYPES=(xfs btrfs f2fs jfs ext4 ocfs2)
 DEFAULT_FS_SIZE="2G"
 
 do_import() {
@@ -257,7 +257,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/mount /dev/sdb /mnt/kccwf
+ExecStart=/bin/sh -c "FS=$$(blkid -o value -s TYPE /dev/sdb 2>/dev/null); case $$FS in ocfs2) mount -t ocfs2 -o heartbeat=none /dev/sdb /mnt/kccwf ;; *) mount /dev/sdb /mnt/kccwf ;; esac"
 ExecStop=/usr/bin/umount /mnt/kccwf
 Restart=on-failure
 User=root
@@ -378,7 +378,8 @@ do_create_fs() {
         f2fs)   mkfs_cmd="mkfs.f2fs -f" ;;
         ext4)   mkfs_cmd="mkfs.ext4 -F" ;;
         jfs)    mkfs_cmd="mkfs.jfs -q" ;;
-        *)      die "不支持的文件系统: $fstype (支持: xfs btrfs f2fs jfs ext4)" ;;
+        ocfs2)  mkfs_cmd="mkfs.ocfs2 --force -M local -N 1 -T datafiles" ;;
+        *)      die "不支持的文件系统: $fstype (支持: xfs btrfs f2fs jfs ext4 ocfs2)" ;;
     esac
 
     command -v ${mkfs_cmd%% *} &>/dev/null || \
@@ -560,7 +561,7 @@ After=local-fs.target
 [Service]
 Type=oneshot
 RemainAfterExit=yes
-ExecStart=/usr/bin/mount /dev/sdb /mnt/kccwf
+ExecStart=/bin/sh -c "FS=$$(blkid -o value -s TYPE /dev/sdb 2>/dev/null); case $$FS in ocfs2) mount -t ocfs2 -o heartbeat=none /dev/sdb /mnt/kccwf ;; *) mount /dev/sdb /mnt/kccwf ;; esac"
 ExecStop=/usr/bin/umount /mnt/kccwf
 Restart=on-failure
 User=root
