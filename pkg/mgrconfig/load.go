@@ -159,6 +159,16 @@ func Complete(cfg *Config) error {
 		}
 		cfg.Image = osutil.Abs(cfg.Image)
 	}
+	if cfg.UAFHunter.ArtifactRoot != "" {
+		cfg.UAFHunter.ArtifactRoot = osutil.Abs(cfg.UAFHunter.ArtifactRoot)
+	}
+	if cfg.UAFHunter.SeedProgramDir != "" {
+		if !osutil.IsExist(cfg.UAFHunter.SeedProgramDir) {
+			return fmt.Errorf("bad config param uaf_hunter.seed_program_dir: can't find %v",
+				cfg.UAFHunter.SeedProgramDir)
+		}
+		cfg.UAFHunter.SeedProgramDir = osutil.Abs(cfg.UAFHunter.SeedProgramDir)
+	}
 	if err := cfg.completeBinaries(); err != nil {
 		return err
 	}

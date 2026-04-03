@@ -141,23 +141,43 @@ func readInputs(cfg *mgrconfig.Config, db *db.DB, output chan *input) error {
 			Data: rec.Val,
 		}
 	}
-	seedPath := filepath.Join("sys", cfg.TargetOS, "test")
-	seedDir := filepath.Join(cfg.Syzkaller, seedPath)
-	if osutil.IsExist(seedDir) {
-		seeds, err := os.ReadDir(seedDir)
-		if err != nil {
-			return fmt.Errorf("failed to read seeds dir: %w", err)
+	if err := enqueueSeedDir(
+		inputs,
+		filepath.Join(cfg.Syzkaller, "sys", cfg.TargetOS, "test"),
+		filepath.Join("sys", cfg.TargetOS, "test"),
+	); err != nil {
+		return err
+	}
+	if err := enqueueSeedDir(
+		inputs,
+		cfg.UAFHunter.SeedProgramDir,
+		filepath.Join("uaf_hunter", "seed_program_dir"),
+	); err != nil {
+		return err
+	}
+	return nil
+}
+
+func enqueueSeedDir(inputs chan<- *input, seedDir, logicalPath string) error {
+	if seedDir == "" || !osutil.IsExist(seedDir) {
+		return nil
+	}
+	seeds, err := os.ReadDir(seedDir)
+	if err != nil {
+		return fmt.Errorf("failed to read seeds dir: %w", err)
+	}
+	for _, seed := range seeds {
+		if seed.IsDir() {
+			continue
 		}
-		for _, seed := range seeds {
-			data, err := os.ReadFile(filepath.Join(seedDir, seed.Name()))
-			if err != nil {
-				return fmt.Errorf("failed to read seed %v: %w", seed.Name(), err)
-			}
-			inputs <- &input{
-				IsSeed: true,
-				Path:   filepath.Join(seedPath, seed.Name()),
-				Data:   data,
-			}
+		data, err := os.ReadFile(filepath.Join(seedDir, seed.Name()))
+		if err != nil {
+			return fmt.Errorf("failed to read seed %v: %w", seed.Name(), err)
+		}
+		inputs <- &input{
+			IsSeed: true,
+			Path:   filepath.Join(logicalPath, seed.Name()),
+			Data:   data,
 		}
 	}
 	return nil

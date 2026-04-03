@@ -9,6 +9,20 @@ import (
 	"github.com/google/syzkaller/pkg/asset"
 )
 
+type UAFHunterObservationGate struct {
+	Name                     string   `json:"name"`
+	Description              string   `json:"description,omitempty"`
+	RequiredBeforeValidation bool     `json:"required_before_validation,omitempty"`
+	RequiredProbeIDs         []string `json:"required_probe_ids,omitempty"`
+}
+
+type UAFHunterConfig struct {
+	Target           string                     `json:"target,omitempty"`
+	ArtifactRoot     string                     `json:"artifact_root,omitempty"`
+	SeedProgramDir   string                     `json:"seed_program_dir,omitempty"`
+	ObservationGates []UAFHunterObservationGate `json:"observation_gates,omitempty"`
+}
+
 type Config struct {
 	// Instance name (used for identification and as GCE instance prefix).
 	Name string `json:"name"`
@@ -214,6 +228,10 @@ type Config struct {
 	// VM-type-specific parameters.
 	// Parameters for concrete types are in Config type in vm/TYPE/TYPE.go, e.g. vm/qemu/qemu.go.
 	VM json.RawMessage `json:"vm"`
+
+	// Optional UAF-Hunter specific metadata consumed by downstream wrappers and,
+	// on custom branches, by seed-loading integration.
+	UAFHunter UAFHunterConfig `json:"uaf_hunter,omitempty"`
 
 	// Asset storage configuration. There can be specified the upload location and crash assets
 	// to upload.

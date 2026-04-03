@@ -43,6 +43,57 @@ func TestCanned(t *testing.T) {
 	}
 }
 
+func TestLoadPartialDataAllowsUAFHunterBlock(t *testing.T) {
+	seedDir := t.TempDir()
+	cfg, err := LoadPartialData([]byte(`{
+		"target": "linux/amd64",
+		"uaf_hunter": {
+			"target": "btrfs-qgroup-disable-vs-rescan",
+			"artifact_root": "/tmp/uaf-hunter-artifacts",
+			"seed_program_dir": "` + seedDir + `",
+			"observation_gates": [
+				{
+					"name": "same-filesystem-object-family",
+					"required_probe_ids": ["shared_object:qgroup_rescan_zero_tracking:3970"]
+				}
+			]
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("failed to load config with uaf_hunter block: %v", err)
+	}
+	if cfg.UAFHunter.Target != "btrfs-qgroup-disable-vs-rescan" {
+		t.Fatalf("bad uaf_hunter target: %q", cfg.UAFHunter.Target)
+	}
+	if cfg.UAFHunter.SeedProgramDir != seedDir {
+		t.Fatalf("bad seed_program_dir: %q", cfg.UAFHunter.SeedProgramDir)
+	}
+	if len(cfg.UAFHunter.ObservationGates) != 1 {
+		t.Fatalf("bad observation gate count: %d", len(cfg.UAFHunter.ObservationGates))
+	}
+}
+
+func TestCompleteRejectsMissingUAFHunterSeedDir(t *testing.T) {
+	workdir := t.TempDir()
+	syzkallerDir := t.TempDir()
+	cfg, err := LoadPartialData([]byte(`{
+		"name": "test",
+		"target": "linux/amd64",
+		"workdir": "` + workdir + `",
+		"syzkaller": "` + syzkallerDir + `",
+		"type": "none",
+		"uaf_hunter": {
+			"seed_program_dir": "/tmp/does-not-exist-uaf-hunter"
+		}
+	}`))
+	if err != nil {
+		t.Fatalf("failed to load partial data: %v", err)
+	}
+	if err := Complete(cfg); err == nil {
+		t.Fatalf("expected Complete to reject missing uaf_hunter.seed_program_dir")
+	}
+}
+
 func TestMatchSyscall(t *testing.T) {
 	tests := []struct {
 		pattern string
