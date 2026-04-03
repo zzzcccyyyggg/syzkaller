@@ -91,6 +91,14 @@ type UAFCorpusEntry struct {
 	// ReplayHistory contains the execution history leading up to this pair's discovery.
 	// This is used during validation to replay the system state before testing.
 	ReplayHistory []*BarrierExecutionRecord
+
+	// AsyncMode indicates this entry uses intra-process async execution instead of
+	// cross-process barrier mode. The single Prog contains calls marked with Props.Async
+	// that will run concurrently in the same process (shared fd table).
+	AsyncMode bool
+	// AsyncRaceCalls identifies the two call indices in Prog that race against each other.
+	// Only meaningful when AsyncMode is true.
+	AsyncRaceCalls [2]int
 }
 
 // BarrierSnapshot records the barrier configuration used when discovering a UAF pair.

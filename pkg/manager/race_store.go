@@ -35,6 +35,10 @@ type storedUAFCorpusEntry struct {
 	ReplayHistory []storedBarrierRecord  `json:"replay_history,omitempty"`
 	Timestamp     time.Time              `json:"timestamp"`
 	Source        int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
+
+	// AsyncMode entries use intra-process threaded execution instead of cross-process barrier.
+	AsyncMode      bool   `json:"async_mode,omitempty"`
+	AsyncRaceCalls [2]int `json:"async_race_calls,omitempty"`
 }
 
 type storedReplayPlan struct {
@@ -208,12 +212,14 @@ func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) 
 
 func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	stored := storedUAFCorpusEntry{
-		CallIdx:   entry.CallIdx,
-		Pair:      entry.PairBasicInfo,
-		Signals:   entry.SignalsSlice(),
-		Barrier:   entry.Barrier,
-		Timestamp: entry.Timestamp,
-		Source:    int(entry.Source),
+		CallIdx:        entry.CallIdx,
+		Pair:           entry.PairBasicInfo,
+		Signals:        entry.SignalsSlice(),
+		Barrier:        entry.Barrier,
+		Timestamp:      entry.Timestamp,
+		Source:         int(entry.Source),
+		AsyncMode:      entry.AsyncMode,
+		AsyncRaceCalls: entry.AsyncRaceCalls,
 	}
 	if len(entry.Pairs) != 0 {
 		stored.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
@@ -313,12 +319,14 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		return nil, err
 	}
 	entry := &fuzzer.UAFCorpusEntry{
-		CallIdx:       stored.CallIdx,
-		PairBasicInfo: stored.Pair,
-		Signals:       sliceToSignal(stored.Signals),
-		Barrier:       stored.Barrier,
-		Timestamp:     stored.Timestamp,
-		Source:        fuzzer.PairSource(stored.Source),
+		CallIdx:        stored.CallIdx,
+		PairBasicInfo:  stored.Pair,
+		Signals:        sliceToSignal(stored.Signals),
+		Barrier:        stored.Barrier,
+		Timestamp:      stored.Timestamp,
+		Source:         fuzzer.PairSource(stored.Source),
+		AsyncMode:      stored.AsyncMode,
+		AsyncRaceCalls: stored.AsyncRaceCalls,
 	}
 	if len(stored.Pairs) != 0 {
 		entry.Pairs = make([]*ddrd.MayUAFPair, 0, len(stored.Pairs))

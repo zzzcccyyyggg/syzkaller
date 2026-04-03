@@ -584,6 +584,9 @@ func (e *ExecutorAdapter) requiresBarrier(entry *fuzzer.UAFCorpusEntry) bool {
 	if entry == nil {
 		return false
 	}
+	if entry.AsyncMode {
+		return false
+	}
 	if bits.OnesCount64(entry.Barrier.Participants) >= 2 {
 		return true
 	}
@@ -591,6 +594,11 @@ func (e *ExecutorAdapter) requiresBarrier(entry *fuzzer.UAFCorpusEntry) bool {
 		return true
 	}
 	return len(entry.Programs) >= 2
+}
+
+// isAsyncMode returns true if the entry uses intra-process async execution.
+func (e *ExecutorAdapter) isAsyncMode(entry *fuzzer.UAFCorpusEntry) bool {
+	return entry != nil && entry.AsyncMode
 }
 
 func (e *ExecutorAdapter) Close() error {
@@ -972,32 +980,38 @@ func (e *ExecutorAdapter) RunBatch(ctx context.Context, reqs []*ExecutionRequest
 		return nil, nil
 	}
 
-	// Check if all requests require barrier mode
+	// Classify requests
 	allBarrier := true
+	allAsync := true
 	for _, req := range reqs {
 		if req == nil || req.Entry == nil {
 			continue
 		}
 		if !e.requiresBarrier(req.Entry) {
 			allBarrier = false
-			break
+		}
+		if !e.isAsyncMode(req.Entry) {
+			allAsync = false
 		}
 	}
 
-	// For simplicity, if any request doesn't require barrier, fall back to sequential Run
-	if !allBarrier {
-		results := make([]*ExecutionResult, len(reqs))
-		for i, req := range reqs {
-			res, err := e.Run(ctx, req)
-			if err != nil {
-				return results, err
-			}
-			results[i] = res
-		}
-		return results, nil
+	if allBarrier {
+		return e.runBarrierBatch(ctx, reqs)
+	}
+	if allAsync {
+		return e.runAsyncBatch(ctx, reqs)
 	}
 
-	return e.runBarrierBatch(ctx, reqs)
+	// Mixed or single-program mode: fall back to sequential Run
+	results := make([]*ExecutionResult, len(reqs))
+	for i, req := range reqs {
+		res, err := e.Run(ctx, req)
+		if err != nil {
+			return results, err
+		}
+		results[i] = res
+	}
+	return results, nil
 }
 
 // runBarrierBatch executes multiple barrier requests in a single RPC session.
@@ -1304,6 +1318,332 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 
 	log.Logf(0, "uafvalidate: vm=%d batch completed %d requests in %s", vmIndex, len(results), time.Since(start))
 	return results, nil
+}
+
+// runAsyncBatch executes multiple async (intra-process) requests in a single RPC session.
+// Unlike runBarrierBatch, this mode:
+// - Does NOT use barrier synchronization (single process, not two)
+// - Keeps ExecFlagThreaded enabled so async calls run on separate threads
+// - Each program already has CallProps.Async=true on the racing calls
+func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	if len(reqs) == 0 {
+		return nil, nil
+	}
+
+	defer func() {
+		if e.inst != nil && e.inst.VMInstance != nil {
+			e.inst.VMInstance.ResetForwardPort()
+		}
+	}()
+
+	vmIndex := -1
+	if e.inst.VMInstance != nil {
+		vmIndex = e.inst.VMInstance.Index()
+	}
+
+	mgrCfg := e.inst.ManagerConfig()
+	if mgrCfg == nil {
+		return nil, fmt.Errorf("missing manager configuration for execprog instance")
+	}
+	cfgCopy := *mgrCfg
+
+	executorBin := e.inst.ExecutorBinary()
+	if executorBin == "" {
+		return nil, fmt.Errorf("executor binary path is empty")
+	}
+	reporter := e.inst.Reporter()
+	if reporter == nil {
+		return nil, fmt.Errorf("execprog reporter is not configured")
+	}
+
+	// Build queue requests for all async execution requests
+	queueReqs := make([]*queue.Request, 0, len(reqs))
+	for i, execReq := range reqs {
+		if execReq == nil || execReq.Entry == nil {
+			continue
+		}
+		entry := execReq.Entry
+		if entry.Prog == nil {
+			continue
+		}
+
+		// Ensure the racing calls have Async=true
+		p := entry.Prog.Clone()
+		for _, callIdx := range entry.AsyncRaceCalls {
+			if callIdx >= 0 && callIdx < len(p.Calls) {
+				p.Calls[callIdx].Props.Async = true
+			}
+		}
+
+		request := &queue.Request{
+			Prog:             p,
+			Stat:             stat.New(fmt.Sprintf("async-batch-%d", i), "", stat.NoGraph),
+			ExecOpts:         flatrpc.ExecOpts{},
+			ReturnOutput:     true,
+			ReturnError:      true,
+			DisableDdrd:      execReq.DisableDdrd,
+			IsValidationMode: true,
+		}
+
+		if execReq.TargetPair != nil {
+			request.UkcPair = execReq.TargetPair
+		}
+
+		queueReqs = append(queueReqs, request)
+	}
+
+	if len(queueReqs) == 0 {
+		return nil, fmt.Errorf("no valid async requests in batch")
+	}
+
+	log.Logf(0, "uafvalidate: vm=%d executing batch of %d async requests", vmIndex, len(queueReqs))
+
+	// Create async request manager (keeps ExecFlagThreaded set)
+	manager := newAsyncRequestManager(&cfgCopy, queueReqs, e.cfg.Debug, e.cfg)
+
+	serv, err := rpcserver.New(&rpcserver.RemoteConfig{
+		Config:  &cfgCopy,
+		Manager: manager,
+		Stats:   rpcserver.NewNamedStats("uaf-validate-async"),
+		Debug:   e.cfg.Debug,
+	})
+	if err != nil {
+		return nil, fmt.Errorf("create rpc server: %w", err)
+	}
+	defer serv.Close()
+
+	if err := serv.Listen(); err != nil {
+		return nil, fmt.Errorf("listen rpc server: %w", err)
+	}
+
+	addr, err := e.inst.VMInstance.Forward(serv.Port())
+	if err != nil {
+		return nil, fmt.Errorf("forward runner port: %w", err)
+	}
+	host, portStr, err := net.SplitHostPort(addr)
+	if err != nil {
+		return nil, fmt.Errorf("split forwarded address: %w", err)
+	}
+
+	command := fmt.Sprintf("%s runner 0 %s %s", executorBin, host, portStr)
+
+	ctx, cancel := context.WithTimeout(parentCtx, e.cfg.ExecutionTimeout*time.Duration(len(queueReqs)+1))
+	defer cancel()
+
+	serveCtx, serveCancel := context.WithCancel(ctx)
+	serveErrCh := make(chan error, 1)
+	go func() {
+		serveErrCh <- serv.Serve(serveCtx)
+	}()
+	defer serveCancel()
+
+	connErr := serv.CreateInstance(0, nil, nil)
+	defer func() {
+		serv.StopFuzzing(0)
+		serv.ShutdownInstance(0, false)
+	}()
+
+	start := time.Now()
+	runCtx, runCancel := context.WithCancel(ctx)
+	defer runCancel()
+
+	type runOutcome struct {
+		output  []byte
+		reports []*report.Report
+		err     error
+	}
+	runOutcomeCh := make(chan runOutcome, 1)
+	go func() {
+		output, reports, runErr := e.inst.VMInstance.Run(runCtx, reporter, command,
+			vm.WithExitCondition(vm.ExitNormal|vm.ExitError|vm.ExitTimeout))
+		runOutcomeCh <- runOutcome{output: output, reports: reports, err: runErr}
+	}()
+
+	// Collect results
+	results := make([]*ExecutionResult, len(queueReqs))
+	resultIdx := 0
+
+	resCh := make(chan *queue.Result, len(queueReqs))
+	for i := range queueReqs {
+		queueReqs[i].OnDone(func(_ *queue.Request, res *queue.Result) bool {
+			select {
+			case resCh <- res:
+			default:
+			}
+			return true
+		})
+	}
+
+	haveOutcome := false
+	var finalOutcome runOutcome
+
+	for resultIdx < len(queueReqs) || !haveOutcome {
+		select {
+		case res := <-resCh:
+			if resultIdx < len(results) {
+				results[resultIdx] = &ExecutionResult{
+					Output:   append([]byte{}, res.Output...),
+					Duration: time.Since(start),
+				}
+				if res.Ddrd != nil {
+					results[resultIdx].Ddrd = res.Ddrd.Clone()
+				}
+				switch res.Status {
+				case queue.Crashed, queue.ExecFailure, queue.Hanged:
+					results[resultIdx].Crashed = true
+					if res.Err != nil {
+						results[resultIdx].CrashTitle = res.Err.Error()
+					}
+				}
+
+				if resultIdx < len(reqs) && reqs[resultIdx].TargetPair != nil && res.Ddrd != nil {
+					target := reqs[resultIdx].TargetPair
+					for _, pair := range res.Ddrd.UAFPairs {
+						if pair.FreeAccessName == target.FreeAccessName &&
+							pair.UseAccessName == target.UseAccessName &&
+							pair.FreeCallStack == target.FreeCallStack &&
+							pair.UseCallStack == target.UseCallStack {
+							results[resultIdx].TriggeredCount++
+							break
+						}
+					}
+				}
+			}
+			resultIdx++
+			if resultIdx >= len(queueReqs) {
+				runCancel()
+			}
+
+		case outcome := <-runOutcomeCh:
+			finalOutcome = outcome
+			haveOutcome = true
+			if outcome.err != nil && !errors.Is(outcome.err, context.Canceled) {
+				log.Logf(0, "uafvalidate: vm=%d async batch run error: %v", vmIndex, outcome.err)
+			}
+			for i := resultIdx; i < len(results); i++ {
+				results[i] = &ExecutionResult{
+					Output:   outcome.output,
+					Duration: time.Since(start),
+					Crashed:  len(outcome.reports) > 0,
+				}
+				if len(outcome.reports) > 0 && outcome.reports[0] != nil {
+					results[i].CrashTitle = outcome.reports[0].Title
+					results[i].CrashReport = cloneReportBody(outcome.reports[0])
+
+					if i < len(reqs) && reqs[i].TargetPair != nil {
+						if matches := crashMatchesTargetPair(outcome.reports, reqs[i].TargetPair); matches > 0 {
+							results[i].TriggeredCount = matches
+						}
+					}
+				}
+			}
+			if resultIdx < len(queueReqs) {
+				log.Logf(0, "uafvalidate: vm=%d async exited early after %d/%d requests", vmIndex, resultIdx, len(queueReqs))
+				resultIdx = len(queueReqs)
+			}
+
+		case <-ctx.Done():
+			for i := resultIdx; i < len(results); i++ {
+				results[i] = &ExecutionResult{
+					Duration: time.Since(start),
+					Crashed:  true,
+				}
+			}
+			resultIdx = len(queueReqs)
+			if !haveOutcome {
+				select {
+				case outcome := <-runOutcomeCh:
+					finalOutcome = outcome
+					haveOutcome = true
+				case <-time.After(5 * time.Second):
+					haveOutcome = true
+				}
+			}
+
+		case err := <-connErr:
+			if err != nil {
+				log.Logf(0, "uafvalidate: vm=%d async batch connection error: %v", vmIndex, err)
+			}
+		}
+	}
+
+	if haveOutcome && len(finalOutcome.reports) > 0 {
+		for i := range results {
+			if results[i] == nil {
+				continue
+			}
+			if !results[i].Crashed && finalOutcome.reports[0] != nil {
+				results[i].Crashed = true
+				results[i].CrashTitle = finalOutcome.reports[0].Title
+				results[i].CrashReport = cloneReportBody(finalOutcome.reports[0])
+				results[i].Output = finalOutcome.output
+			}
+			if i < len(reqs) && reqs[i].TargetPair != nil && results[i].TriggeredCount == 0 {
+				if matches := crashMatchesTargetPair(finalOutcome.reports, reqs[i].TargetPair); matches > 0 {
+					results[i].TriggeredCount = matches
+				}
+			}
+		}
+	}
+
+	log.Logf(0, "uafvalidate: vm=%d async batch completed %d requests in %s", vmIndex, len(results), time.Since(start))
+	return results, nil
+}
+
+// asyncRequestManager manages async (intra-process) requests.
+// Unlike multiRequestManager, it keeps ExecFlagThreaded enabled.
+type asyncRequestManager struct {
+	cfg      *mgrconfig.Config
+	requests []*queue.Request
+	debug    bool
+	valCfg   Config
+	mu       sync.Mutex
+	idx      int
+}
+
+func newAsyncRequestManager(cfg *mgrconfig.Config, requests []*queue.Request, debug bool, valCfg Config) *asyncRequestManager {
+	return &asyncRequestManager{
+		cfg:      cfg,
+		requests: requests,
+		debug:    debug,
+		valCfg:   valCfg,
+	}
+}
+
+func (m *asyncRequestManager) MaxSignal() signal.Signal { return nil }
+
+func (m *asyncRequestManager) BugFrames() ([]string, []string) { return nil, nil }
+
+func (m *asyncRequestManager) CoverageFilter(_ []*vminfo.KernelModule) ([]uint64, error) {
+	return nil, nil
+}
+
+// MachineChecked keeps ExecFlagThreaded enabled so that async calls
+// run concurrently on separate threads within the same executor process.
+func (m *asyncRequestManager) MachineChecked(features flatrpc.Feature, syscalls map[*prog.Syscall]bool) (queue.Source, error) {
+	if len(syscalls) == 0 {
+		return nil, fmt.Errorf("all system calls are disabled")
+	}
+	opts := fuzzer.DefaultExecOpts(m.cfg, features, m.debug)
+	// Key difference from multiRequestManager: do NOT clear ExecFlagThreaded
+	// This ensures the executor runs async-marked calls on separate threads.
+	// Enable DDRD collection for async mode (no barrier, so runner won't set it).
+	opts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+
+	source := queue.Callback(func() *queue.Request {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		if m.idx >= len(m.requests) {
+			return nil
+		}
+		req := m.requests[m.idx]
+		m.idx++
+		if m.debug {
+			log.Logf(0, "uafvalidate: async batch serving request %d/%d", m.idx, len(m.requests))
+		}
+		return req
+	})
+	return queue.DefaultOpts(source, opts), nil
 }
 
 // multiRequestManager manages a queue of requests for batch execution.

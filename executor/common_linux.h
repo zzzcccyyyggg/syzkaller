@@ -2682,6 +2682,8 @@ struct hci_ev_cmd_complete {
 
 #define HCI_OP_WRITE_SCAN_ENABLE 0x0c1a
 
+#define HCI_OP_READ_LOCAL_VERSION 0x1001
+#define HCI_OP_READ_LOCAL_COMMANDS 0x1002
 #define HCI_OP_READ_BUFFER_SIZE 0x1005
 struct hci_rp_read_buffer_size {
 	uint8 status;
@@ -2818,6 +2820,22 @@ static bool process_command_pkt(int fd, char* buf, ssize_t buf_size)
 		hci_send_event_cmd_complete(fd, hdr->opcode, &status, sizeof(status));
 		return true;
 	}
+	case HCI_OP_READ_LOCAL_VERSION: {
+		// Return hci_ver >= BLUETOOTH_VER_1_2 (2) so kernel sends
+		// READ_LOCAL_COMMANDS during init.
+		struct {
+			uint8 status;
+			uint8 hci_ver;
+			uint16 hci_rev;
+			uint8 lmp_ver;
+			uint16 manufacturer;
+			uint16 lmp_subver;
+		} __attribute__((packed)) rp = {0};
+		rp.hci_ver = 0x09;   // Bluetooth 5.0
+		rp.lmp_ver = 0x09;
+		hci_send_event_cmd_complete(fd, hdr->opcode, &rp, sizeof(rp));
+		return false;
+	}
 	case HCI_OP_READ_BD_ADDR: {
 		struct hci_rp_read_bd_addr rp = {0};
 		rp.status = 0;
@@ -2833,6 +2851,16 @@ static bool process_command_pkt(int fd, char* buf, ssize_t buf_size)
 		rp.acl_max_pkt = 4;
 		rp.sco_max_pkt = 6;
 		hci_send_event_cmd_complete(fd, hdr->opcode, &rp, sizeof(rp));
+		return false;
+	}
+	case HCI_OP_READ_LOCAL_COMMANDS: {
+		// 1 byte status + 64 bytes supported commands bitmap.
+		// Set commands[9] bit 2 = Read Voice Setting supported,
+		// so the kernel does not zero out sco_pkts.
+		char rp[65] = {0};
+		rp[0] = 0; // status
+		rp[1 + 9] = 0x04; // commands[9] |= 0x04
+		hci_send_event_cmd_complete(fd, hdr->opcode, rp, sizeof(rp));
 		return false;
 	}
 	}

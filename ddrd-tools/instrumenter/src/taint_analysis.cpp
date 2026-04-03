@@ -22,6 +22,11 @@ void TaintAnalysis::traversePath(BasicBlock *BB, std::set<Value *> &var_set)
     bb_2_var_set_hash[BB].insert(hashSet(var_set));
     visitedBlocks.insert(BB);
     currentPath.push_back(BB);
+
+    // 使用局部变量跟踪当前基本块添加的 taint 值
+    // 修复：原来使用类成员 var_set_each_path 会被子树的 clear() 误删
+    std::set<Value *> local_added;
+
     for (auto &I : *BB)
     {
         Value *resVal = nullptr;
@@ -55,7 +60,7 @@ void TaintAnalysis::traversePath(BasicBlock *BB, std::set<Value *> &var_set)
         {
             if (!var_set.count(resVal)){
                 var_set.insert(resVal);
-                var_set_each_path.insert(resVal);
+                local_added.insert(resVal);
             }
         }
 
@@ -72,10 +77,10 @@ void TaintAnalysis::traversePath(BasicBlock *BB, std::set<Value *> &var_set)
         traversePath(Succ, var_set);
     }
 
-    for (auto Val : var_set_each_path){
+    // 仅清理当前基本块添加的 taint 值，不影响其他层级
+    for (auto Val : local_added){
         var_set.erase(Val);
     }
-    var_set_each_path.clear();
     currentPath.pop_back();
     // visitedBlocks.erase(BB);
 } 
