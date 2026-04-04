@@ -561,7 +561,7 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 		)
 	}
 	if inst.cfg.Kernel != "" {
-		cmdline := append([]string{}, inst.archConfig.CmdLine...)
+		cmdline := mergeKernelCmdline(inst.archConfig.CmdLine, inst.cfg.Cmdline)
 		if inst.image == "9p" {
 			cmdline = append(cmdline,
 				"root=/dev/root",
@@ -570,7 +570,6 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 				"init="+filepath.Join(inst.workdir, "init.sh"),
 			)
 		}
-		cmdline = append(cmdline, inst.cfg.Cmdline)
 		args = append(args,
 			"-kernel", inst.cfg.Kernel,
 			"-append", strings.Join(cmdline, " "),
@@ -599,6 +598,38 @@ func (inst *instance) buildQemuArgs() ([]string, error) {
 		args = append(args, snapshotArgs...)
 	}
 	return args, nil
+}
+
+func mergeKernelCmdline(defaults []string, extra string) []string {
+	cmdline := append([]string{}, defaults...)
+	if extra == "" {
+		return cmdline
+	}
+	extraFields := strings.Fields(extra)
+	if hasCmdlinePrefix(extraFields, "root=") {
+		cmdline = filterCmdlinePrefix(cmdline, "root=")
+	}
+	return append(cmdline, extraFields...)
+}
+
+func hasCmdlinePrefix(items []string, prefix string) bool {
+	for _, item := range items {
+		if strings.HasPrefix(item, prefix) {
+			return true
+		}
+	}
+	return false
+}
+
+func filterCmdlinePrefix(items []string, prefix string) []string {
+	filtered := items[:0]
+	for _, item := range items {
+		if strings.HasPrefix(item, prefix) {
+			continue
+		}
+		filtered = append(filtered, item)
+	}
+	return filtered
 }
 
 // "vfio-pci,host=BN:DN.{{FN%8}},addr=0x11".
