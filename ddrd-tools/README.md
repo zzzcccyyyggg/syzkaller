@@ -29,6 +29,9 @@ ddrd-tools/
 │   └── ...
 ├── build/                           # [.gitignore] cmake 构建输出
 │   └── bin/instrumenter             # [编译产物] LLVM IR 插桩器
+├── report-analyzer/                 # VarName/hash → IR/源码位置 反查工具
+│   ├── CMakeLists.txt               # CMake 构建配置
+│   └── main.cpp                     # 分析器实现
 └── .gitignore
 ```
 
@@ -49,6 +52,9 @@ make build-tools
 # 仅编译 instrumenter (需要 LLVM 18)
 ./scripts/build_ddrd_tools.sh instrumenter
 
+# 仅编译 report-analyzer
+./scripts/build_ddrd_tools.sh analyzer
+
 # 检查工具链状态
 ./scripts/build_ddrd_tools.sh check
 
@@ -61,8 +67,8 @@ make build-tools
 | 依赖 | 用途 | 版本要求 |
 |------|------|----------|
 | g++ | 编译 kernel_compiler, ddrace-cc | C++14 |
-| LLVM | instrumenter 的链接库 | 18.x |
-| CMake | 构建 instrumenter | ≥ 3.5 |
+| LLVM | instrumenter / report-analyzer 的链接库 | 18.x |
+| CMake | 构建 instrumenter / report-analyzer | ≥ 3.5 |
 | clang-18 | 内核编译 (被 wrapper 调用) | 18.x |
 
 ## 工作原理
@@ -139,7 +145,32 @@ instrumenter input.ll [选项]
 
 **内核编译时默认启用:** `-f -v --free -l LockFunc.txt`
 
-#### 4. `instrumentation_targets.conf`
+#### 4. `report-analyzer`
+
+用于把 validated report 中的 VarName/hash 反查回插桩 IR 中的真实访问点，并输出对应的源码调试信息链。
+
+示例：
+
+```bash
+# 在整个 bluetooth IR 目录中搜索一个或多个 VarName/hash
+ddrd-tools/build/report-analyzer/bin/report-analyzer \
+  kernels/builds/x86/net/bluetooth \
+  7350912627818033108 7350948080608836155
+
+# 直接分析单个 instrumented.ll 文件
+ddrd-tools/build/report-analyzer/bin/report-analyzer \
+  kernels/builds/x86/net/bluetooth/sco.instrumented.ll \
+  7350912627818033108
+```
+
+输出包含：
+- 命中的 `.instrumented.ll` 文件
+- 所在 LLVM 函数
+- 命中的插桩调用 (`kccwf_rec_mem_access` / `kccwf_rec_free`)
+- 访问类型（read/write/free）
+- DebugLoc 对应的源码文件、行号和内联链
+
+#### 5. `instrumentation_targets.conf`
 
 控制哪些内核源文件需要插桩。每行一个路径模式：
 
@@ -154,7 +185,7 @@ drivers/block/floppy.c
 
 此文件由 `build_kernel.sh` 在编译不同模块时动态写入，无需手动编辑。
 
-#### 5. `ddrace-cc` / `ddrace-cxx` (用户态)
+#### 6. `ddrace-cc` / `ddrace-cxx` (用户态)
 
 用于用户态程序的数据竞争检测编译器：
 
