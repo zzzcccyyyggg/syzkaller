@@ -114,7 +114,7 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {
     // Convert threshold from microseconds to nanoseconds
-    // If threshold_us is 0, use default 2ms threshold
+    // If threshold_us is 0, use the default 10ms threshold
     const uint64_t TIME_THRESHOLD = (threshold_us > 0) ? (threshold_us * 1000) : DEFAULT_TIME_THRESHOLD_NS;
     const uint64_t FAST_THRESHOLD = TIME_THRESHOLD; // Use same threshold for W-W pairs
     int pair_count = 0;
@@ -206,7 +206,7 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
     return pair_count;
 }
 
-// Backward-compatible wrapper: uses default 2ms threshold
+// Backward-compatible wrapper: uses the default 10ms threshold
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs)
 {
     return access_context_analyze_race_pairs_with_threshold(record_ctx, pairs, max_pairs, 0);

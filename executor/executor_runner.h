@@ -1151,7 +1151,7 @@ private:
 	bool warned_unavailable_;
 	bool extended_requested_;
 	bool active_for_group_;
-	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 2ms)
+	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 10ms)
 	DdrdOutputState output_;
 };
 #endif // GOOS_linux
