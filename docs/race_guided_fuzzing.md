@@ -30,7 +30,7 @@
 │   Partner Selection: 随机选择 + Clone                                    │
 │                             │                                            │
 │                             ▼                                            │
-│   Object Linking V2: syscall 同型资源统一                                 │
+│   Object Linking V2: 两层对象对齐（同名匹配 + 同族跨syscall匹配）          │
 │                             │                                            │
 │                             ▼                                            │
 │   Barrier 执行 (prog1 || prog2)                                           │
@@ -59,11 +59,51 @@
 | RacePriorIndex | 历史 race 组合记录 | M1' 移除后不再需要 |
 | ShareScore | Namespace 评分 | 未被实际使用 |
 
-## Object Linking V2
+## Object Linking V2（资源感知对象对齐）
 
-**目标**：提高共享内核对象的概率。
+**目标**：在并发执行前，提高两个程序共同触达同一内核对象的概率。
 
-做法：对 prog2 中与 prog1 同类型 syscall 的资源参数进行统一（如路径字符串），避免路径匹配带来的脆弱性。
+### 核心机制
+
+系统从 prog1 中提取决定"操作哪个对象"的关键参数（路径、socket 地址等），
+然后在 prog2 中找到语义兼容的位置并对齐，使两个程序指向同一底层对象。
+
+对齐分两层执行（Tier 1 优先）：
+
+| 层级 | 匹配方式 | 示例 |
+|-----|---------|------|
+| Tier 1 | 同名精确匹配 | `open$kccwf` ↔ `open$kccwf` |
+| Tier 2 | 同族跨 syscall 匹配 | `open$kccwf` ↔ `stat$kccwf`（同属 `kccwf_file` 族） |
+
+### 对象族（Object Family）
+
+每个对象族定义了一组共享同类内核对象的 syscall 及其对象标识参数位置：
+
+| 族 | 成员示例 | 对象标识 | 参数位置 |
+|---|---------|---------|--------|
+| `kccwf_file` | open, stat, chmod, truncate, unlink, rename, link, ... `$kccwf` | 绝对路径 `/mnt/kccwf/testfile#` | arg[0] |
+| `kccwf_file_rel` | openat, faccessat, fchmodat, unlinkat, ... `$kccwf` | 相对路径 `testfile#`（依赖 dirfd） | arg[1] |
+| `kccwf_dir` | mkdir, rmdir, open$kccwf_dir | 目录路径 | arg[0] |
+| `bt_sco/l2cap/rfcomm` | bind/connect `$bt_*` | 蓝牙地址结构体 | arg[1] |
+| `unix_sock` | bind/connect `$unix` | UNIX socket 路径 | arg[1] |
+| `floppy` | `syz_open_dev$floppy` | 设备路径 `/dev/fd#` | arg[0] |
+
+`kccwf_file` 和 `kccwf_file_rel` 是独立族，不会互相对齐（绝对路径 vs 相对路径语义不同）。
+
+### 安全过滤
+
+以下情况会跳过对齐：
+
+- **dirfd 依赖**：未注册族的 `*at` 类 syscall（openat、mkdirat 等）在 fallback 路径中被 `isUnsafeAlignment` 拦截
+- **特殊路径前缀**：`/proc/self/`、`/proc/thread-self/`、`/sys/kernel/debug/`、`/sys/kernel/security/`、`/dev/pts/` 不参与跨程序对齐
+- **局部句柄**：fd、socket fd 等运行时派生值不跨程序复制，通过 fd 链自动继承
+- **Per-family 限额**：每个对象族最多重写 3 个 call，避免过度抹平对象多样性
+
+### 代码结构
+
+- `object_family.go` — 对象族定义、兼容表、安全过滤规则
+- `object_linking.go` — ObjectLinker 结构体、共享工具函数
+- `object_linking_v2.go` — 两层对齐主逻辑（extractSyscallResources → buildFamilyIndex → unifyResourcesTwoTier）
 
 ## Syscall Affinity Table
 
@@ -74,30 +114,6 @@ InteractionRate = Interactions / Executions
 Confidence = min(Executions / 100, 1.0)
 ```
 > 注：M1'/M2 移除后，AffinityTable 仍在记录交互数据，用于统计分析和未来可能的变异引导。
-
-## Solo Filter（跨程序过滤）
-| 仅新 Stack | `+NewStackPenalty` (默认: 1) | 有一定价值，温和惩罚 |
-| 无新发现 | `+NoDiscoveryPenalty` (默认: 2) | 真正失败，更快进入 cooldown |
-
-### 配置参数
-- `CooldownThreshold = 20`：触发 cooldown 的失败分数阈值
-- `CooldownDuration = 200`：cooldown 持续轮数
-- 冷却时 `PairPenalty = 0.01`
-
-### 行为示例
-- **只发现新 stack 的 pair**：需要 20 次执行才进入 cooldown
-- **什么都发现不了的 pair**：只需 10 次就进入 cooldown
-- **偶尔发现新 VarName pair**：分数重置，持续活跃
-
-## Syscall Affinity Table
-
-学习 syscall 组合的交互倾向：
-```
-Affinity = InteractionRate × Confidence
-InteractionRate = Interactions / Executions
-Confidence = min(Executions / 100, 1.0)
-```
-在 M1' 中以 `AffinityWeight` 参与打分。
 
 ## Solo Filter（跨程序过滤）
 
@@ -155,8 +171,9 @@ Phase 1 (Pair Discovery Queue)     Phase 2 (Timing Exploration Queue)
 ```
 pkg/fuzzer/
 ├── race_group.go          # RaceGroupManager/Registry/NamespaceIndex/SoloFilter
-├── object_linking.go      # ObjectLinker 基础结构
-├── object_linking_v2.go   # Object Linking V2 实现
+├── object_family.go       # 对象族定义、兼容表、安全过滤
+├── object_linking.go      # ObjectLinker 基础结构、共享工具函数
+├── object_linking_v2.go   # Object Linking V2 两层对齐实现
 ├── pair_evaluator.go      # Pair 评估 (ShouldExplore/ShouldSave)
 ├── affinity_table.go      # Syscall Affinity Table
 ├── solo_cache.go          # Solo 执行结果 LRU 缓存

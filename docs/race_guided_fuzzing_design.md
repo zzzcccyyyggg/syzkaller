@@ -42,7 +42,8 @@ over-exploitation problem (positive feedback loop causing program starvation).
                  ┌──────────────────────────────┐
                  │  Object Linking V2           │
                  │  ──────────────────────      │
-                 │  • Syscall-type unification  │
+                 │  • Two-tier object alignment │
+                 │    (same-name + cross-family)│
                  └──────────────┬───────────────┘
                                 │
                                 ▼
