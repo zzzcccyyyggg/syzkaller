@@ -76,8 +76,8 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	}
 
 	got := loaded[0]
-	if got.Prog == nil {
-		t.Fatalf("missing primary program")
+	if got.Prog != nil {
+		t.Fatalf("expected primary program to be omitted when barrier programs are persisted")
 	}
 	if len(got.Programs) != 2 {
 		t.Fatalf("expected 2 barrier programs, got %d", len(got.Programs))
@@ -129,5 +129,67 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	}
 	if got.Profile.UseCallStack != entry.PairBasicInfo.UseCallStack {
 		t.Fatalf("use callstack mismatch: got %x want %x", got.Profile.UseCallStack, entry.PairBasicInfo.UseCallStack)
+	}
+}
+
+func TestUAFCorpusStoreIterateEntriesBatched(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+
+	store, err := NewUAFCorpusStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close store: %v", cerr)
+		}
+	})
+
+	ct := target.DefaultChoiceTable()
+	var entries []*fuzzer.UAFCorpusEntry
+	for i := 0; i < 5; i++ {
+		p := target.Generate(rand.NewSource(int64(i+1)), 2, ct)
+		pair := &ddrd.MayUAFPair{
+			Signal:         uint64(0x100 + i),
+			FreeAccessName: uint64(0x10 + i),
+			UseAccessName:  uint64(0x20 + i),
+			FreeCallStack:  uint64(0x30 + i),
+			UseCallStack:   uint64(0x40 + i),
+		}
+		entries = append(entries, &fuzzer.UAFCorpusEntry{
+			Prog:          p.Clone(),
+			Programs:      []*prog.Prog{p.Clone()},
+			PairBasicInfo: *pair,
+			Pairs:         []*ddrd.MayUAFPair{pair},
+			Timestamp:     time.Unix(0, int64(i+1)),
+		})
+	}
+
+	added, err := store.Add(entries)
+	if err != nil {
+		t.Fatalf("Add failed: %v", err)
+	}
+	if added != len(entries) {
+		t.Fatalf("unexpected add count %d", added)
+	}
+
+	var batchSizes []int
+	var total int
+	err = store.IterateEntriesBatched(2, func(batch []*fuzzer.UAFCorpusEntry) bool {
+		batchSizes = append(batchSizes, len(batch))
+		total += len(batch)
+		return true
+	})
+	if err != nil {
+		t.Fatalf("IterateEntriesBatched failed: %v", err)
+	}
+	if total != len(entries) {
+		t.Fatalf("iterated %d entries, want %d", total, len(entries))
+	}
+	if len(batchSizes) != 3 || batchSizes[0] != 2 || batchSizes[1] != 2 || batchSizes[2] != 1 {
+		t.Fatalf("unexpected batch sizes: %v", batchSizes)
 	}
 }

@@ -1002,14 +1002,46 @@ func (e *ExecutorAdapter) RunBatch(ctx context.Context, reqs []*ExecutionRequest
 		return e.runAsyncBatch(ctx, reqs)
 	}
 
-	// Mixed or single-program mode: fall back to sequential Run
+	// Mixed mode (e.g., barrier replay + async main): split into sub-batches
+	// preserving original request ordering in the results.
 	results := make([]*ExecutionResult, len(reqs))
+	var barrierReqs []*ExecutionRequest
+	var barrierIdx []int
+	var asyncReqs []*ExecutionRequest
+	var asyncIdx []int
 	for i, req := range reqs {
-		res, err := e.Run(ctx, req)
+		if req == nil || req.Entry == nil {
+			continue
+		}
+		if e.isAsyncMode(req.Entry) {
+			asyncReqs = append(asyncReqs, req)
+			asyncIdx = append(asyncIdx, i)
+		} else {
+			barrierReqs = append(barrierReqs, req)
+			barrierIdx = append(barrierIdx, i)
+		}
+	}
+	if len(barrierReqs) > 0 {
+		bResults, err := e.runBarrierBatch(ctx, barrierReqs)
 		if err != nil {
 			return results, err
 		}
-		results[i] = res
+		for j, idx := range barrierIdx {
+			if j < len(bResults) {
+				results[idx] = bResults[j]
+			}
+		}
+	}
+	if len(asyncReqs) > 0 {
+		aResults, err := e.runAsyncBatch(ctx, asyncReqs)
+		if err != nil {
+			return results, err
+		}
+		for j, idx := range asyncIdx {
+			if j < len(aResults) {
+				results[idx] = aResults[j]
+			}
+		}
 	}
 	return results, nil
 }
@@ -1346,6 +1378,7 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 		return nil, fmt.Errorf("missing manager configuration for execprog instance")
 	}
 	cfgCopy := *mgrCfg
+	cfgCopy.Procs = 1 // Force single proc to prevent concurrent ddrd_controller_ corruption
 
 	executorBin := e.inst.ExecutorBinary()
 	if executorBin == "" {

@@ -109,6 +109,24 @@ func (store *UAFCorpusStore) Count() int {
 	return len(store.db.Records)
 }
 
+// IterateEntriesBatched streams corpus entries from disk in bounded batches.
+// This avoids materializing the whole database in memory at once during startup.
+func (store *UAFCorpusStore) IterateEntriesBatched(batchSize int, callback func(entries []*fuzzer.UAFCorpusEntry) bool) error {
+	if store == nil || store.path == "" || callback == nil {
+		return nil
+	}
+	store.mu.Lock()
+	path := store.path
+	target := store.target
+	store.mu.Unlock()
+
+	reader := NewStreamingUAFCorpusReader(path, target)
+	_, err := reader.IterateEntriesBatched(0, batchSize, func(entries []*fuzzer.UAFCorpusEntry, _ []uint64) bool {
+		return callback(entries)
+	})
+	return err
+}
+
 // EntriesSince returns entries with seq greater than sinceSeq along with the max seq seen.
 // This enables incremental reads of the corpus without reprocessing already-seen entries.
 func (store *UAFCorpusStore) EntriesSince(sinceSeq uint64) ([]*fuzzer.UAFCorpusEntry, uint64, error) {
@@ -230,7 +248,7 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 			stored.Pairs = append(stored.Pairs, *pair)
 		}
 	}
-	if entry.Prog != nil {
+	if entry.Prog != nil && (len(entry.Programs) == 0 || entry.AsyncMode) {
 		stored.Program = entry.Prog.Serialize()
 	}
 	if len(entry.Programs) != 0 {
@@ -355,6 +373,9 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 			return nil, err
 		}
 		entry.Programs = group
+		if !entry.AsyncMode {
+			entry.Prog = nil
+		}
 	}
 	if stored.ReplayPlan != nil {
 		entry.ReplayPlan = fuzzer.UAFCorpusReplayPlan{
