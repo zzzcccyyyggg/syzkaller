@@ -33,7 +33,7 @@ type uafMode struct {
 	mu            sync.Mutex
 	entries       map[string]*barrierSeed
 	corpus        *uafCorpus
-	pairs         map[uint64]*ddrd.MayUAFPair
+	pairs         map[uint64]struct{}
 	historyBuffer *VMHistoryBuffers // Per-VM rolling buffers of recent barrier executions
 }
 
@@ -45,8 +45,8 @@ const DefaultMaxStacksPerVarnamePair = 20
 
 type uafCorpus struct {
 	mu                  sync.RWMutex
-	seeds               map[string]*UAFCorpusEntry
-	pairs               map[uint64]*ddrd.MayUAFPair
+	seeds               map[string]uafSeedMeta
+	pairs               map[uint64]struct{}
 	varnamePairs        map[uint64]struct{} // unique (FreeAccessName, UseAccessName) pairs
 	varnameStackCounts  map[uint64]int      // count of stacks per varname pair
 	maxStacksPerVarName int                 // configurable limit per varname pair
@@ -58,20 +58,48 @@ type uafCorpus struct {
 	varnamesFromTiming map[uint64]struct{} // varnames from timing exploration
 	statSeeds          *stat.Val
 	statSeedsWithHist  *stat.Val
-	statCover           *stat.Val
-	statPairs           *stat.Val
-	statVarnames        *stat.Val
-	statSkippedByLimit  *stat.Val
+	statCover          *stat.Val
+	statPairs          *stat.Val
+	statVarnames       *stat.Val
+	statSkippedByLimit *stat.Val
+}
+
+type uafSeedMeta struct {
+	HasReplayHistory bool
 }
 
 type barrierSeed struct {
-	kind            barrierSeedKind
-	entry           *UAFCorpusEntry
-	execOpts        flatrpc.ExecOpts
-	barrierPrograms []*prog.Prog
-	replayPlan      UAFCorpusReplayPlan
-	syncable        bool
-	synced          bool
+	kind      barrierSeedKind
+	entry     *UAFCorpusEntry
+	entryBlob *serializedSeedEntry
+	execOpts  flatrpc.ExecOpts
+	syncable  bool
+	synced    bool
+}
+
+type serializedSeedEntry struct {
+	Program        []byte
+	Programs       [][]byte
+	CallIdx        int
+	Pairs          []ddrd.MayUAFPair
+	PairBasicInfo  ddrd.MayUAFPair
+	Signals        []uint64
+	Barrier        BarrierSnapshot
+	ReplayPlan     UAFCorpusReplayPlan
+	Profile        UAFPairProfile
+	Timestamp      time.Time
+	Kind           barrierSeedKind
+	Source         PairSource
+	ReplayHistory  []serializedBarrierExecutionRecord
+	AsyncMode      bool
+	AsyncRaceCalls [2]int
+}
+
+type serializedBarrierExecutionRecord struct {
+	Programs  [][]byte
+	Timestamp time.Time
+	GroupID   int64
+	VMIndex   int
 }
 
 // UAFCorpusEntry represents a single stored UAF seed within the fuzzer.
@@ -167,7 +195,7 @@ func newUAFMode(f *Fuzzer) *uafMode {
 		fuzzer:        f,
 		entries:       make(map[string]*barrierSeed),
 		corpus:        newUAFCorpus(maxStacksPerVarName),
-		pairs:         make(map[uint64]*ddrd.MayUAFPair),
+		pairs:         make(map[uint64]struct{}),
 		historyBuffer: NewVMHistoryBuffers(bufferSize),
 	}
 }
@@ -177,8 +205,8 @@ func newUAFCorpus(maxStacksPerVarName int) *uafCorpus {
 		maxStacksPerVarName = DefaultMaxStacksPerVarnamePair
 	}
 	uc := &uafCorpus{
-		seeds:               make(map[string]*UAFCorpusEntry),
-		pairs:               make(map[uint64]*ddrd.MayUAFPair),
+		seeds:               make(map[string]uafSeedMeta),
+		pairs:               make(map[uint64]struct{}),
 		varnamePairs:        make(map[uint64]struct{}),
 		varnameStackCounts:  make(map[uint64]int),
 		maxStacksPerVarName: maxStacksPerVarName,
@@ -199,7 +227,7 @@ func newUAFCorpus(maxStacksPerVarName int) *uafCorpus {
 			defer uc.mu.RUnlock()
 			count := 0
 			for _, seed := range uc.seeds {
-				if seed != nil && len(seed.ReplayHistory) > 0 {
+				if seed.HasReplayHistory {
 					count++
 				}
 			}
@@ -265,11 +293,12 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry, source PairSourc
 	if uc == nil || entry == nil {
 		return
 	}
-	clone := entry.clone()
 	uc.mu.Lock()
 	defer uc.mu.Unlock()
-	uc.seeds[key] = clone
-	for _, pair := range clone.Pairs {
+	uc.seeds[key] = uafSeedMeta{
+		HasReplayHistory: len(entry.ReplayHistory) > 0,
+	}
+	for _, pair := range entry.Pairs {
 		if pair == nil {
 			continue
 		}
@@ -293,7 +322,7 @@ func (uc *uafCorpus) addSeed(key string, entry *UAFCorpusEntry, source PairSourc
 
 		// Only add if this is a new pair (avoid counting duplicates)
 		if _, exists := uc.pairs[id]; !exists {
-			uc.pairs[id] = pair
+			uc.pairs[id] = struct{}{}
 			// Track unique varname pairs and increment stack count
 			uc.varnamePairs[varnameID] = struct{}{}
 			uc.varnameStackCounts[varnameID] = currentCount + 1
@@ -395,10 +424,24 @@ func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
 	if _, ok := u.pairs[id]; ok {
 		return nil // Already exists, return nil to skip
 	}
+	u.pairs[id] = struct{}{}
 	clone := new(ddrd.MayUAFPair)
 	*clone = *pair
-	u.pairs[id] = clone
 	return clone
+}
+
+func (u *uafMode) tryPersistSeed(seed *barrierSeed) {
+	if u == nil || seed == nil || seed.synced || !seed.syncable || seed.entry == nil {
+		return
+	}
+	if u.fuzzer == nil || u.fuzzer.Config.PersistUAFCorpusEntry == nil {
+		return
+	}
+	if err := u.fuzzer.Config.PersistUAFCorpusEntry(seed.entry); err != nil {
+		u.fuzzer.Logf(0, "uaf: immediate persist failed for seed %016x: %v", seed.entry.PairID(), err)
+		return
+	}
+	seed.synced = true
 }
 
 // handleFilteredPairs handles cross-program pairs after solo filtering.
@@ -429,8 +472,12 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 		historyCount = u.determineHistoryCount(batch)
 	}
 
+	// Detect thread-barrier mode from request ExecFlags
+	isThreadBarrier := req != nil && req.ExecOpts.ExecFlags&flatrpc.ExecFlagThreaded != 0
+
 	// DUAL-QUEUE: Enqueue NEW VarName pairs to Timing Exploration
-	if u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
+	// Skip for thread-barrier entries — they already share address space and don't need timing exploration.
+	if !isThreadBarrier && u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
 		for _, pair := range batch {
 			if u.fuzzer.timingScheduler.IsNewVarNamePair(pair) {
 				u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, pair)
@@ -452,6 +499,24 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 	entry.Programs = programs
 	entry.ReplayPlan = plan.clone()
 	entry.Source = source
+	if len(entry.Programs) != 0 {
+		entry.Prog = nil
+	}
+
+	// For thread-barrier entries, set AsyncMode so validate uses runAsyncBatch (single-process threaded).
+	// The merged program (req.Prog) carries the Async-marked calls for concurrent execution.
+	if isThreadBarrier && req.Prog != nil {
+		entry.AsyncMode = true
+		entry.Prog = req.Prog.Clone()
+		// Extract async call indices from the merged program
+		idx := 0
+		for i, call := range req.Prog.Calls {
+			if call.Props.Async && idx < 2 {
+				entry.AsyncRaceCalls[idx] = i
+				idx++
+			}
+		}
+	}
 
 	// Get replay history if new pairs found
 	if historyCount > 0 && res != nil {
@@ -470,16 +535,15 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 		return
 	}
 	seed := &barrierSeed{
-		kind:            seedKindUAF,
-		entry:           entry,
-		execOpts:        req.ExecOpts,
-		replayPlan:      plan.clone(),
-		barrierPrograms: programs,
-		syncable:        true,
-		synced:          false,
+		kind:     seedKindUAF,
+		entry:    entry,
+		execOpts: req.ExecOpts,
+		syncable: true,
+		synced:   false,
 	}
 	u.entries[key] = seed
 	u.corpus.addSeed(key, entry, source)
+	u.tryPersistSeed(seed)
 	u.mu.Unlock()
 
 	u.enqueueSeed(seed)
@@ -544,18 +608,15 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	entry.Source = SourceFuzz
 	entry.Programs = clonePrograms(group)
 	entry.ReplayPlan = plan.clone()
-	seed := &barrierSeed{
-		kind:       seedKindCoverage,
-		entry:      entry,
-		execOpts:   req.ExecOpts,
-		replayPlan: plan.clone(),
-		syncable:   false,
-		synced:     true,
+	if len(entry.Programs) != 0 {
+		entry.Prog = nil
 	}
-	if len(req.BarrierPrograms) != 0 {
-		seed.barrierPrograms = clonePrograms(req.BarrierPrograms)
-	} else if len(entry.Programs) != 0 {
-		seed.barrierPrograms = clonePrograms(entry.Programs)
+	seed := &barrierSeed{
+		kind:     seedKindCoverage,
+		entry:    entry,
+		execOpts: req.ExecOpts,
+		syncable: false,
+		synced:   true,
 	}
 	u.mu.Lock()
 	if _, exists := u.entries[key]; exists {
@@ -641,32 +702,49 @@ func (u *uafMode) updateMainCorpusCoverage(req *queue.Request, info *flatrpc.Pro
 }
 
 func (u *uafMode) enqueueSeed(seed *barrierSeed) {
-	if u == nil || u.queue == nil || seed == nil || seed.entry == nil || seed.entry.Prog == nil {
+	if u == nil || u.queue == nil || seed == nil {
+		return
+	}
+	entry, err := seed.materializeEntry(u.fuzzer.target)
+	if err != nil {
+		if u.fuzzer != nil {
+			u.fuzzer.Logf(0, "uaf: failed to materialize seed entry: %v", err)
+		}
+		return
+	}
+	if entry == nil {
+		return
+	}
+	var baseProg *prog.Prog
+	switch {
+	case entry.Prog != nil:
+		baseProg = entry.Prog.Clone()
+	case len(entry.Programs) != 0 && entry.Programs[0] != nil:
+		baseProg = entry.Programs[0].Clone()
+	default:
 		return
 	}
 	req := &queue.Request{
-		Prog:     seed.entry.Prog.Clone(),
+		Prog:     baseProg,
 		ExecOpts: seed.execOpts,
 	}
-	if barrier := seed.entry.Barrier; barrier.Participants != 0 {
+	if entry.Source != SourceTiming {
+		u.fuzzer.applyNormalTimingThreshold(req)
+	}
+	if barrier := entry.Barrier; barrier.Participants != 0 {
 		req.SetBarrier(barrier.Participants)
 		if len(barrier.ProcList) != 0 {
 			req.BarrierProcList = append([]int(nil), barrier.ProcList...)
 		}
 		var programs []*prog.Prog
 		switch {
-		case len(seed.barrierPrograms) != 0:
-			programs = seed.barrierPrograms
-		case len(seed.entry.Programs) != 0:
-			programs = seed.entry.Programs
+		case len(entry.Programs) != 0:
+			programs = entry.Programs
 		}
 		if len(programs) != 0 {
 			req.BarrierPrograms = clonePrograms(programs)
 		}
-		plan := seed.replayPlan
-		if plan.IsZero() {
-			plan = seed.entry.ReplayPlan
-		}
+		plan := entry.ReplayPlan
 		if !plan.IsZero() {
 			if err := req.SetBarrierStartDelays(plan.DelaysMicros); err != nil {
 				u.fuzzer.Logf(0, "uaf: failed to set barrier delays for seed: %v", err)
@@ -674,6 +752,12 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 		}
 	}
 	u.queue.Submit(req)
+	if seed.synced || !seed.syncable {
+		seed.releaseEntry()
+	} else {
+		seed.entry = entry
+		seed.compactEntry()
+	}
 }
 
 func (u *uafMode) pendingEntries() []*UAFCorpusEntry {
@@ -683,12 +767,24 @@ func (u *uafMode) pendingEntries() []*UAFCorpusEntry {
 	u.mu.Lock()
 	defer u.mu.Unlock()
 	var pending []*UAFCorpusEntry
+	var target *prog.Target
+	if u.fuzzer != nil {
+		target = u.fuzzer.target
+	}
 	for _, seed := range u.entries {
-		if seed == nil || seed.entry == nil || seed.synced || !seed.syncable {
+		if seed == nil || seed.synced || !seed.syncable {
+			continue
+		}
+		entry, err := seed.materializeEntry(target)
+		if err != nil || entry == nil {
+			if err != nil && u.fuzzer != nil {
+				u.fuzzer.Logf(0, "uaf: failed to materialize pending seed: %v", err)
+			}
 			continue
 		}
 		seed.synced = true
-		pending = append(pending, seed.entry.clone())
+		pending = append(pending, entry.clone())
+		seed.releaseEntry()
 	}
 	return pending
 }
@@ -701,7 +797,7 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 	var seeds []*barrierSeed
 	var allPairs []*ddrd.MayUAFPair // Collect all pairs to register with varPairRegistry
 	for _, entry := range entries {
-		if entry == nil || entry.Prog == nil {
+		if entry == nil || (entry.Prog == nil && len(entry.Programs) == 0) {
 			continue
 		}
 		id := entry.PairID()
@@ -722,19 +818,16 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		// 	entry.PairBasicInfo.UseAccessType)
 		clone := entry.clone()
 		for _, pair := range clone.Pairs {
-			u.addPairLocked(pair)
-			allPairs = append(allPairs, pair)
+			if added := u.addPairLocked(pair); added != nil {
+				allPairs = append(allPairs, added)
+			}
 		}
 		seed := &barrierSeed{
-			kind:       clone.Kind,
-			entry:      clone,
-			execOpts:   setFlags(flatrpc.ExecFlagCollectSignal),
-			replayPlan: clone.ReplayPlan.clone(),
-			syncable:   clone.Kind == seedKindUAF,
-			synced:     clone.Kind != seedKindUAF,
-		}
-		if len(clone.Programs) != 0 {
-			seed.barrierPrograms = clonePrograms(clone.Programs)
+			kind:     clone.Kind,
+			entry:    clone,
+			execOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+			syncable: clone.Kind == seedKindUAF,
+			synced:   true,
 		}
 		u.entries[key] = seed
 		u.corpus.addSeed(key, clone, clone.Source)
@@ -783,6 +876,189 @@ func clonePrograms(programs []*prog.Prog) []*prog.Prog {
 		clones[i] = p.Clone()
 	}
 	return clones
+}
+
+func seedSerializeProgramGroup(programs []*prog.Prog) [][]byte {
+	if len(programs) == 0 {
+		return nil
+	}
+	serialized := make([][]byte, len(programs))
+	for i, p := range programs {
+		if p != nil {
+			serialized[i] = append([]byte(nil), p.Serialize()...)
+		}
+	}
+	return serialized
+}
+
+func seedDeserializeProgramGroup(target *prog.Target, blobs [][]byte) ([]*prog.Prog, error) {
+	if target == nil || len(blobs) == 0 {
+		return nil, nil
+	}
+	programs := make([]*prog.Prog, len(blobs))
+	for i, blob := range blobs {
+		if len(blob) == 0 {
+			continue
+		}
+		p, err := target.Deserialize(blob, prog.NonStrict)
+		if err != nil {
+			return nil, err
+		}
+		programs[i] = p
+	}
+	return programs, nil
+}
+
+func seedSerializeReplayHistory(history []*BarrierExecutionRecord) []serializedBarrierExecutionRecord {
+	if len(history) == 0 {
+		return nil
+	}
+	serialized := make([]serializedBarrierExecutionRecord, 0, len(history))
+	for _, rec := range history {
+		if rec == nil {
+			continue
+		}
+		serialized = append(serialized, serializedBarrierExecutionRecord{
+			Programs:  seedSerializeProgramGroup(rec.Programs),
+			Timestamp: rec.Timestamp,
+			GroupID:   rec.GroupID,
+			VMIndex:   rec.VMIndex,
+		})
+	}
+	return serialized
+}
+
+func seedDeserializeReplayHistory(target *prog.Target, records []serializedBarrierExecutionRecord) ([]*BarrierExecutionRecord, error) {
+	if target == nil || len(records) == 0 {
+		return nil, nil
+	}
+	history := make([]*BarrierExecutionRecord, 0, len(records))
+	for _, rec := range records {
+		programs, err := seedDeserializeProgramGroup(target, rec.Programs)
+		if err != nil {
+			return nil, err
+		}
+		history = append(history, &BarrierExecutionRecord{
+			Programs:  programs,
+			Timestamp: rec.Timestamp,
+			GroupID:   rec.GroupID,
+			VMIndex:   rec.VMIndex,
+		})
+	}
+	return history, nil
+}
+
+func newSerializedSeedEntry(entry *UAFCorpusEntry) *serializedSeedEntry {
+	if entry == nil {
+		return nil
+	}
+	blob := &serializedSeedEntry{
+		CallIdx:        entry.CallIdx,
+		PairBasicInfo:  entry.PairBasicInfo,
+		Signals:        entry.SignalsSlice(),
+		Barrier:        entry.Barrier.clone(),
+		ReplayPlan:     entry.ReplayPlan.clone(),
+		Profile:        entry.Profile,
+		Timestamp:      entry.Timestamp,
+		Kind:           entry.Kind,
+		Source:         entry.Source,
+		ReplayHistory:  seedSerializeReplayHistory(entry.ReplayHistory),
+		AsyncMode:      entry.AsyncMode,
+		AsyncRaceCalls: entry.AsyncRaceCalls,
+	}
+	if entry.Prog != nil && (len(entry.Programs) == 0 || entry.AsyncMode) {
+		blob.Program = append([]byte(nil), entry.Prog.Serialize()...)
+	}
+	if len(entry.Programs) != 0 {
+		blob.Programs = seedSerializeProgramGroup(entry.Programs)
+	}
+	if len(entry.Pairs) != 0 {
+		blob.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
+		for _, pair := range entry.Pairs {
+			if pair != nil {
+				blob.Pairs = append(blob.Pairs, *pair)
+			}
+		}
+	}
+	return blob
+}
+
+func (blob *serializedSeedEntry) materialize(target *prog.Target) (*UAFCorpusEntry, error) {
+	if blob == nil {
+		return nil, nil
+	}
+	entry := &UAFCorpusEntry{
+		CallIdx:        blob.CallIdx,
+		PairBasicInfo:  blob.PairBasicInfo,
+		Signals:        sliceToSignal(blob.Signals),
+		Barrier:        blob.Barrier.clone(),
+		ReplayPlan:     blob.ReplayPlan.clone(),
+		Profile:        blob.Profile,
+		Timestamp:      blob.Timestamp,
+		Kind:           blob.Kind,
+		Source:         blob.Source,
+		AsyncMode:      blob.AsyncMode,
+		AsyncRaceCalls: blob.AsyncRaceCalls,
+	}
+	if target != nil && len(blob.Program) != 0 {
+		p, err := target.Deserialize(blob.Program, prog.NonStrict)
+		if err != nil {
+			return nil, err
+		}
+		entry.Prog = p
+	}
+	if target != nil && len(blob.Programs) != 0 {
+		programs, err := seedDeserializeProgramGroup(target, blob.Programs)
+		if err != nil {
+			return nil, err
+		}
+		entry.Programs = programs
+		if !entry.AsyncMode {
+			entry.Prog = nil
+		}
+	}
+	if len(blob.Pairs) != 0 {
+		entry.Pairs = make([]*ddrd.MayUAFPair, 0, len(blob.Pairs))
+		for i := range blob.Pairs {
+			pair := blob.Pairs[i]
+			copyPair := pair
+			entry.Pairs = append(entry.Pairs, &copyPair)
+		}
+	}
+	if target != nil && len(blob.ReplayHistory) != 0 {
+		history, err := seedDeserializeReplayHistory(target, blob.ReplayHistory)
+		if err != nil {
+			return nil, err
+		}
+		entry.ReplayHistory = history
+	}
+	return entry, nil
+}
+
+func (seed *barrierSeed) materializeEntry(target *prog.Target) (*UAFCorpusEntry, error) {
+	if seed == nil {
+		return nil, nil
+	}
+	if seed.entry != nil {
+		return seed.entry, nil
+	}
+	return seed.entryBlob.materialize(target)
+}
+
+func (seed *barrierSeed) compactEntry() {
+	if seed == nil || seed.entry == nil || seed.entryBlob != nil {
+		return
+	}
+	seed.entryBlob = newSerializedSeedEntry(seed.entry)
+	seed.entry = nil
+}
+
+func (seed *barrierSeed) releaseEntry() {
+	if seed == nil {
+		return
+	}
+	seed.entry = nil
+	seed.entryBlob = nil
 }
 
 func snapshotProgramGroup(req *queue.Request) []*prog.Prog {
@@ -880,6 +1156,17 @@ func cloneSignal(signal ddrd.UAFSignal) ddrd.UAFSignal {
 		cloned[value] = struct{}{}
 	}
 	return cloned
+}
+
+func sliceToSignal(values []uint64) ddrd.UAFSignal {
+	if len(values) == 0 {
+		return nil
+	}
+	signal := make(ddrd.UAFSignal, len(values))
+	for _, value := range values {
+		signal[value] = struct{}{}
+	}
+	return signal
 }
 
 func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
