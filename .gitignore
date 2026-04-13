@@ -55,6 +55,13 @@ batch_repros/
 graph/
 graph.tar.gz
 scripts/__pycache__/
+__pycache__/
 .experiment/*.state
 .experiment/.cpuset_owned
 config.tar.gz
+
+# Compiled Go binaries at repo root (e.g. syz-inject-async-corpus)
+/syz-inject-async-corpus
+
+# Experiment output directories
+exp-unified/
