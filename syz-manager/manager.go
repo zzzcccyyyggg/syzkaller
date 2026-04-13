@@ -1309,6 +1309,13 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				}
 				log.Logf(level, msg, args...)
 			},
+			PersistUAFCorpusEntry: func(entry *fuzzer.UAFCorpusEntry) error {
+				if mgr.uafStore == nil || entry == nil {
+					return nil
+				}
+				_, err := mgr.uafStore.Add([]*fuzzer.UAFCorpusEntry{entry})
+				return err
+			},
 			NewInputFilter: func(call string) bool {
 				mgr.mu.Lock()
 				defer mgr.mu.Unlock()
@@ -1318,6 +1325,8 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			ModeUAF:                      mgr.cfg.Experimental.UAFMode,
 			BarrierMode:                  mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:                  mgr.cfg.BarrierMask,
+			ThreadBarrier:                mgr.cfg.Experimental.ThreadBarrier,
+			ThreadBarrierRatio:           mgr.cfg.Experimental.ThreadBarrierRatio,
 			HistoryBufferSize:            mgr.cfg.Experimental.HistoryBufferSize,
 			NewVarNamePairHistory:        mgr.cfg.Experimental.NewVarNamePairHistory,
 			NewStackHistory:              mgr.cfg.Experimental.NewStackHistory,
@@ -1326,18 +1335,19 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
 			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
 			// Dual-Queue Timing Exploration Configuration
-			EnableTimingExploration:     mgr.cfg.Experimental.EnableTimingExploration,
-			TimingExplorationQueueSize:  mgr.cfg.Experimental.TimingExplorationQueueSize,
-			TimingExplorationRatio:      mgr.cfg.Experimental.TimingExplorationRatio,
-			DelayMinMicros:              mgr.cfg.Experimental.DelayMinMicros,
-			DelayMaxMicros:              mgr.cfg.Experimental.DelayMaxMicros,
-			MaxDelaysPerProgram:         mgr.cfg.Experimental.MaxDelaysPerProgram,
-			TimingMutationStrategy:      mgr.cfg.Experimental.TimingMutationStrategy,
-			WidenedThresholdMicros:      mgr.cfg.Experimental.WidenedThresholdMicros,
-			MaxAttemptsPerPair:          mgr.cfg.Experimental.MaxAttemptsPerPair,
-			MaxCorpusCountPerVarName:    mgr.cfg.Experimental.MaxCorpusCountPerVarName,
-			SuccessThreshold:            mgr.cfg.Experimental.SuccessThreshold,
-			ExecutionsPerAttempt:        mgr.cfg.Experimental.ExecutionsPerAttempt,
+			EnableTimingExploration:    mgr.cfg.Experimental.EnableTimingExploration,
+			TimingExplorationQueueSize: mgr.cfg.Experimental.TimingExplorationQueueSize,
+			TimingExplorationRatio:     mgr.cfg.Experimental.TimingExplorationRatio,
+			DelayMinMicros:             mgr.cfg.Experimental.DelayMinMicros,
+			DelayMaxMicros:             mgr.cfg.Experimental.DelayMaxMicros,
+			MaxDelaysPerProgram:        mgr.cfg.Experimental.MaxDelaysPerProgram,
+			TimingMutationStrategy:     mgr.cfg.Experimental.TimingMutationStrategy,
+			NormalThresholdMicros:      mgr.cfg.Experimental.NormalThresholdMicros,
+			WidenedThresholdMicros:     mgr.cfg.Experimental.WidenedThresholdMicros,
+			MaxAttemptsPerPair:         mgr.cfg.Experimental.MaxAttemptsPerPair,
+			MaxCorpusCountPerVarName:   mgr.cfg.Experimental.MaxCorpusCountPerVarName,
+			SuccessThreshold:           mgr.cfg.Experimental.SuccessThreshold,
+			ExecutionsPerAttempt:       mgr.cfg.Experimental.ExecutionsPerAttempt,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)
@@ -1511,21 +1521,26 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 	}
 }
 
-func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzer *fuzzer.Fuzzer) {
-	if !mgr.cfg.Experimental.UAFMode || mgr.uafStore == nil || fuzzer == nil {
+func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
+	if !mgr.cfg.Experimental.UAFMode || mgr.uafStore == nil || fuzzerObj == nil {
 		return
 	}
-	entries, err := mgr.uafStore.Entries()
+	const batchSize = 64
+	totalQueued := 0
+	err := mgr.uafStore.IterateEntriesBatched(batchSize, func(entries []*fuzzer.UAFCorpusEntry) bool {
+		if len(entries) == 0 {
+			return true
+		}
+		queued := fuzzerObj.EnqueueUAFCorpus(entries)
+		totalQueued += queued
+		if queued != 0 {
+			log.Logf(1, "uaf corpus: queued %d persisted entries in batch (total=%d)", queued, totalQueued)
+		}
+		return true
+	})
 	if err != nil {
-		log.Errorf("uaf corpus load failed: %v", err)
+		log.Errorf("uaf corpus streaming load failed: %v", err)
 		return
-	}
-	if len(entries) == 0 {
-		return
-	}
-	queued := fuzzer.EnqueueUAFCorpus(entries)
-	if queued != 0 {
-		log.Logf(1, "uaf corpus: queued %d persisted entries", queued)
 	}
 }
 

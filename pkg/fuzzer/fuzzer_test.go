@@ -120,6 +120,44 @@ func BenchmarkFuzzer(b *testing.B) {
 	})
 }
 
+func TestApplyNormalTimingThreshold(t *testing.T) {
+	fuzzer := &Fuzzer{Config: &Config{NormalThresholdMicros: 2500}}
+
+	t.Run("applies to regular requests", func(t *testing.T) {
+		req := &queue.Request{}
+		fuzzer.applyNormalTimingThreshold(req)
+		assert.Equal(t, int64(2500), req.TimingThresholdUs)
+	})
+
+	t.Run("does not overwrite explicit threshold", func(t *testing.T) {
+		req := &queue.Request{TimingThresholdUs: 777}
+		fuzzer.applyNormalTimingThreshold(req)
+		assert.Equal(t, int64(777), req.TimingThresholdUs)
+	})
+
+	t.Run("skips timing exploration requests", func(t *testing.T) {
+		req := &queue.Request{IsTimingExploration: true}
+		fuzzer.applyNormalTimingThreshold(req)
+		assert.Zero(t, req.TimingThresholdUs)
+	})
+}
+
+func TestInheritTimingThreshold(t *testing.T) {
+	t.Run("inherits parent threshold", func(t *testing.T) {
+		req := &queue.Request{}
+		parent := &queue.Request{TimingThresholdUs: 4321}
+		inheritTimingThreshold(req, parent)
+		assert.Equal(t, int64(4321), req.TimingThresholdUs)
+	})
+
+	t.Run("keeps explicit request threshold", func(t *testing.T) {
+		req := &queue.Request{TimingThresholdUs: 111}
+		parent := &queue.Request{TimingThresholdUs: 4321}
+		inheritTimingThreshold(req, parent)
+		assert.Equal(t, int64(111), req.TimingThresholdUs)
+	})
+}
+
 func getTestTarget() (*prog.Target, error) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
 	if err == nil {

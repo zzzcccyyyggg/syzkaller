@@ -271,8 +271,10 @@ type Experimental struct {
 
 	// Enable synchronized barrier execution for fuzzing requests. When enabled,
 	// barrier_procs must specify at least two executor proc indices.
-	BarrierMode  bool  `json:"barrier_mode"`
-	BarrierProcs []int `json:"barrier_procs,omitempty"`
+	BarrierMode        bool    `json:"barrier_mode"`
+	BarrierProcs       []int   `json:"barrier_procs,omitempty"`
+	ThreadBarrier      bool    `json:"thread_barrier"`
+	ThreadBarrierRatio float64 `json:"thread_barrier_ratio,omitempty"`
 
 	// Enable the UAF-focused fuzzing mode that prioritizes DDRD results.
 	UAFMode bool `json:"uaf_mode"`
@@ -366,6 +368,9 @@ type Experimental struct {
 	// Options: "random", "targeted", "binary_search", "timediff"
 	// Defaults to "targeted" if unset.
 	TimingMutationStrategy string `json:"timing_mutation_strategy,omitempty"`
+	// NormalThresholdMicros overrides the default 10ms threshold for DDRD pair detection
+	// during normal fuzzing requests. 0 uses the executor default.
+	NormalThresholdMicros int64 `json:"normal_threshold_micros,omitempty"`
 	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
 	// This allows timing exploration to detect pairs with larger timediff that normal threshold misses.
 	// Defaults to 500000 (500ms) if unset or zero.

@@ -719,6 +719,10 @@ func (job *soloFilterJob) executeSolo(p *prog.Prog, name string) *VarNamePairSet
 		Stat:            job.stat,
 		IsSoloExecution: true, // 标记为solo执行，队列不会合并Threaded标志
 	}
+	inheritTimingThreshold(req, job.req)
+	if job.req == nil || !job.req.IsTimingExploration {
+		job.fuzzer.applyNormalTimingThreshold(req)
+	}
 
 	log.Logf(3, "[SOLO-DDRD] executeSolo starting: prog=%s", name)
 	result := job.fuzzer.executeWithFlags(job.exec, req, 0)
@@ -840,5 +844,3 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 		affinityTable.RecordInteractionWithWeight(sig1, sig2, weight)
 	}
 }
-
-

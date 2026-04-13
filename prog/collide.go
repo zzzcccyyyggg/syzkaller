@@ -228,3 +228,22 @@ func DupCallCollide(origProg *Prog, rand *rand.Rand) (*Prog, error) {
 	prog.Calls = retCalls
 	return prog, nil
 }
+
+// MergePrograms concatenates the calls of two programs into a single program.
+// The resulting program uses prog1's target. Both programs must share the same target.
+func MergePrograms(prog1, prog2 *Prog) *Prog {
+	merged := &Prog{
+		Target:   prog1.Target,
+		Comments: append(append([]string{}, prog1.Comments...), prog2.Comments...),
+	}
+	// Use a shared newargs map so inter-call ResultArg references are properly
+	// remapped to the cloned results within the merged program.
+	newargs := make(map[*ResultArg]*ResultArg)
+	for _, c := range prog1.Calls {
+		merged.Calls = append(merged.Calls, cloneCall(c, newargs))
+	}
+	for _, c := range prog2.Calls {
+		merged.Calls = append(merged.Calls, cloneCall(c, newargs))
+	}
+	return merged
+}

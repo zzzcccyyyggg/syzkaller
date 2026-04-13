@@ -97,7 +97,7 @@ type Request struct {
 	IsValidationMode bool
 
 	// TimingThresholdUs is the timing threshold in microseconds for race pair detection.
-	// If > 0, overrides the default 2ms threshold in executor.
+	// If > 0, overrides the default 10ms threshold in executor.
 	// Used by timing exploration queue to use widened threshold (e.g., 500ms = 500000us).
 	TimingThresholdUs int64
 
@@ -762,6 +762,10 @@ func (do *defaultOpts) Next() *Request {
 		req.ExecOpts.ExecFlags |= (do.opts.ExecFlags &^ flatrpc.ExecFlagThreaded)
 	} else {
 		req.ExecOpts.ExecFlags |= do.opts.ExecFlags
+	}
+	// DisableDdrd的请求不应继承CollectDdrdUaf，防止与正在执行的Solo DDRD冲突
+	if req.DisableDdrd {
+		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdUaf
 	}
 	req.ExecOpts.EnvFlags |= do.opts.EnvFlags
 	req.ExecOpts.SandboxArg = do.opts.SandboxArg

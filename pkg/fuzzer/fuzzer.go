@@ -300,6 +300,23 @@ func (fuzzer *Fuzzer) prepare(req *queue.Request, flags ProgFlags, attempt int) 
 	})
 }
 
+func (fuzzer *Fuzzer) applyNormalTimingThreshold(req *queue.Request) {
+	if req == nil || req.IsTimingExploration || req.TimingThresholdUs > 0 {
+		return
+	}
+	if fuzzer.Config == nil || fuzzer.Config.NormalThresholdMicros <= 0 {
+		return
+	}
+	req.TimingThresholdUs = fuzzer.Config.NormalThresholdMicros
+}
+
+func inheritTimingThreshold(req, parent *queue.Request) {
+	if req == nil || req.TimingThresholdUs > 0 || parent == nil || parent.TimingThresholdUs <= 0 {
+		return
+	}
+	req.TimingThresholdUs = parent.TimingThresholdUs
+}
+
 func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags ProgFlags, attempt int) {
 	fuzzer.prepare(req, flags, attempt)
 	executor.Submit(req)
@@ -426,23 +443,26 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 }
 
 type Config struct {
-	Debug          bool
-	Corpus         *corpus.Corpus
-	Logf           func(level int, msg string, args ...interface{})
-	Snapshot       bool
-	Coverage       bool
-	FaultInjection bool
-	Comparisons    bool
-	Collide        bool
-	EnabledCalls   map[*prog.Syscall]bool
-	NoMutateCalls  map[int]bool
-	FetchRawCover  bool
-	NewInputFilter func(call string) bool
-	PatchTest      bool
-	ModeKFuzzTest  bool
-	ModeUAF        bool
-	BarrierMode    bool
-	BarrierMask    uint64
+	Debug                 bool
+	Corpus                *corpus.Corpus
+	Logf                  func(level int, msg string, args ...interface{})
+	Snapshot              bool
+	Coverage              bool
+	FaultInjection        bool
+	Comparisons           bool
+	Collide               bool
+	EnabledCalls          map[*prog.Syscall]bool
+	NoMutateCalls         map[int]bool
+	FetchRawCover         bool
+	NewInputFilter        func(call string) bool
+	PersistUAFCorpusEntry func(*UAFCorpusEntry) error
+	PatchTest             bool
+	ModeKFuzzTest         bool
+	ModeUAF               bool
+	BarrierMode           bool
+	BarrierMask           uint64
+	ThreadBarrier         bool    // Enable thread-barrier mode (intra-object race detection)
+	ThreadBarrierRatio    float64 // Fraction of barrier executions using thread-barrier (default: 0.2)
 	// History buffer configuration for UAF mode
 	HistoryBufferSize            int // Size of per-VM history buffer (default: 1000)
 	NewVarNamePairHistory        int // Records to save for new VarName pair (default: 1000)
@@ -468,6 +488,9 @@ type Config struct {
 	MaxDelaysPerProgram int
 	// TimingMutationStrategy: "random", "targeted", "binary_search", "timediff"
 	TimingMutationStrategy string
+	// NormalThresholdMicros overrides the default 10ms threshold for barrier/solo DDRD requests.
+	// 0 uses the executor default.
+	NormalThresholdMicros int64
 	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds)
 	WidenedThresholdMicros int64
 	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair
@@ -607,7 +630,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 
 	// Get thresholds
 	widenedThreshold := fuzzer.timingScheduler.Config().WidenedThresholdMicros
-	normalThreshold := int64(0) // 0 means use default (2ms in executor)
+	normalThreshold := int64(0) // 0 means use the executor default (currently 10ms)
 
 	// Determine phase based on whether delay plan exists
 	// Phase 1: no delays, use widened threshold (discovery)
@@ -660,9 +683,41 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 	if fuzzer.uafReady() && fuzzer.Config.BarrierMode {
 		mask := fuzzer.Config.BarrierMask
 		if mask != 0 {
-			req.SetBarrier(mask)
-			// Set barrier programs: mutated prog1 and prog2
 			programs := []*prog.Prog{job.Prog1, job.Prog2}
+
+			// Thread-barrier for timing exploration
+			if fuzzer.Config.ThreadBarrier {
+				ratio := fuzzer.Config.ThreadBarrierRatio
+				if ratio <= 0 {
+					ratio = 0.2
+				}
+				rnd := fuzzer.rand()
+				if rnd.Float64() < ratio {
+					merged := prog.MergePrograms(programs[0], programs[1])
+					lastA := len(programs[0].Calls) - 1
+					lastB := len(programs[0].Calls) + len(programs[1].Calls) - 1
+					if lastA >= 0 && lastA < len(merged.Calls) {
+						merged.Calls[lastA].Props.Async = true
+					}
+					if lastB >= 0 && lastB < len(merged.Calls) {
+						merged.Calls[lastB].Props.Async = true
+					}
+					req.Prog = merged
+					req.Barrier = true
+					req.BarrierPrograms = programs
+					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
+					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+
+					flags := ProgFlags(ProgBarrier)
+					fuzzer.prepare(req, flags, 0)
+					fuzzer.timingScheduler.RecordJobExecution(job)
+					return req
+				}
+			}
+
+			// Default: multi-process barrier
+			req.SetBarrier(mask)
 			if err := req.SetBarrierPrograms(programs); err != nil {
 				log.Logf(0, "[TIMING-EXPLORE] Failed to set barrier programs: %v", err)
 				return nil
@@ -860,7 +915,41 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 		return
 	}
 	req.SetBarrier(mask)
+	fuzzer.applyNormalTimingThreshold(req)
 	programs := fuzzer.buildBarrierPrograms(req, mask)
+
+	// Thread-barrier: merge two programs into one, execute with threads sharing fd table.
+	// This allows detecting intra-object races (e.g., same hdev instance).
+	if fuzzer.Config.ThreadBarrier && len(programs) >= 2 {
+		ratio := fuzzer.Config.ThreadBarrierRatio
+		if ratio <= 0 {
+			ratio = 0.2
+		}
+		rnd := fuzzer.rand()
+		if rnd.Float64() < ratio {
+			merged := prog.MergePrograms(programs[0], programs[1])
+			// Mark the last call of each sub-program as Async for concurrent execution
+			lastA := len(programs[0].Calls) - 1
+			lastB := len(programs[0].Calls) + len(programs[1].Calls) - 1
+			if lastA >= 0 && lastA < len(merged.Calls) {
+				merged.Calls[lastA].Props.Async = true
+			}
+			if lastB >= 0 && lastB < len(merged.Calls) {
+				merged.Calls[lastB].Props.Async = true
+			}
+			req.Prog = merged
+			req.Barrier = true
+			req.BarrierPrograms = programs // Preserve for soloFilter
+			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
+			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
+			fuzzer.Logf(2, "thread-barrier: merged %d+%d calls, async at [%d,%d]",
+				len(programs[0].Calls), len(programs[1].Calls), lastA, lastB)
+			return
+		}
+	}
+
+	// Default: multi-process barrier mode
 	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 	if err := req.SetBarrierPrograms(programs); err != nil {
