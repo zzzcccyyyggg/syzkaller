@@ -245,6 +245,7 @@ func rewriteObjectIdentifier(call *prog.Call, sourceInfo SyscallResourceInfo) in
 
 // rewriteObjectIdentifierAtArg rewrites the DataArg at the given argument index
 // in the call with the source's object identifier bytes.
+// Returns 0 if the rewrite is skipped (unsafe path, equal data, missing arg).
 func rewriteObjectIdentifierAtArg(call *prog.Call, argIndex int, sourceInfo SyscallResourceInfo) int {
 	if argIndex >= len(call.Args) {
 		return 0
@@ -256,6 +257,11 @@ func rewriteObjectIdentifierAtArg(call *prog.Call, argIndex int, sourceInfo Sysc
 
 	sourceData := sourceInfo.DataArg.Data()
 	targetData := targetDataArg.Data()
+
+	// Skip if source or target path is in an unsafe prefix (e.g., /proc/self/)
+	if isUnsafePathForAlignment(sourceData) || isUnsafePathForAlignment(targetData) {
+		return 0
+	}
 
 	if dataEqual(sourceData, targetData) {
 		return 0

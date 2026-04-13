@@ -31,8 +31,9 @@ const (
 	familyNone objectFamily = ""
 
 	// kccwf file-system families (btrfs, xfs, f2fs, jfs, ...)
-	familyKccwfFile objectFamily = "kccwf_file" // /mnt/kccwf/testfile#
-	familyKccwfDir  objectFamily = "kccwf_dir"  // /mnt/kccwf/testdir, /mnt/kccwf
+	familyKccwfFile    objectFamily = "kccwf_file"     // /mnt/kccwf/testfile# (absolute path, arg[0])
+	familyKccwfFileRel objectFamily = "kccwf_file_rel" // testfile# (relative path via dirfd, arg[1])
+	familyKccwfDir     objectFamily = "kccwf_dir"      // /mnt/kccwf/testdir, /mnt/kccwf
 
 	// Bluetooth address families
 	familyBtSco    objectFamily = "bt_sco"    // sockaddr_sco.addr
@@ -41,6 +42,9 @@ const (
 
 	// UNIX socket path family
 	familyUnixSock objectFamily = "unix_sock" // sockaddr_un path
+
+	// Device families
+	familyFloppy objectFamily = "floppy" // /dev/fd#
 )
 
 // objectFamilyInfo describes how to extract the object identifier from a syscall.
@@ -68,6 +72,8 @@ func buildSyscallFamilyTable() map[string]objectFamilyInfo {
 		"setxattr$kccwf",
 		"stat$kccwf",
 		"utimes$kccwf",
+		"rename$kccwf", // arg[0] = old path (testfile#)
+		"link$kccwf",   // arg[0] = source path (testfile#)
 	} {
 		table[name] = objectFamilyInfo{Family: familyKccwfFile, ArgIndex: 0}
 	}
@@ -79,6 +85,20 @@ func buildSyscallFamilyTable() map[string]objectFamilyInfo {
 		"rmdir$kccwf",
 	} {
 		table[name] = objectFamilyInfo{Family: familyKccwfDir, ArgIndex: 0}
+	}
+
+	// --- kccwf relative-path family: filename at arg[1], dirfd at arg[0] ---
+	// These use relative paths ("testfile#") with a dirfd context.
+	// They can cross-align with each other but NOT with the absolute-path family.
+	for _, name := range []string{
+		"openat$kccwf",
+		"faccessat$kccwf",
+		"fchmodat$kccwf",
+		"fchownat$kccwf",
+		"fstatat$kccwf",
+		"unlinkat$kccwf",
+	} {
+		table[name] = objectFamilyInfo{Family: familyKccwfFileRel, ArgIndex: 1}
 	}
 
 	// --- Bluetooth SCO: address struct is arg[1] (arg[0] is fd) ---
@@ -112,6 +132,9 @@ func buildSyscallFamilyTable() map[string]objectFamilyInfo {
 	} {
 		table[name] = objectFamilyInfo{Family: familyUnixSock, ArgIndex: 1}
 	}
+
+	// --- Floppy device: device path is arg[0] ---
+	table["syz_open_dev$floppy"] = objectFamilyInfo{Family: familyFloppy, ArgIndex: 0}
 
 	return table
 }
@@ -159,4 +182,37 @@ func isUnsafeAlignment(syscallName string) bool {
 		"fstatat":   true,
 	}
 	return unsafe[baseName]
+}
+
+// unsafePathPrefixes lists path prefixes that should not be cross-aligned
+// between programs. These paths are per-process, per-thread, or refer to
+// debug/security interfaces that are semantically context-dependent.
+var unsafePathPrefixes = []string{
+	"/proc/self/",
+	"/proc/thread-self/",
+	"/sys/kernel/debug/",
+	"/sys/kernel/security/",
+	"/dev/pts/",
+}
+
+// isUnsafePathForAlignment checks whether a path contains a prefix that
+// makes cross-program alignment dangerous or meaningless.
+func isUnsafePathForAlignment(data []byte) bool {
+	s := trimNullBytesRaw(data)
+	for _, prefix := range unsafePathPrefixes {
+		if len(s) >= len(prefix) && string(s[:len(prefix)]) == prefix {
+			return true
+		}
+	}
+	return false
+}
+
+// trimNullBytesRaw trims trailing null bytes, returning a byte slice.
+func trimNullBytesRaw(data []byte) []byte {
+	for i := len(data) - 1; i >= 0; i-- {
+		if data[i] != 0 {
+			return data[:i+1]
+		}
+	}
+	return nil
 }
