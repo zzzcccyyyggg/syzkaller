@@ -9,16 +9,20 @@ import (
 )
 
 // ============================================================================
-// Object-Level Program Linking V2 - Syscall Variant Unification
+// Object-Level Program Linking V2 - Resource-Aware Cross-Syscall Alignment
 // ============================================================================
-// New strategy: Instead of matching paths between programs, we unify the
-// resource arguments of SAME-TYPE syscalls to increase the probability
-// of accessing the same kernel objects.
+// Strategy: Unify object identifiers between two programs so they are more
+// likely to access the same kernel object when executed concurrently.
 //
-// Example: If prog1 has open$kccwf(testfile#0), and prog2 has open$kccwf(testfile#3),
-// we modify prog2 to use testfile#0, so both programs access the same file.
+// Alignment proceeds in two tiers:
+//   1. Same-name match: prog2's syscall has the exact same name as prog1's.
+//   2. Cross-syscall compatible match: prog2's syscall belongs to the same
+//      object family (e.g., open$kccwf ↔ stat$kccwf both use kccwf_file).
 //
-// This is simpler and more effective than the old path-matching approach.
+// The object family table and compatibility rules are defined in
+// object_family.go. Only syscalls with directly rewritable object
+// identifiers (paths, socket addresses) are eligible; fd-dependent
+// syscalls are intentionally excluded (they inherit via fd chains).
 // ============================================================================
 
 // SyscallResourceInfo stores resource info extracted from a syscall.
@@ -28,11 +32,16 @@ type SyscallResourceInfo struct {
 	ResourceArg    prog.Arg      // The resource argument (e.g., path pointer)
 	ResourceArgIdx int           // Index of the resource arg in Args[]
 	DataArg        *prog.DataArg // The actual DataArg containing the string
+	Family         objectFamily  // Object family this syscall belongs to
+	FamilyArgIndex int           // Arg index within the family definition
 }
 
 // LinkProgramsV2 unifies resource arguments between two programs.
-// For each syscall in prog2 that also exists in prog1, we copy prog1's
-// resource argument to prog2 to ensure they access the same kernel object.
+// It performs two-tier alignment:
+//   1. Same-name: for each syscall in prog2 that shares the exact name with
+//      a prog1 syscall, copy the object identifier directly.
+//   2. Cross-syscall: for remaining unmatched syscalls in prog2, check if any
+//      prog1 resource belongs to the same object family and align them.
 func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
 	if prog1 == nil || prog2 == nil {
 		return prog2
@@ -43,15 +52,18 @@ func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
 	attempt := ol.linkAttempts
 	ol.mu.Unlock()
 
-	// 1. Extract resource info from prog1's file-related syscalls
+	// 1. Extract resource info from prog1's eligible syscalls
 	prog1Resources := extractSyscallResources(prog1)
 	if len(prog1Resources) == 0 {
 		return prog2.Clone()
 	}
 
-	// 2. Clone prog2 and unify resources
+	// 2. Build family index: family -> []SyscallResourceInfo for cross-matching
+	familyIndex := buildFamilyIndex(prog1Resources)
+
+	// 3. Clone prog2 and apply two-tier unification
 	linked := prog2.Clone()
-	unified := unifyResourcesByType(linked, prog1Resources)
+	unified := unifyResourcesTwoTier(linked, prog1Resources, familyIndex)
 
 	if unified > 0 {
 		ol.mu.Lock()
@@ -66,7 +78,9 @@ func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
 	return linked
 }
 
-// extractSyscallResources extracts resource information from file-related syscalls.
+// extractSyscallResources extracts resource information from eligible syscalls.
+// It uses the object family table for family-registered syscalls, and falls back
+// to the legacy isFileRelatedSyscall check for broader coverage.
 func extractSyscallResources(p *prog.Prog) map[string]SyscallResourceInfo {
 	resources := make(map[string]SyscallResourceInfo)
 
@@ -75,28 +89,52 @@ func extractSyscallResources(p *prog.Prog) map[string]SyscallResourceInfo {
 			continue
 		}
 
-		// Check if this is a file-related syscall
-		if !isFileRelatedSyscall(call.Meta.Name) {
+		name := call.Meta.Name
+
+		// Try family table first (covers kccwf, bluetooth, unix socket, etc.)
+		if famInfo, ok := getSyscallFamily(name); ok {
+			if famInfo.ArgIndex < len(call.Args) {
+				dataArg := findDataArg(call.Args[famInfo.ArgIndex])
+				if dataArg != nil && len(dataArg.Data()) > 0 {
+					if _, exists := resources[name]; !exists {
+						resources[name] = SyscallResourceInfo{
+							SyscallName:    name,
+							CallIndex:      callIdx,
+							ResourceArg:    call.Args[famInfo.ArgIndex],
+							ResourceArgIdx: famInfo.ArgIndex,
+							DataArg:        dataArg,
+							Family:         famInfo.Family,
+							FamilyArgIndex: famInfo.ArgIndex,
+						}
+					}
+				}
+			}
 			continue
 		}
 
-		// Find the path/filename argument (usually first or second arg)
+		// Fallback: legacy file-related syscall check (first DataArg in args[0..2])
+		if !isFileRelatedSyscall(name) {
+			continue
+		}
+		// Skip dirfd-dependent syscalls in the fallback path
+		if isUnsafeAlignment(name) {
+			continue
+		}
 		for argIdx, arg := range call.Args {
-			if argIdx >= 3 { // Only check first 3 args
+			if argIdx >= 3 {
 				break
 			}
-
 			dataArg := findDataArg(arg)
 			if dataArg != nil && len(dataArg.Data()) > 0 {
-				// Store this resource info, keyed by syscall name
-				// If multiple calls of same type, keep the first one
-				if _, exists := resources[call.Meta.Name]; !exists {
-					resources[call.Meta.Name] = SyscallResourceInfo{
-						SyscallName:    call.Meta.Name,
+				if _, exists := resources[name]; !exists {
+					resources[name] = SyscallResourceInfo{
+						SyscallName:    name,
 						CallIndex:      callIdx,
 						ResourceArg:    arg,
 						ResourceArgIdx: argIdx,
 						DataArg:        dataArg,
+						Family:         familyNone,
+						FamilyArgIndex: argIdx,
 					}
 				}
 				break
@@ -105,6 +143,21 @@ func extractSyscallResources(p *prog.Prog) map[string]SyscallResourceInfo {
 	}
 
 	return resources
+}
+
+// buildFamilyIndex groups prog1 resources by object family for cross-matching.
+// Each family maps to the first eligible resource found (to avoid over-rewriting).
+func buildFamilyIndex(resources map[string]SyscallResourceInfo) map[objectFamily]SyscallResourceInfo {
+	index := make(map[objectFamily]SyscallResourceInfo)
+	for _, info := range resources {
+		if info.Family == familyNone {
+			continue
+		}
+		if _, exists := index[info.Family]; !exists {
+			index[info.Family] = info
+		}
+	}
+	return index
 }
 
 // findDataArg recursively finds the DataArg within an argument.
@@ -130,55 +183,93 @@ func findDataArg(arg prog.Arg) *prog.DataArg {
 	return nil
 }
 
-// unifyResourcesByType modifies prog to use the same resources as in sourceResources.
-func unifyResourcesByType(p *prog.Prog, sourceResources map[string]SyscallResourceInfo) int {
+// unifyResourcesTwoTier applies two-tier alignment to the target program:
+//   Tier 1 (same-name): exact syscall name match — highest confidence.
+//   Tier 2 (cross-family): same object family match — enables e.g. open$kccwf → stat$kccwf alignment.
+//
+// A per-family rewrite counter prevents over-rewriting: at most maxRewritesPerFamily
+// calls per family are rewritten in the partner program.
+func unifyResourcesTwoTier(p *prog.Prog, sourceResources map[string]SyscallResourceInfo, familyIndex map[objectFamily]SyscallResourceInfo) int {
+	const maxRewritesPerFamily = 3
 	unified := 0
+	familyRewriteCount := make(map[objectFamily]int)
 
 	for _, call := range p.Calls {
 		if call == nil || call.Meta == nil {
 			continue
 		}
+		name := call.Meta.Name
 
-		// Check if prog1 has the same syscall type
-		sourceInfo, exists := sourceResources[call.Meta.Name]
+		// --- Tier 1: exact same-name match ---
+		if sourceInfo, exists := sourceResources[name]; exists {
+			if n := rewriteObjectIdentifier(call, sourceInfo); n > 0 {
+				unified += n
+				if sourceInfo.Family != familyNone {
+					familyRewriteCount[sourceInfo.Family]++
+				}
+				continue
+			}
+		}
+
+		// --- Tier 2: cross-syscall family match ---
+		targetFamInfo, ok := getSyscallFamily(name)
+		if !ok || targetFamInfo.Family == familyNone {
+			continue
+		}
+		// Check rewrite budget
+		if familyRewriteCount[targetFamInfo.Family] >= maxRewritesPerFamily {
+			continue
+		}
+		sourceInfo, exists := familyIndex[targetFamInfo.Family]
 		if !exists {
 			continue
 		}
-
-		// Find the path argument in this call
-		for argIdx, arg := range call.Args {
-			if argIdx >= 3 {
-				break
-			}
-
-			targetDataArg := findDataArg(arg)
-			if targetDataArg == nil || len(targetDataArg.Data()) == 0 {
-				continue
-			}
-
-			// Copy data from source to target
-			sourceData := sourceInfo.DataArg.Data()
-			targetData := targetDataArg.Data()
-
-			// Only unify if they're different
-			if !dataEqual(sourceData, targetData) {
-				// Clone the source data to target
-				newData := make([]byte, len(sourceData))
-				copy(newData, sourceData)
-				targetDataArg.SetData(newData)
-				unified++
-
-				// Log the unification
-				srcStr := trimNullBytes(sourceData)
-				tgtStr := trimNullBytes(targetData)
-				log.Logf(1, "[OBJLINK-V2] unified %s: %q -> %q",
-					call.Meta.Name, tgtStr, srcStr)
-			}
-			break
+		// Don't cross-align to itself (already handled in tier 1)
+		if sourceInfo.SyscallName == name {
+			continue
+		}
+		if n := rewriteObjectIdentifierAtArg(call, targetFamInfo.ArgIndex, sourceInfo); n > 0 {
+			unified += n
+			familyRewriteCount[targetFamInfo.Family]++
 		}
 	}
 
 	return unified
+}
+
+// rewriteObjectIdentifier rewrites the object identifier in a call using exact
+// same-name matching (source and target share the same arg layout).
+func rewriteObjectIdentifier(call *prog.Call, sourceInfo SyscallResourceInfo) int {
+	return rewriteObjectIdentifierAtArg(call, sourceInfo.FamilyArgIndex, sourceInfo)
+}
+
+// rewriteObjectIdentifierAtArg rewrites the DataArg at the given argument index
+// in the call with the source's object identifier bytes.
+func rewriteObjectIdentifierAtArg(call *prog.Call, argIndex int, sourceInfo SyscallResourceInfo) int {
+	if argIndex >= len(call.Args) {
+		return 0
+	}
+	targetDataArg := findDataArg(call.Args[argIndex])
+	if targetDataArg == nil || len(targetDataArg.Data()) == 0 {
+		return 0
+	}
+
+	sourceData := sourceInfo.DataArg.Data()
+	targetData := targetDataArg.Data()
+
+	if dataEqual(sourceData, targetData) {
+		return 0
+	}
+
+	newData := make([]byte, len(sourceData))
+	copy(newData, sourceData)
+	targetDataArg.SetData(newData)
+
+	srcStr := trimNullBytes(sourceData)
+	tgtStr := trimNullBytes(targetData)
+	log.Logf(1, "[OBJLINK-V2] unified %s (from %s): %q -> %q",
+		call.Meta.Name, sourceInfo.SyscallName, tgtStr, srcStr)
+	return 1
 }
 
 // dataEqual checks if two byte slices are equal.
