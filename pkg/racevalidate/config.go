@@ -16,7 +16,7 @@ type Config struct {
 	// TargetVarNamePair specifies a specific VarName pair to debug.
 	// Format: "freeAccessName-useAccessName" (hex, e.g. "610067002c7c8254-235d4d37a0583ad1")
 	// When set, only entries containing this VarName pair are validated,
-	// and all skip logic (invalid/validated/HB) is bypassed.
+	// and all skip logic (invalid/validated/backoff) is bypassed.
 	TargetVarNamePair string
 	// TargetCorpusKey specifies a specific corpus entry key to validate.
 	// Format: "sig0-sig1-sig2-sig3" (hex, e.g. "d9daa1d91920e5d5-...")
@@ -73,18 +73,19 @@ type Config struct {
 	// When true, only pairs that also exist in entry.Pairs are considered stable.
 	RequireOriginMatch bool
 
-	// DisableHBSkip disables all HB (Happens-Before) skip logic.
-	// When enabled (true), entries and pairs are never skipped based on HB probability,
+	// DisableBackoffSkip disables probabilistic validation backoff skip logic.
+	// When enabled (true), entries and pairs are never skipped based on the
+	// historical backoff score,
 	// allowing all entries to be validated regardless of historical failure rates.
 	// This is useful when you want to retry entries that were previously skipped.
-	DisableHBSkip bool
+	DisableBackoffSkip bool
 
-	// ContinueAfterHB controls whether to continue testing HB-skipped entries after the
-	// initial HB-guided validation pass completes. When enabled, entries that were skipped
-	// by the HB inference (shouldSkipEntry) are re-enqueued with HB skip disabled, allowing
-	// all pairs to be tested. This is useful for modules with few pairs where HB skipping
+	// ContinueAfterBackoff controls whether to continue testing backoff-skipped entries after the
+	// initial backoff-guided validation pass completes. When enabled, entries that were skipped
+	// by the backoff heuristic (shouldSkipEntry) are re-enqueued with backoff skip disabled, allowing
+	// all pairs to be tested. This is useful for modules with few pairs where backoff skipping
 	// causes validation to finish too quickly during long experiments (e.g., 24h runs).
-	ContinueAfterHB bool
+	ContinueAfterBackoff bool
 
 	// EnableHistoryMinimization enables replay history minimization after successful validation.
 	// When enabled, after a pair is validated, the system will try to find the minimum

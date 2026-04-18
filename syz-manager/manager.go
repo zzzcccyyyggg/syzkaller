@@ -1348,6 +1348,13 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			MaxCorpusCountPerVarName:   mgr.cfg.Experimental.MaxCorpusCountPerVarName,
 			SuccessThreshold:           mgr.cfg.Experimental.SuccessThreshold,
 			ExecutionsPerAttempt:       mgr.cfg.Experimental.ExecutionsPerAttempt,
+			// Dynamic Threshold
+			EnableDynamicThreshold:    mgr.cfg.Experimental.EnableDynamicThreshold,
+			DynamicThresholdInitialUs: mgr.cfg.Experimental.DynamicThresholdInitialUs,
+			DynamicThresholdMinUs:     mgr.cfg.Experimental.DynamicThresholdMinUs,
+			DynamicThresholdMaxUs:     mgr.cfg.Experimental.DynamicThresholdMaxUs,
+			DynamicThresholdEvalSec:   mgr.cfg.Experimental.DynamicThresholdEvalSec,
+			Workdir:                   mgr.cfg.Workdir,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		fuzzerObj.AddCandidates(candidates)

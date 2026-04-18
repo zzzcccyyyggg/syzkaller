@@ -16,6 +16,7 @@ import (
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/log"
+	"github.com/google/syzkaller/pkg/osutil"
 )
 
 type Executor interface {
@@ -89,9 +90,9 @@ type StageManager struct {
 	invalidDB *db.DB
 	validDB   *db.DB
 
-	// Layer 2: VarNamePair HB statistics store
-	varNameHBDB    *db.DB
-	varNameHBStore *VarNameHBStore
+	// Layer 2: VarName pair validation backoff statistics store
+	varNameBackoffDB    *db.DB
+	varNameBackoffStore *VarNameBackoffStore
 
 	mu          sync.Mutex
 	pending     map[string]*validationTask
@@ -109,9 +110,9 @@ type StageManager struct {
 	currentVNIndex int                        // round-robin index
 	vnScheduleCond *sync.Cond                 // condition variable for task availability
 
-	// ContinueAfterHB support: re-test HB-skipped entries after initial pass
-	hbSkippedEntries []*fuzzer.UAFCorpusEntry // entries skipped by shouldSkipEntry during HB phase
-	hbPhaseComplete  bool                     // true after initial HB pass; disables HB skip for re-enqueued entries
+	// ContinueAfterBackoff support: re-test backoff-skipped entries after initial pass.
+	backoffSkippedEntries []*fuzzer.UAFCorpusEntry // entries skipped by shouldSkipEntry during the backoff-guided pass
+	backoffPhaseComplete  bool                     // true after the initial backoff-guided pass; disables backoff skip for re-enqueued entries
 
 	closeOnce sync.Once
 }
@@ -196,14 +197,20 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 			log.Logf(0, "uafvalidate: loaded %d validated pairs from db", len(vd.Records))
 		}
 
-		// Layer 2: VarNamePair HB statistics DB
-		hbPath := filepath.Join(cfg.Workdir, "varname_hb_stats.db")
-		hbDB, err := db.Open(hbPath, true)
+		// Layer 2: VarName pair validation backoff statistics DB.
+		backoffPath := filepath.Join(cfg.Workdir, "varname_backoff_stats.db")
+		legacyBackoffPath := filepath.Join(cfg.Workdir, "varname_hb_stats.db")
+		statsPath := backoffPath
+		if !osutil.IsExist(backoffPath) && osutil.IsExist(legacyBackoffPath) {
+			statsPath = legacyBackoffPath
+			log.Logf(0, "uafvalidate: using legacy validation backoff stats db: %s", legacyBackoffPath)
+		}
+		backoffDB, err := db.Open(statsPath, true)
 		if err != nil {
-			log.Logf(0, "uafvalidate: failed to open varname HB stats db: %v", err)
+			log.Logf(0, "uafvalidate: failed to open validation backoff stats db: %v", err)
 		} else {
-			sm.varNameHBDB = hbDB
-			sm.varNameHBStore = NewVarNameHBStore(hbDB)
+			sm.varNameBackoffDB = backoffDB
+			sm.varNameBackoffStore = NewVarNameBackoffStore(backoffDB)
 		}
 	}
 
@@ -491,13 +498,13 @@ func retryReason(res *ValidationResult) string {
 	return "unknown"
 }
 
-// entrySkipThreshold is the minimum skip probability for a pair to be considered "skippable"
-const entrySkipThreshold = 0.8
+// entryBackoffThreshold is the minimum skip probability for a pair to be considered "skippable".
+const entryBackoffThreshold = 0.8
 
-// shouldSkipEntry checks if all pairs in the entry have high HB confidence
-// and should be skipped entirely to avoid unnecessary execution
+// shouldSkipEntry checks if all pairs in the entry have accumulated a high
+// backoff score and should be skipped entirely to avoid unnecessary execution.
 func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool, reason string) {
-	if sm.varNameHBStore == nil {
+	if sm.varNameBackoffStore == nil {
 		return false, ""
 	}
 
@@ -543,20 +550,20 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 
 		// Layer 2: Check if VarName pair is already verified (success)
 		// Once a VarName pair is verified, ALL entries with that VarName should be skipped
-		if sm.varNameHBStore.IsVerified(pair) {
+		if sm.varNameBackoffStore.IsVerified(pair) {
 			skippedCount++
 			verifiedCount++
 			totalProb += 1.0
 			continue
 		}
 
-		// Layer 3: VarName HB probability check (for high-failure pairs)
-		stats := sm.varNameHBStore.GetByPair(pair)
+		// Layer 3: VarName backoff probability check (for repeatedly low-yield pairs)
+		stats := sm.varNameBackoffStore.GetByPair(pair)
 		prob := stats.SkipProbability()
 		totalProb += prob
 
 		// If probability is high enough, count as skippable
-		if prob >= entrySkipThreshold {
+		if prob >= entryBackoffThreshold {
 			skippedCount++
 		}
 	}
@@ -567,7 +574,7 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 		if verifiedCount > 0 {
 			return true, fmt.Sprintf("all %d pairs skipped (%d verified, avg_prob=%.2f)", validPairCount, verifiedCount, avgProb)
 		}
-		return true, fmt.Sprintf("all %d pairs high HB (avg_prob=%.2f)", validPairCount, avgProb)
+		return true, fmt.Sprintf("all %d pairs high backoff score (avg_prob=%.2f)", validPairCount, avgProb)
 	}
 
 	return false, ""
@@ -613,18 +620,18 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		log.Logf(1, "uafvalidate: [debug mode] entry matches target VarName pair %s", sm.cfg.TargetVarNamePair)
 	}
 
-	// Pre-check: if all pairs have high HB confidence, skip entire entry
+	// Pre-check: if all pairs have high backoff score, skip entire entry.
 	// Skip this check in debug mode (TargetVarNamePair or TargetCorpusKey is set)
-	// Also skip if DisableHBSkip is enabled or HB phase is already complete (re-enqueue phase)
+	// Also skip if DisableBackoffSkip is enabled or the backoff phase is already complete (re-enqueue phase).
 	sm.mu.Lock()
-	hbDone := sm.hbPhaseComplete
+	backoffDone := sm.backoffPhaseComplete
 	sm.mu.Unlock()
-	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableHBSkip && !hbDone {
+	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableBackoffSkip && !backoffDone {
 		if skip, reason := sm.shouldSkipEntry(clone); skip {
-			log.Logf(0, "uafvalidate: skipping entry (all pairs high HB): %s", reason)
-			if sm.cfg.ContinueAfterHB {
+			log.Logf(0, "uafvalidate: skipping entry (all pairs high backoff score): %s", reason)
+			if sm.cfg.ContinueAfterBackoff {
 				sm.mu.Lock()
-				sm.hbSkippedEntries = append(sm.hbSkippedEntries, clone)
+				sm.backoffSkippedEntries = append(sm.backoffSkippedEntries, clone)
 				sm.mu.Unlock()
 			}
 			return nil
@@ -907,19 +914,19 @@ func (sm *StageManager) complete(task *validationTask) {
 
 func (sm *StageManager) maybeCloseTasksLocked() {
 	if sm.closed && !sm.tasksClosed && len(sm.pending) == 0 {
-		// ContinueAfterHB: re-enqueue HB-skipped entries before closing
-		if sm.cfg.ContinueAfterHB && !sm.hbPhaseComplete && len(sm.hbSkippedEntries) > 0 {
-			sm.hbPhaseComplete = true
-			skipped := sm.hbSkippedEntries
-			sm.hbSkippedEntries = nil
+		// ContinueAfterBackoff: re-enqueue backoff-skipped entries before closing
+		if sm.cfg.ContinueAfterBackoff && !sm.backoffPhaseComplete && len(sm.backoffSkippedEntries) > 0 {
+			sm.backoffPhaseComplete = true
+			skipped := sm.backoffSkippedEntries
+			sm.backoffSkippedEntries = nil
 			// Reset closed so prepareTask() and dispatch() accept new entries
 			sm.closed = false
-			log.Logf(0, "uafvalidate: HB phase complete, scheduling %d skipped entries for exhaustive testing", len(skipped))
+			log.Logf(0, "uafvalidate: backoff phase complete, scheduling %d skipped entries for exhaustive testing", len(skipped))
 			// Wake up VarName workers that may be waiting
 			if sm.vnScheduleCond != nil {
 				sm.vnScheduleCond.Broadcast()
 			}
-			go sm.reEnqueueHBSkipped(skipped)
+			go sm.reEnqueueBackoffSkipped(skipped)
 			return
 		}
 		log.Logf(0, "uafvalidate: closing tasks channel")
@@ -928,17 +935,17 @@ func (sm *StageManager) maybeCloseTasksLocked() {
 	}
 }
 
-// isHBPhaseComplete returns true if the initial HB-guided pass has completed
+// isBackoffPhaseComplete returns true if the initial backoff-guided pass has completed
 // and we are now in the exhaustive re-testing phase.
-func (sm *StageManager) isHBPhaseComplete() bool {
+func (sm *StageManager) isBackoffPhaseComplete() bool {
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
-	return sm.hbPhaseComplete
+	return sm.backoffPhaseComplete
 }
 
-// reEnqueueHBSkipped re-enqueues entries that were skipped by entry-level HB check.
+// reEnqueueBackoffSkipped re-enqueues entries that were skipped by the entry-level backoff check.
 // Entries are shuffled to randomize testing order.
-func (sm *StageManager) reEnqueueHBSkipped(entries []*fuzzer.UAFCorpusEntry) {
+func (sm *StageManager) reEnqueueBackoffSkipped(entries []*fuzzer.UAFCorpusEntry) {
 	// Shuffle for random testing order
 	rand.Shuffle(len(entries), func(i, j int) {
 		entries[i], entries[j] = entries[j], entries[i]
@@ -949,7 +956,7 @@ func (sm *StageManager) reEnqueueHBSkipped(entries []*fuzzer.UAFCorpusEntry) {
 		sm.Enqueue(entry)
 		enqueued++
 	}
-	log.Logf(0, "uafvalidate: re-enqueued %d/%d HB-skipped entries for exhaustive testing", enqueued, len(entries))
+	log.Logf(0, "uafvalidate: re-enqueued %d/%d backoff-skipped entries for exhaustive testing", enqueued, len(entries))
 
 	// Signal close again — no more entries to enqueue
 	sm.mu.Lock()
@@ -1522,17 +1529,17 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			continue
 		}
 
-		// ========== Layer 2: VarName probabilistic skip ==========
-		if sm.varNameHBStore != nil {
-			skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
+		// ========== Layer 2: VarName probabilistic backoff ==========
+		if sm.varNameBackoffStore != nil {
+			skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 			if skip {
-				log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
-					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+				log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
+					i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 				continue
 			}
 			if prob > 0 {
-				log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
-					i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+				log.Logf(1, "uafvalidate: L2 pass (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f",
+					i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob)
 			}
 		}
 
@@ -1611,7 +1618,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status, statusDetail)
 
 		if execRes.TriggeredCount > 0 {
-			// ========== Success: proves not HB relationship ==========
+			// ========== Success: proves this VarName pair can trigger ==========
 
 			// Try to minimize history if enabled
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
@@ -1632,13 +1639,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
 			sm.markValidated(fullKey, reportData)
 
-			// Update VarName HB statistics (success) and mark as verified
+			// Update VarName backoff statistics (success) and mark as verified
 			// This will cause ALL future entries with the same VarName pair to be skipped
-			if sm.varNameHBStore != nil {
-				sm.varNameHBStore.RecordSuccessWithKey(&pairCopy, task.key)
-				stats := sm.varNameHBStore.GetByPair(&pairCopy)
-				log.Logf(0, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
-					vnKey, stats.HBConfidence(), stats.IsVerified())
+			if sm.varNameBackoffStore != nil {
+				sm.varNameBackoffStore.RecordSuccessWithKey(&pairCopy, task.key)
+				stats := sm.varNameBackoffStore.GetByPair(&pairCopy)
+				log.Logf(0, "uafvalidate: pair validated, backoff score updated: vnkey=%s new_score=%.2f verified=%t",
+					vnKey, stats.BackoffScore(), stats.IsVerified())
 			}
 
 			// Log a summary (not full data to avoid log flooding)
@@ -1651,25 +1658,25 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			continue
 		}
 
-		// ========== Failure: increase HB confidence ==========
+		// ========== Failure: increase backoff score ==========
 		closeExec()
 
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
 
-		// Layer 2: Update VarName HB statistics (failure)
-		if sm.varNameHBStore != nil {
-			sm.varNameHBStore.RecordFailure(&pairCopy)
-			stats := sm.varNameHBStore.GetByPair(&pairCopy)
-			log.Logf(0, "uafvalidate: pair failed verification, HB conf updated: vnkey=%s new_conf=%.2f skip_prob=%.2f",
-				vnKey, stats.HBConfidence(), stats.SkipProbability())
+		// Layer 2: Update VarName backoff statistics (failure)
+		if sm.varNameBackoffStore != nil {
+			sm.varNameBackoffStore.RecordFailure(&pairCopy)
+			stats := sm.varNameBackoffStore.GetByPair(&pairCopy)
+			log.Logf(0, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
+				vnKey, stats.BackoffScore(), stats.SkipProbability())
 		}
 	}
 
 	// Output statistics summary
-	if sm.varNameHBStore != nil {
-		total, highConf, verified := sm.varNameHBStore.Stats()
-		log.Logf(0, "uafvalidate: verification phase complete, VarName HB stats: total=%d high_confidence=%d verified=%d", total, highConf, verified)
+	if sm.varNameBackoffStore != nil {
+		total, highScore, verified := sm.varNameBackoffStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase complete, VarName backoff stats: total=%d high_score=%d verified=%d", total, highScore, verified)
 	}
 }
 
@@ -1702,9 +1709,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			}
 			log.Logf(1, "uafvalidate: [debug mode] verifying target pair %d/%d vnkey=%s fullkey=%s",
 				i+1, len(stablePairs), vnKey, fullKey)
-		} else if !sm.cfg.DisableHBSkip && !sm.isHBPhaseComplete() {
+		} else if !sm.cfg.DisableBackoffSkip && !sm.isBackoffPhaseComplete() {
 			// ========== Normal mode: Layer 1 & 2 skip checks ==========
-			// (Skipped when DisableHBSkip is enabled or HB phase already complete)
+			// (Skipped when DisableBackoffSkip is enabled or the backoff phase is already complete)
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
 				log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
@@ -1716,17 +1723,17 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				continue
 			}
 
-			// ========== Layer 2: VarName probabilistic skip ==========
-			if sm.varNameHBStore != nil {
-				skip, prob, stats := sm.varNameHBStore.ShouldSkip(&pair, rand.Float64)
+			// ========== Layer 2: VarName probabilistic backoff ==========
+			if sm.varNameBackoffStore != nil {
+				skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 				if skip {
-					log.Logf(0, "uafvalidate: L2 skip (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f failures=%d successes=%d",
-						i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob, stats.Failures, stats.Successes)
+					log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
+						i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 					continue
 				}
 				if prob > 0 {
-					log.Logf(1, "uafvalidate: L2 pass (HB prob) pair %d/%d vnkey=%s conf=%.2f prob=%.2f",
-						i+1, len(stablePairs), vnKey, stats.HBConfidence(), prob)
+					log.Logf(1, "uafvalidate: L2 pass (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f",
+						i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob)
 				}
 			}
 		}
@@ -1833,7 +1840,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		if execRes.TriggeredCount > 0 {
-			// ========== Success: proves not HB relationship ==========
+			// ========== Success: proves this VarName pair can trigger ==========
 
 			// Try to minimize history if enabled
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
@@ -1867,13 +1874,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 			sm.markValidated(fullKey, reportData)
 
-			// Update VarName HB statistics (success) and mark as verified
+			// Update VarName backoff statistics (success) and mark as verified
 			// This will cause ALL future entries with the same VarName pair to be skipped
-			if sm.varNameHBStore != nil {
-				sm.varNameHBStore.RecordSuccessWithKey(&pair, task.key)
-				stats := sm.varNameHBStore.GetByPair(&pair)
-				log.Logf(1, "uafvalidate: pair validated, HB conf updated: vnkey=%s new_conf=%.2f verified=%t",
-					vnKey, stats.HBConfidence(), stats.IsVerified())
+			if sm.varNameBackoffStore != nil {
+				sm.varNameBackoffStore.RecordSuccessWithKey(&pair, task.key)
+				stats := sm.varNameBackoffStore.GetByPair(&pair)
+				log.Logf(1, "uafvalidate: pair validated, backoff score updated: vnkey=%s new_score=%.2f verified=%t",
+					vnKey, stats.BackoffScore(), stats.IsVerified())
 			}
 
 			// Log a summary (not full data to avoid log flooding)
@@ -1886,7 +1893,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			continue
 		}
 
-		// ========== Failure: increase HB confidence ==========
+		// ========== Failure: increase backoff score ==========
 		closeExec()
 
 		// In debug mode, only log but don't update databases
@@ -1899,19 +1906,19 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
 
-		// Layer 2: Update VarName HB statistics (failure)
-		if sm.varNameHBStore != nil {
-			sm.varNameHBStore.RecordFailure(&pair)
-			stats := sm.varNameHBStore.GetByPair(&pair)
-			log.Logf(0, "uafvalidate: pair failed verification, HB conf updated: vnkey=%s new_conf=%.2f skip_prob=%.2f",
-				vnKey, stats.HBConfidence(), stats.SkipProbability())
+		// Layer 2: Update VarName backoff statistics (failure)
+		if sm.varNameBackoffStore != nil {
+			sm.varNameBackoffStore.RecordFailure(&pair)
+			stats := sm.varNameBackoffStore.GetByPair(&pair)
+			log.Logf(0, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
+				vnKey, stats.BackoffScore(), stats.SkipProbability())
 		}
 	}
 
 	// Output statistics summary
-	if sm.varNameHBStore != nil {
-		total, highConf, verified := sm.varNameHBStore.Stats()
-		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName HB stats: total=%d high_confidence=%d verified=%d", total, highConf, verified)
+	if sm.varNameBackoffStore != nil {
+		total, highScore, verified := sm.varNameBackoffStore.Stats()
+		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName backoff stats: total=%d high_score=%d verified=%d", total, highScore, verified)
 	}
 }
 

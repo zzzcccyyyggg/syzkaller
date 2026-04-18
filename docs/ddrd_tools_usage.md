@@ -66,7 +66,7 @@ sudo ./bin/syz-manager --config=./test/DDRD/your-config.cfg
 - `uaf-corpus.db`: UAF 候选语料库
 - `validated_uaf.db`: Layer 1 - 验证成功的 pair (含报告)
 - `invalid_uaf.db`: Layer 1 - 验证失败的 pair
-- `varname_hb_stats.db`: Layer 2 - VarName HB 统计
+- `varname_backoff_stats.db`: Layer 2 - VarName validation backoff 统计（兼容旧文件名 `varname_hb_stats.db`）
 
 ---
 
@@ -347,13 +347,13 @@ Main Program:
 | `uaf-corpus.db` | UAF 候选语料库 | `syz-uaf-corpus` |
 | `validated_uaf.db` | Layer 1 - 验证成功的精确 pair (含报告) | `syz-validatedb` |
 | `invalid_uaf.db` | Layer 1 - 验证失败的精确 pair | `syz-db` |
-| `varname_hb_stats.db` | Layer 2 - VarName 级别的 HB 统计 (含 Verified 标记) | `syz-db` |
+| `varname_backoff_stats.db` | Layer 2 - VarName 级别的 validation backoff 统计 (含 Verified 标记，兼容旧文件名 `varname_hb_stats.db`) | `syz-db` |
 
 ### 清理数据库重新验证
 
 ```bash
 # 清理验证状态，重新验证所有条目
-rm workdir/invalid_uaf.db workdir/varname_hb_stats.db
+rm workdir/invalid_uaf.db workdir/varname_backoff_stats.db workdir/varname_hb_stats.db
 
 # 然后重新运行 validate
 sudo ./bin/syz-manager --config=xxx.cfg --mode uaf-validate

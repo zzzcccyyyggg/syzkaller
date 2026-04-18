@@ -7,6 +7,7 @@ import (
 	"os"
 	"path/filepath"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
@@ -86,8 +87,8 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
-		DisableHBSkip:             cfg.DisableHBSkip,
-		ContinueAfterHB:           cfg.ContinueAfterHB,
+		DisableBackoffSkip:        cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,
@@ -681,8 +682,8 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
-		DisableHBSkip:             cfg.DisableHBSkip,
-		ContinueAfterHB:           cfg.ContinueAfterHB,
+		DisableBackoffSkip:        cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,
@@ -699,11 +700,26 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
+	// Atomic counters for validator stats reporting (dynamic threshold coordination)
+	var validatorProcessed int32
+	var validatorSuccess int32
+
 	// Start result handler
 	resultsDone := make(chan struct{})
 	go func() {
 		for res := range stage.Results() {
 			mgr.handleValidationResult(res)
+			// Track counts for dynamic threshold coordination
+			repeatTotal := res.RepeatTotal
+			if repeatTotal <= 0 {
+				repeatTotal = 1
+			}
+			if res.RepeatIndex+1 >= repeatTotal {
+				atomic.AddInt32(&validatorProcessed, 1)
+				if res.Success {
+					atomic.AddInt32(&validatorSuccess, 1)
+				}
+			}
 		}
 		close(resultsDone)
 	}()
@@ -743,6 +759,37 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	defer idleTicker.Stop()
 
 	log.Logf(0, "uaf validation: continuous mode started (reload=%v, idle_reload=%v)", reloadInterval, idleReloadInterval)
+
+	// Start periodic validator stats reporter for dynamic threshold coordination
+	validatorStartTime := time.Now()
+	statsReportInterval := 15 * time.Second
+	statsTicker := time.NewTicker(statsReportInterval)
+	defer statsTicker.Stop()
+	go func() {
+		for {
+			select {
+			case <-ctx.Done():
+				return
+			case <-statsTicker.C:
+				processed := int(atomic.LoadInt32(&validatorProcessed))
+				success := int(atomic.LoadInt32(&validatorSuccess))
+				pending := stage.PendingCount()
+				idle := !stage.HasPending()
+				var rate float64
+				if processed > 0 {
+					rate = float64(processed) / time.Since(validatorStartTime).Minutes()
+				}
+				_ = ddrd.WriteValidatorStats(mgr.cfg.Workdir, ddrd.ValidatorStats{
+					PendingCount:       pending,
+					ProcessedCount:     processed,
+					SuccessCount:       success,
+					ProcessingRatePerM: rate,
+					LastUpdate:         time.Now(),
+					Idle:               idle,
+				})
+			}
+		}
+	}()
 
 	for {
 		select {
@@ -876,8 +923,8 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
-		DisableHBSkip:             cfg.DisableHBSkip,
-		ContinueAfterHB:           cfg.ContinueAfterHB,
+		DisableBackoffSkip:        cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,

@@ -9,7 +9,7 @@ import (
 	"github.com/google/syzkaller/pkg/ddrd"
 )
 
-func TestHBConfidence(t *testing.T) {
+func TestBackoffScore(t *testing.T) {
 	tests := []struct {
 		name      string
 		failures  int
@@ -29,14 +29,14 @@ func TestHBConfidence(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stats := &VarNameHBStats{
+			stats := &VarNameBackoffStats{
 				Failures:      tt.failures,
 				Successes:     tt.successes,
 				TotalAttempts: tt.failures + tt.successes,
 			}
-			conf := stats.HBConfidence()
+			conf := stats.BackoffScore()
 			if conf < tt.wantMin || conf > tt.wantMax {
-				t.Errorf("HBConfidence() = %.3f, want in [%.2f, %.2f]", conf, tt.wantMin, tt.wantMax)
+				t.Errorf("BackoffScore() = %.3f, want in [%.2f, %.2f]", conf, tt.wantMin, tt.wantMax)
 			}
 		})
 	}
@@ -59,7 +59,7 @@ func TestSkipProbability(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			stats := &VarNameHBStats{
+			stats := &VarNameBackoffStats{
 				Failures:      tt.failures,
 				Successes:     tt.successes,
 				TotalAttempts: tt.total,
@@ -104,56 +104,56 @@ func TestVarNamePairKey(t *testing.T) {
 	}
 }
 
-func TestConfidenceProgression(t *testing.T) {
-	stats := &VarNameHBStats{}
+func TestBackoffScoreProgression(t *testing.T) {
+	stats := &VarNameBackoffStats{}
 
-	prevConf := 0.0
+	prevScore := 0.0
 	for i := 0; i < 10; i++ {
 		stats.RecordFailure()
-		conf := stats.HBConfidence()
+		score := stats.BackoffScore()
 
-		// Confidence should monotonically increase
-		if conf <= prevConf {
-			t.Errorf("Confidence should increase: prev=%.3f, now=%.3f after %d failures", prevConf, conf, i+1)
+		// The score should monotonically increase.
+		if score <= prevScore {
+			t.Errorf("Backoff score should increase: prev=%.3f, now=%.3f after %d failures", prevScore, score, i+1)
 		}
 
-		// Confidence increment should decrease (diminishing returns)
-		delta := conf - prevConf
-		t.Logf("After %d failures: conf=%.3f, delta=%.3f", i+1, conf, delta)
-		prevConf = conf
+		// Score increments should decrease (diminishing returns).
+		delta := score - prevScore
+		t.Logf("After %d failures: score=%.3f, delta=%.3f", i+1, score, delta)
+		prevScore = score
 	}
 
-	// Confidence should have an upper bound
-	if prevConf > 0.98 {
-		t.Errorf("Confidence should have upper bound, got %.3f", prevConf)
+	// The score should have an upper bound.
+	if prevScore > 0.98 {
+		t.Errorf("Backoff score should have upper bound, got %.3f", prevScore)
 	}
 }
 
-func TestSuccessReducesConfidence(t *testing.T) {
-	stats := &VarNameHBStats{}
+func TestSuccessReducesBackoffScore(t *testing.T) {
+	stats := &VarNameBackoffStats{}
 
 	// Accumulate 5 failures
 	for i := 0; i < 5; i++ {
 		stats.RecordFailure()
 	}
-	confAfterFailures := stats.HBConfidence()
+	scoreAfterFailures := stats.BackoffScore()
 
 	// One success
 	stats.RecordSuccess()
-	confAfterSuccess := stats.HBConfidence()
+	scoreAfterSuccess := stats.BackoffScore()
 
-	// Confidence should decrease significantly
-	reduction := confAfterFailures - confAfterSuccess
+	// One success should significantly reduce the score.
+	reduction := scoreAfterFailures - scoreAfterSuccess
 	t.Logf("After 5 failures: %.3f, after 1 success: %.3f, reduction: %.3f",
-		confAfterFailures, confAfterSuccess, reduction)
+		scoreAfterFailures, scoreAfterSuccess, reduction)
 
 	if reduction < 0.1 {
-		t.Errorf("One success should significantly reduce confidence, only reduced by %.3f", reduction)
+		t.Errorf("One success should significantly reduce the backoff score, only reduced by %.3f", reduction)
 	}
 }
 
 func TestExplorationGuarantee(t *testing.T) {
-	stats := &VarNameHBStats{
+	stats := &VarNameBackoffStats{
 		Failures:      100, // Many failures
 		Successes:     0,
 		TotalAttempts: 100,
@@ -171,8 +171,8 @@ func TestExplorationGuarantee(t *testing.T) {
 	t.Logf("With 100 failures: skip_prob=%.3f, verify_prob=%.3f", skipProb, verifyProb)
 }
 
-func TestVarNameHBStore(t *testing.T) {
-	store := NewVarNameHBStore(nil) // No DB for testing
+func TestVarNameBackoffStore(t *testing.T) {
+	store := NewVarNameBackoffStore(nil) // No DB for testing
 
 	pair := &ddrd.MayUAFPair{
 		FreeAccessName: 0x1234,
@@ -211,16 +211,16 @@ func TestVarNameHBStore(t *testing.T) {
 		t.Errorf("Should have 1 success, got %d", stats.Successes)
 	}
 
-	// Confidence should be lower after success
-	conf := stats.HBConfidence()
-	t.Logf("After 5 failures and 1 success: conf=%.3f", conf)
-	if conf > 0.75 {
-		t.Errorf("Confidence should be reduced after success, got %.3f", conf)
+	// The score should be lower after success.
+	score := stats.BackoffScore()
+	t.Logf("After 5 failures and 1 success: score=%.3f", score)
+	if score > 0.75 {
+		t.Errorf("Backoff score should be reduced after success, got %.3f", score)
 	}
 }
 
 func TestShouldSkipProbabilistic(t *testing.T) {
-	store := NewVarNameHBStore(nil)
+	store := NewVarNameBackoffStore(nil)
 
 	pair := &ddrd.MayUAFPair{
 		FreeAccessName: 0x1111,
@@ -249,26 +249,26 @@ func TestShouldSkipProbabilistic(t *testing.T) {
 }
 
 func TestStoreStats(t *testing.T) {
-	store := NewVarNameHBStore(nil)
+	store := NewVarNameBackoffStore(nil)
 
-	// Add some pairs with different confidence levels
+	// Add some pairs with different backoff levels.
 	lowConfPair := &ddrd.MayUAFPair{FreeAccessName: 1, UseAccessName: 1}
 	highConfPair := &ddrd.MayUAFPair{FreeAccessName: 2, UseAccessName: 2}
 
-	// Low confidence: 1 failure
+	// Low backoff score: 1 failure
 	store.RecordFailure(lowConfPair)
 
-	// High confidence: 10 failures
+	// High backoff score: 10 failures
 	for i := 0; i < 10; i++ {
 		store.RecordFailure(highConfPair)
 	}
 
-	total, highConf, verified := store.Stats()
+	total, highScore, verified := store.Stats()
 	if total != 2 {
 		t.Errorf("Total should be 2, got %d", total)
 	}
-	if highConf != 1 {
-		t.Errorf("High confidence count should be 1, got %d", highConf)
+	if highScore != 1 {
+		t.Errorf("High score count should be 1, got %d", highScore)
 	}
 	if verified != 0 {
 		t.Errorf("Verified count should be 0, got %d", verified)
@@ -276,7 +276,7 @@ func TestStoreStats(t *testing.T) {
 }
 
 func TestVarNameVerified(t *testing.T) {
-	store := NewVarNameHBStore(nil)
+	store := NewVarNameBackoffStore(nil)
 
 	pair := &ddrd.MayUAFPair{
 		FreeAccessName: 0xAAAA,

@@ -154,16 +154,29 @@
 
 **注意**: 此选项会自动启用 `enable_varname_scheduling`（如果未启用）。
 
-### `disable_hb_skip`
+### `disable_backoff_skip`
 - **类型**: `bool`
 - **默认值**: `false`
-- **说明**: 禁用所有 HB (Happens-Before) 跳过逻辑。
-  - `false`: 使用 HB 概率模型跳过历史失败次数多的 entries 和 pairs。
-  - `true`: 禁用所有 HB 跳过逻辑，允许所有 entries 被验证。
+- **说明**: 禁用基于历史验证结果的概率降权/跳过逻辑。
+  - `false`: 使用 backoff score 对历史失败次数多、验证收益低的 entries 和 pairs 进行概率性降权。
+  - `true`: 禁用该降权逻辑，允许所有 entries 被验证。
 
-**使用场景**: 当您在 `target_corpus_key` 模式能成功复现但 `continue` 模式无法复现时，可能是因为 HB 概率累积导致该 entry 被跳过。启用此选项可以重新尝试被跳过的 entries。
+**注意**: 这里的 backoff score 只是验证阶段的效率启发式，并不声称表示真实的 happens-before 概率。
+
+**兼容性**: 旧配置名 `disable_hb_skip` 仍然可用，语义与本项完全一致。
+
+**使用场景**: 当您在 `target_corpus_key` 模式能成功复现但 `continue` 模式无法复现时，可能是因为 backoff 分数累积导致该 entry 被跳过。启用此选项可以重新尝试被跳过的 entries。
 
 **警告**: 启用此选项会增加无效验证的数量，因为系统不会跳过已知的高失败率 pairs。建议仅在调试时使用。
+
+### `continue_after_backoff`
+- **类型**: `bool`
+- **默认值**: `false`
+- **说明**: 在初始 backoff-guided 验证轮完成后，将之前因 backoff 跳过的 entries 重新入队并再次测试。
+  - `false`: 结束于 backoff-guided 验证轮。
+  - `true`: 再做一轮穷尽测试，避免长期实验中过早空闲。
+
+**兼容性**: 旧配置名 `continue_after_hb` 仍然可用，语义与本项完全一致。
 
 ---
 
@@ -304,7 +317,7 @@
 - **格式**: `"freeAccessName-useAccessName"`（16 位十六进制，如 `"610067002c7c8254-235d4d37a0583ad1"`）
 - **说明**: 指定要调试的特定 VarName pair。设置后：
   - 仅处理包含该 VarName pair 的 entries
-  - 跳过所有过滤逻辑（invalid/validated/HB skip）
+  - 跳过所有过滤逻辑（invalid/validated/backoff skip）
   - 验证结果不写入数据库，仅输出日志
 
 ### `target_corpus_key`
@@ -313,7 +326,7 @@
 - **格式**: `"sig0-sig1-sig2-sig3"`（64 位十六进制 key，如 `"d9daa1d91920e5d5-7ae0c8d447027fda-b52a7fe3d5ed9139-027653b5437bc01a"`）
 - **说明**: 指定要调试的特定 corpus entry key。设置后：
   - 仅加载并处理匹配该 key 的 entry
-  - 跳过所有过滤逻辑（invalid/validated/HB skip）
+  - 跳过所有过滤逻辑（invalid/validated/backoff skip）
   - 可与 `target_varname_pair` 组合使用，进一步过滤该 entry 中的特定 pairs
 
 **组合使用**:
@@ -398,7 +411,7 @@
 | `uaf-corpus.db` | 源 corpus entries（来自 fuzzer） |
 | `validated_uaf.db` | 验证成功的 pairs 及详细信息 |
 | `invalid_uaf.db` | 验证失败的 pairs（用于跳过） |
-| `varname_hb_stats.db` | VarName pair 的 HB 统计信息 |
+| `varname_backoff_stats.db` | VarName pair 的 validation backoff 统计信息（兼容旧文件名 `varname_hb_stats.db`） |
 
 ---
 
@@ -408,7 +421,7 @@
 
 - `uafvalidate:` - 一般验证流程
 - `uaf validation:` - Manager 层信息
-- `varname_hb:` - VarName HB 统计
+- `varname_backoff:` - VarName backoff 统计
 - `[history]` - Replay 相关
 - `[batch]` - 批量执行相关
 - `[debug mode]` - 调试模式专用

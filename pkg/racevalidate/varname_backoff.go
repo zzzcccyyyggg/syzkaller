@@ -14,12 +14,12 @@ import (
 	"github.com/google/syzkaller/pkg/log"
 )
 
-// Bayesian model parameters for Happens-Before confidence estimation
+// Bayesian model parameters for validation backoff scoring.
 const (
 	alphaPrior      = 0.5  // Beta distribution prior α (Jeffrey's prior)
 	betaPrior       = 0.5  // Beta distribution prior β
-	successWeight   = 2.0  // Success weight (success is stronger counter-evidence)
-	noiseRate       = 0.15 // Assume 15% of failures are noise (non-HB reasons)
+	successWeight   = 2.0  // Success weight (successful triggering is strong counter-evidence for backing off)
+	noiseRate       = 0.15 // Assume 15% of failures are noise (e.g. replay/timing mismatch rather than low value)
 	explorationRate = 0.05 // Minimum 5% verification probability
 	maxSkipProb     = 0.90 // Maximum 90% skip probability
 )
@@ -32,12 +32,13 @@ func VarNamePairKey(pair *ddrd.MayUAFPair) string {
 	return fmt.Sprintf("%016x-%016x", pair.FreeAccessName, pair.UseAccessName)
 }
 
-// VarNameHBStats records Happens-Before statistics for a VarNamePair
-type VarNameHBStats struct {
+// VarNameBackoffStats records validation outcomes used to probabilistically
+// back off repeated verification attempts for a VarName pair.
+type VarNameBackoffStats struct {
 	FreeAccessName uint64    `json:"free_access_name"`
 	UseAccessName  uint64    `json:"use_access_name"`
-	Failures       int       `json:"failures"`       // Verification failure count (TriggeredCount=0)
-	Successes      int       `json:"successes"`      // Verification success count (TriggeredCount>0)
+	Failures       int       `json:"failures"`       // Non-triggering verification attempts (TriggeredCount=0)
+	Successes      int       `json:"successes"`      // Triggering verification attempts (TriggeredCount>0)
 	TotalAttempts  int       `json:"total_attempts"` // Total verification attempts
 	LastAttempt    time.Time `json:"last_attempt"`   // Last verification time
 	LastSuccess    time.Time `json:"last_success,omitempty"`
@@ -49,22 +50,23 @@ type VarNameHBStats struct {
 	VerifiedKey string `json:"verified_key,omitempty"` // The entry key that was successfully verified
 }
 
-// HBConfidence calculates Happens-Before confidence (0.0 - 1.0)
-// Uses asymmetric weighting + noise correction Bayesian model
-func (s *VarNameHBStats) HBConfidence() float64 {
+// BackoffScore returns a smoothed score (0.0 - 1.0) describing how strongly
+// past results suggest future verification attempts are likely to be low-yield.
+// It is a scheduling heuristic rather than a true happens-before probability.
+func (s *VarNameBackoffStats) BackoffScore() float64 {
 	if s.TotalAttempts == 0 {
-		return 0.5 // Return uncertain when no data
+		return 0.5 // Neutral score when no data is available
 	}
 
-	// Only successes, no failures = definitely not HB
+	// If verification has succeeded and never failed, there is no reason to back off.
 	if s.Successes > 0 && s.Failures == 0 {
 		return 0.0
 	}
 
-	// Noise correction: some failures may be non-HB reasons
+	// Noise correction: some failures may be due to replay/timing mismatch.
 	effectiveFailures := float64(s.Failures) * (1.0 - noiseRate)
 
-	// Higher weight for successes: success is stronger counter-evidence
+	// Successful triggering is strong counter-evidence for backing off this VarName pair.
 	effectiveSuccesses := float64(s.Successes) * successWeight
 
 	// Beta distribution posterior mean
@@ -74,17 +76,17 @@ func (s *VarNameHBStats) HBConfidence() float64 {
 	return alpha / (alpha + beta)
 }
 
-// SkipProbability calculates skip probability (0.0 - maxSkipProb)
-func (s *VarNameHBStats) SkipProbability() float64 {
+// SkipProbability converts the backoff score into a probabilistic skip rate.
+func (s *VarNameBackoffStats) SkipProbability() float64 {
 	// First attempt must verify
 	if s.TotalAttempts == 0 {
 		return 0.0
 	}
 
-	conf := s.HBConfidence()
+	score := s.BackoffScore()
 
 	// Apply exploration factor: guarantee minimum verification probability
-	skipProb := conf * (1.0 - explorationRate)
+	skipProb := score * (1.0 - explorationRate)
 
 	// Limit maximum skip probability
 	if skipProb > maxSkipProb {
@@ -94,15 +96,15 @@ func (s *VarNameHBStats) SkipProbability() float64 {
 	return skipProb
 }
 
-// RecordFailure records a verification failure
-func (s *VarNameHBStats) RecordFailure() {
+// RecordFailure records a non-triggering verification attempt.
+func (s *VarNameBackoffStats) RecordFailure() {
 	s.Failures++
 	s.TotalAttempts++
 	s.LastAttempt = time.Now()
 }
 
-// RecordSuccess records a verification success
-func (s *VarNameHBStats) RecordSuccess() {
+// RecordSuccess records a triggering verification attempt.
+func (s *VarNameBackoffStats) RecordSuccess() {
 	s.Successes++
 	s.TotalAttempts++
 	now := time.Now()
@@ -112,48 +114,48 @@ func (s *VarNameHBStats) RecordSuccess() {
 
 // MarkVerified marks this VarName pair as successfully verified
 // Once verified, all other entries with the same VarName pair should be skipped
-func (s *VarNameHBStats) MarkVerified(entryKey string) {
+func (s *VarNameBackoffStats) MarkVerified(entryKey string) {
 	s.Verified = true
 	s.VerifiedKey = entryKey
 }
 
 // IsVerified returns true if this VarName pair has been verified
-func (s *VarNameHBStats) IsVerified() bool {
+func (s *VarNameBackoffStats) IsVerified() bool {
 	return s.Verified
 }
 
-// VarNameHBStore manages VarNamePair HB statistics storage
-type VarNameHBStore struct {
+// VarNameBackoffStore manages VarName pair backoff statistics storage.
+type VarNameBackoffStore struct {
 	mu    sync.RWMutex
 	db    *db.DB
-	cache map[string]*VarNameHBStats
+	cache map[string]*VarNameBackoffStats
 }
 
-// NewVarNameHBStore creates a new HB statistics store
-func NewVarNameHBStore(database *db.DB) *VarNameHBStore {
-	store := &VarNameHBStore{
+// NewVarNameBackoffStore creates a new validation backoff statistics store.
+func NewVarNameBackoffStore(database *db.DB) *VarNameBackoffStore {
+	store := &VarNameBackoffStore{
 		db:    database,
-		cache: make(map[string]*VarNameHBStats),
+		cache: make(map[string]*VarNameBackoffStats),
 	}
 
 	// Load existing data from DB into cache
 	if database != nil {
 		for key, rec := range database.Records {
-			var stats VarNameHBStats
+			var stats VarNameBackoffStats
 			if err := json.Unmarshal(rec.Val, &stats); err != nil {
-				log.Logf(0, "varname_hb: failed to parse stats for %s: %v", key, err)
+				log.Logf(0, "varname_backoff: failed to parse stats for %s: %v", key, err)
 				continue
 			}
 			store.cache[key] = &stats
 		}
-		log.Logf(0, "varname_hb: loaded %d VarNamePair stats from db", len(store.cache))
+		log.Logf(0, "varname_backoff: loaded %d VarNamePair stats from db", len(store.cache))
 	}
 
 	return store
 }
 
 // Get retrieves statistics for a specified VarNamePair
-func (s *VarNameHBStore) Get(key string) *VarNameHBStats {
+func (s *VarNameBackoffStore) Get(key string) *VarNameBackoffStats {
 	s.mu.RLock()
 	stats, ok := s.cache[key]
 	s.mu.RUnlock()
@@ -163,15 +165,15 @@ func (s *VarNameHBStore) Get(key string) *VarNameHBStats {
 	}
 
 	// Return new empty statistics
-	return &VarNameHBStats{
+	return &VarNameBackoffStats{
 		Created: time.Now(),
 	}
 }
 
 // GetByPair retrieves statistics via MayUAFPair
-func (s *VarNameHBStore) GetByPair(pair *ddrd.MayUAFPair) *VarNameHBStats {
+func (s *VarNameBackoffStore) GetByPair(pair *ddrd.MayUAFPair) *VarNameBackoffStats {
 	if pair == nil {
-		return &VarNameHBStats{Created: time.Now()}
+		return &VarNameBackoffStats{Created: time.Now()}
 	}
 
 	key := VarNamePairKey(pair)
@@ -186,8 +188,8 @@ func (s *VarNameHBStore) GetByPair(pair *ddrd.MayUAFPair) *VarNameHBStats {
 	return stats
 }
 
-// RecordFailure records verification failure
-func (s *VarNameHBStore) RecordFailure(pair *ddrd.MayUAFPair) {
+// RecordFailure records a non-triggering validation attempt.
+func (s *VarNameBackoffStore) RecordFailure(pair *ddrd.MayUAFPair) {
 	if pair == nil {
 		return
 	}
@@ -199,7 +201,7 @@ func (s *VarNameHBStore) RecordFailure(pair *ddrd.MayUAFPair) {
 
 	stats, ok := s.cache[key]
 	if !ok {
-		stats = &VarNameHBStats{
+		stats = &VarNameBackoffStats{
 			FreeAccessName: pair.FreeAccessName,
 			UseAccessName:  pair.UseAccessName,
 			Created:        time.Now(),
@@ -210,18 +212,18 @@ func (s *VarNameHBStore) RecordFailure(pair *ddrd.MayUAFPair) {
 	stats.RecordFailure()
 	s.saveLocked(key, stats)
 
-	log.Logf(1, "varname_hb: recorded failure key=%s failures=%d successes=%d conf=%.2f",
-		key, stats.Failures, stats.Successes, stats.HBConfidence())
+	log.Logf(1, "varname_backoff: recorded failure key=%s failures=%d successes=%d score=%.2f",
+		key, stats.Failures, stats.Successes, stats.BackoffScore())
 }
 
 // RecordSuccess records verification success
-func (s *VarNameHBStore) RecordSuccess(pair *ddrd.MayUAFPair) {
+func (s *VarNameBackoffStore) RecordSuccess(pair *ddrd.MayUAFPair) {
 	s.RecordSuccessWithKey(pair, "")
 }
 
 // RecordSuccessWithKey records verification success and marks the VarName pair as verified
 // entryKey is the key of the entry that was successfully verified, used for tracking
-func (s *VarNameHBStore) RecordSuccessWithKey(pair *ddrd.MayUAFPair, entryKey string) {
+func (s *VarNameBackoffStore) RecordSuccessWithKey(pair *ddrd.MayUAFPair, entryKey string) {
 	if pair == nil {
 		return
 	}
@@ -233,7 +235,7 @@ func (s *VarNameHBStore) RecordSuccessWithKey(pair *ddrd.MayUAFPair, entryKey st
 
 	stats, ok := s.cache[key]
 	if !ok {
-		stats = &VarNameHBStats{
+		stats = &VarNameBackoffStats{
 			FreeAccessName: pair.FreeAccessName,
 			UseAccessName:  pair.UseAccessName,
 			Created:        time.Now(),
@@ -245,17 +247,17 @@ func (s *VarNameHBStore) RecordSuccessWithKey(pair *ddrd.MayUAFPair, entryKey st
 	// Mark as verified - all future entries with same VarName pair will be skipped
 	if !stats.Verified {
 		stats.MarkVerified(entryKey)
-		log.Logf(0, "varname_hb: VarName pair VERIFIED key=%s entry=%s (future entries will be skipped)",
+		log.Logf(0, "varname_backoff: VarName pair VERIFIED key=%s entry=%s (future entries will be skipped)",
 			key, entryKey)
 	}
 	s.saveLocked(key, stats)
 
-	log.Logf(1, "varname_hb: recorded success key=%s failures=%d successes=%d conf=%.2f verified=%t",
-		key, stats.Failures, stats.Successes, stats.HBConfidence(), stats.Verified)
+	log.Logf(1, "varname_backoff: recorded success key=%s failures=%d successes=%d score=%.2f verified=%t",
+		key, stats.Failures, stats.Successes, stats.BackoffScore(), stats.Verified)
 }
 
 // IsVerified checks if a VarName pair has already been successfully verified
-func (s *VarNameHBStore) IsVerified(pair *ddrd.MayUAFPair) bool {
+func (s *VarNameBackoffStore) IsVerified(pair *ddrd.MayUAFPair) bool {
 	if pair == nil {
 		return false
 	}
@@ -270,7 +272,7 @@ func (s *VarNameHBStore) IsVerified(pair *ddrd.MayUAFPair) bool {
 }
 
 // ShouldSkip determines whether verification should be skipped
-func (s *VarNameHBStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() float64) (skip bool, prob float64, stats *VarNameHBStats) {
+func (s *VarNameBackoffStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() float64) (skip bool, prob float64, stats *VarNameBackoffStats) {
 	if pair == nil {
 		return false, 0, nil
 	}
@@ -283,7 +285,7 @@ func (s *VarNameHBStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() floa
 
 	if !ok {
 		// No history, must verify
-		return false, 0, &VarNameHBStats{Created: time.Now()}
+		return false, 0, &VarNameBackoffStats{Created: time.Now()}
 	}
 
 	// If already verified, always skip
@@ -304,8 +306,8 @@ func (s *VarNameHBStore) ShouldSkip(pair *ddrd.MayUAFPair, randFloat func() floa
 	return false, prob, cachedStats
 }
 
-// Stats returns statistics summary
-func (s *VarNameHBStore) Stats() (total, highConfidence, verified int) {
+// Stats returns a summary of persisted backoff statistics.
+func (s *VarNameBackoffStore) Stats() (total, highScore, verified int) {
 	s.mu.RLock()
 	defer s.mu.RUnlock()
 
@@ -314,32 +316,32 @@ func (s *VarNameHBStore) Stats() (total, highConfidence, verified int) {
 		if stats.Verified {
 			verified++
 		}
-		if stats.HBConfidence() >= 0.8 {
-			highConfidence++
+		if stats.BackoffScore() >= 0.8 {
+			highScore++
 		}
 	}
 	return
 }
 
-func (s *VarNameHBStore) saveLocked(key string, stats *VarNameHBStats) {
+func (s *VarNameBackoffStore) saveLocked(key string, stats *VarNameBackoffStats) {
 	if s.db == nil {
 		return
 	}
 
 	data, err := json.Marshal(stats)
 	if err != nil {
-		log.Logf(0, "varname_hb: failed to marshal stats: %v", err)
+		log.Logf(0, "varname_backoff: failed to marshal stats: %v", err)
 		return
 	}
 
 	s.db.Save(key, data, 0)
 	if err := s.db.Flush(); err != nil {
-		log.Logf(0, "varname_hb: failed to flush db: %v", err)
+		log.Logf(0, "varname_backoff: failed to flush db: %v", err)
 	}
 }
 
 // Close closes the store
-func (s *VarNameHBStore) Close() error {
+func (s *VarNameBackoffStore) Close() error {
 	// db.DB is managed externally, don't close here
 	return nil
 }

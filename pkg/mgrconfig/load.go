@@ -332,6 +332,8 @@ func (cfg *Config) initUAFValidate() error {
 		return nil
 	}
 	validate := cfg.Experimental.UAFValidate
+	validate.DisableBackoffSkip = validate.DisableBackoffSkip || validate.DisableHBSkip
+	validate.ContinueAfterBackoff = validate.ContinueAfterBackoff || validate.ContinueAfterHB
 	if validate.MaxConcurrent <= 0 {
 		validate.MaxConcurrent = 1
 	}

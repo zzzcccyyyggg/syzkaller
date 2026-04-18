@@ -514,11 +514,16 @@ delay 变异策略，控制如何生成 `syz_delay()` 调用。
 | `enable_varname_scheduling` | `bool` | `false` | 按 VarName pair 分组轮询调度，防止某个 VarName 占用过多资源 |
 | `priority_low_history` | `bool` | `false` | 优先验证 replay history 少的 entry（更快完成） |
 
-### HB Skip 控制
+### Validation Backoff 控制
 
 | JSON key | 类型 | 默认值 | 说明 |
 |----------|------|--------|------|
-| `disable_hb_skip` | `bool` | `false` | 禁用 HB（Happens-Before）概率跳过逻辑。启用时所有 entry 都会被验证，不受历史失败率影响 |
+| `disable_backoff_skip` | `bool` | `false` | 禁用基于历史验证结果的概率降权/跳过逻辑。启用时所有 entry 都会被验证，不受历史失败率影响 |
+| `continue_after_backoff` | `bool` | `false` | 初始 backoff-guided 验证轮结束后，重新排入先前被降权跳过的 entry，做穷尽测试 |
+| `disable_hb_skip` | `bool` | `false` | 兼容旧配置名，等价于 `disable_backoff_skip` |
+| `continue_after_hb` | `bool` | `false` | 兼容旧配置名，等价于 `continue_after_backoff` |
+
+> **说明**：这里的 backoff 只是验证阶段的效率启发式，不表示真实的 happens-before 概率。
 
 ### 大规模 Corpus 配置
 

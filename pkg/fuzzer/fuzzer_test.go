@@ -140,6 +140,34 @@ func TestApplyNormalTimingThreshold(t *testing.T) {
 		fuzzer.applyNormalTimingThreshold(req)
 		assert.Zero(t, req.TimingThresholdUs)
 	})
+
+	t.Run("uses dynamic controller when active", func(t *testing.T) {
+		config := DefaultThresholdControllerConfig()
+		config.InitialThresholdUs = 3333
+		tc := NewThresholdController(config, func() int { return 0 })
+		f := &Fuzzer{
+			Config:              &Config{NormalThresholdMicros: 2500},
+			thresholdController: tc,
+		}
+		req := &queue.Request{}
+		f.applyNormalTimingThreshold(req)
+		assert.Equal(t, int64(3333), req.TimingThresholdUs,
+			"should use dynamic controller threshold, not static config")
+	})
+
+	t.Run("dynamic controller overridden by explicit threshold", func(t *testing.T) {
+		config := DefaultThresholdControllerConfig()
+		config.InitialThresholdUs = 3333
+		tc := NewThresholdController(config, func() int { return 0 })
+		f := &Fuzzer{
+			Config:              &Config{NormalThresholdMicros: 2500},
+			thresholdController: tc,
+		}
+		req := &queue.Request{TimingThresholdUs: 777}
+		f.applyNormalTimingThreshold(req)
+		assert.Equal(t, int64(777), req.TimingThresholdUs,
+			"explicit threshold should not be overwritten")
+	})
 }
 
 func TestInheritTimingThreshold(t *testing.T) {

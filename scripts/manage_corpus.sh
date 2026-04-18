@@ -137,7 +137,7 @@ get_db_patterns() {
     else
         $INCLUDE_UAF && patterns+=("uaf-corpus.db")
         if $INCLUDE_VALIDATED; then
-            patterns+=("validated_uaf.db" "invalid_uaf.db" "varname_hb_stats.db")
+            patterns+=("validated_uaf.db" "invalid_uaf.db" "varname_backoff_stats.db" "varname_hb_stats.db")
         fi
     fi
     echo "${patterns[@]}"

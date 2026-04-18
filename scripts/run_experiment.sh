@@ -343,7 +343,7 @@ if mode == "validate":
         uv = exp.get("uaf_validate", {})
         uv["continuous_mode"] = False
         uv["streaming_load"] = True
-        uv["continue_after_hb"] = True
+        uv["continue_after_backoff"] = True
         exp["uaf_validate"] = uv
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=4)
@@ -782,6 +782,7 @@ do_clean_validate() {
     local db_files=(
         "invalid_uaf.db"
         "validated_uaf.db"
+        "varname_backoff_stats.db"
         "varname_hb_stats.db"
     )
 

@@ -388,6 +388,22 @@ type Experimental struct {
 	// ExecutionsPerAttempt is how many times to execute each delay plan.
 	// Defaults to 5 if unset or zero.
 	ExecutionsPerAttempt int `json:"executions_per_attempt,omitempty"`
+
+	// ======== Dynamic Threshold Configuration ========
+	// EnableDynamicThreshold enables dynamic MRP time threshold adjustment
+	// based on validator supply-demand balancing.
+	EnableDynamicThreshold bool `json:"enable_dynamic_threshold,omitempty"`
+	// DynamicThresholdInitialUs is the starting threshold (microseconds).
+	// Default: 1000 (1ms). Overrides NormalThresholdMicros when dynamic threshold is enabled.
+	DynamicThresholdInitialUs int64 `json:"dynamic_threshold_initial_us,omitempty"`
+	// DynamicThresholdMinUs is the minimum threshold (microseconds).
+	// Default: 50 (50μs).
+	DynamicThresholdMinUs int64 `json:"dynamic_threshold_min_us,omitempty"`
+	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
+	// Default: 50000 (50ms).
+	DynamicThresholdMaxUs int64 `json:"dynamic_threshold_max_us,omitempty"`
+	// DynamicThresholdEvalSec is the evaluation interval (seconds). Default: 60.
+	DynamicThresholdEvalSec int `json:"dynamic_threshold_eval_sec,omitempty"`
 }
 
 type UAFValidateConfig struct {
@@ -412,7 +428,7 @@ type UAFValidateConfig struct {
 	// TargetVarNamePair specifies a specific VarName pair to debug.
 	// Format: "freeAccessName-useAccessName" (hex without 0x prefix, e.g. "610067002c7c8254-235d4d37a0583ad1")
 	// When set, only entries containing this VarName pair are validated,
-	// and all skip logic (invalid/validated/HB) is bypassed for debugging purposes.
+	// and all skip logic (invalid/validated/backoff) is bypassed for debugging purposes.
 	TargetVarNamePair string `json:"target_varname_pair,omitempty"`
 	// TargetCorpusKey specifies a specific corpus entry key to validate.
 	// Format: "sig0-sig1-sig2-sig3" (hex, e.g. "d9daa1d91920e5d5-7ae0c8d447027fda-b52a7fe3d5ed9139-027653b5437bc01a")
@@ -492,18 +508,20 @@ type UAFValidateConfig struct {
 	// threshold is accepted, allowing discovery of new stack combinations.
 	RequireOriginMatch bool `json:"require_origin_match,omitempty"`
 
-	// DisableHBSkip disables all HB (Happens-Before) skip logic.
-	// When enabled (true), entries and pairs are never skipped based on HB probability,
-	// allowing all entries to be validated regardless of historical failure rates.
-	// This is useful when you want to retry entries that were previously skipped due to
-	// accumulated failure statistics.
+	// DisableBackoffSkip disables probabilistic validation backoff skip logic.
+	// When enabled (true), entries and pairs are never skipped based on the
+	// historical backoff score, allowing all entries to be validated regardless
+	// of prior failure statistics.
+	DisableBackoffSkip bool `json:"disable_backoff_skip,omitempty"`
+	// DisableHBSkip is a deprecated compatibility alias for DisableBackoffSkip.
 	DisableHBSkip bool `json:"disable_hb_skip,omitempty"`
 
-	// ContinueAfterHB continues testing HB-skipped entries after the initial HB-guided
-	// validation pass completes. When enabled, entries that were skipped by HB inference
-	// are re-enqueued (in random order) with HB skip disabled, allowing all pairs to be
-	// tested. This maximizes experiment utilization for modules with few pairs where HB
-	// skipping causes validation to finish too quickly during long experiments (e.g., 24h).
+	// ContinueAfterBackoff continues testing backoff-skipped entries after the
+	// initial backoff-guided validation pass completes. When enabled, entries that
+	// were skipped by the heuristic are re-enqueued (in random order) with backoff
+	// skip disabled, allowing all pairs to be tested.
+	ContinueAfterBackoff bool `json:"continue_after_backoff,omitempty"`
+	// ContinueAfterHB is a deprecated compatibility alias for ContinueAfterBackoff.
 	ContinueAfterHB bool `json:"continue_after_hb,omitempty"`
 
 	// StreamingLoad enables memory-efficient streaming load for large uaf-corpus.db files.

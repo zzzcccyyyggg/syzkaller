@@ -106,7 +106,7 @@ Additional runtime files:
 - `uaf-corpus.db`: Source corpus entries (programs, barriers, replay plans, original DDRD metadata).
 - `validated_uaf.db`: Validation outcomes with attempts, notes, timestamps, last seen pairs, and stable intersections.
 - `invalid_uaf.db`: Cache of DDRD pairs that consistently fail verification, preventing repeat work.
-- `varname_hb_stats.db`: VarName-pair HB statistics and Verified markers used for probabilistic skipping.
+- `varname_backoff_stats.db`: VarName-pair validation backoff statistics and Verified markers used for probabilistic skipping (legacy file name `varname_hb_stats.db` is still loaded).
 
 ## Error Handling
 - Executor errors and crashes trigger retries (bounded by the delay budget). Persistent failures mark the entry as `failed` with diagnostic notes.

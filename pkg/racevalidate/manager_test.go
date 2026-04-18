@@ -22,6 +22,18 @@ func (f *fakeExecutor) Run(ctx context.Context, req *ExecutionRequest) (*Executi
 	return &ExecutionResult{Duration: time.Millisecond * 5}, nil
 }
 
+func (f *fakeExecutor) RunBatch(ctx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	results := make([]*ExecutionResult, 0, len(reqs))
+	for _, req := range reqs {
+		res, err := f.Run(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
 func TestStageManagerDedup(t *testing.T) {
 	exec := &fakeExecutor{}
 	cfg := Config{MaxConcurrent: 1}
@@ -97,6 +109,18 @@ func (f *flakyExecutor) Run(ctx context.Context, req *ExecutionRequest) (*Execut
 	return &ExecutionResult{Duration: time.Millisecond}, nil
 }
 
+func (f *flakyExecutor) RunBatch(ctx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	results := make([]*ExecutionResult, 0, len(reqs))
+	for _, req := range reqs {
+		res, err := f.Run(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
+}
+
 type pairSequenceExecutor struct {
 	mu       sync.Mutex
 	runs     int
@@ -121,6 +145,18 @@ func (p *pairSequenceExecutor) Run(ctx context.Context, req *ExecutionRequest) (
 		}
 	}
 	return &ExecutionResult{Duration: time.Millisecond, Ddrd: report}, nil
+}
+
+func (p *pairSequenceExecutor) RunBatch(ctx context.Context, reqs []*ExecutionRequest) ([]*ExecutionResult, error) {
+	results := make([]*ExecutionResult, 0, len(reqs))
+	for _, req := range reqs {
+		res, err := p.Run(ctx, req)
+		if err != nil {
+			return nil, err
+		}
+		results = append(results, res)
+	}
+	return results, nil
 }
 
 func TestStageManagerRetryInfraFailure(t *testing.T) {

@@ -43,6 +43,9 @@ type Fuzzer struct {
 	// Unified pair evaluator for timing exploration and corpus saving decisions
 	pairEvaluator *PairEvaluator
 
+	// Dynamic threshold controller for balancing fuzzing and validation
+	thresholdController *ThresholdController
+
 	uafBootstrapDone atomic.Bool
 
 	ctx          context.Context
@@ -168,6 +171,31 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 			timingConfig.TimingExplorationQueueSize, timingConfig.TimingExplorationRatio,
 			timingConfig.DelayMinMicros, timingConfig.DelayMaxMicros, timingConfig.MaxCorpusCountPerVarName)
 	}
+
+	// Initialize dynamic threshold controller if enabled
+	if cfg.EnableDynamicThreshold && cfg.ModeUAF {
+		tcConfig := DefaultThresholdControllerConfig()
+		if cfg.DynamicThresholdInitialUs > 0 {
+			tcConfig.InitialThresholdUs = cfg.DynamicThresholdInitialUs
+		}
+		if cfg.DynamicThresholdMinUs > 0 {
+			tcConfig.MinThresholdUs = cfg.DynamicThresholdMinUs
+		}
+		if cfg.DynamicThresholdMaxUs > 0 {
+			tcConfig.MaxThresholdUs = cfg.DynamicThresholdMaxUs
+		}
+		if cfg.DynamicThresholdEvalSec > 0 {
+			tcConfig.EvalWindowSeconds = cfg.DynamicThresholdEvalSec
+		}
+		tcConfig.Workdir = cfg.Workdir
+		f.thresholdController = NewThresholdController(tcConfig, func() int {
+			return f.ddrd.Count()
+		})
+		go f.thresholdController.Run(ctx.Done())
+		log.Logf(0, "[THRESHOLD] Dynamic threshold controller started: init=%dμs, range=[%d, %d]μs, eval=%ds",
+			tcConfig.InitialThresholdUs, tcConfig.MinThresholdUs, tcConfig.MaxThresholdUs, tcConfig.EvalWindowSeconds)
+	}
+
 	f.execQueues = newExecQueues(f)
 	f.updateChoiceTable(nil)
 	go f.choiceTableUpdater()
@@ -302,6 +330,11 @@ func (fuzzer *Fuzzer) prepare(req *queue.Request, flags ProgFlags, attempt int) 
 
 func (fuzzer *Fuzzer) applyNormalTimingThreshold(req *queue.Request) {
 	if req == nil || req.IsTimingExploration || req.TimingThresholdUs > 0 {
+		return
+	}
+	// Use dynamic threshold if controller is active
+	if fuzzer.thresholdController != nil {
+		req.TimingThresholdUs = fuzzer.thresholdController.CurrentThreshold()
 		return
 	}
 	if fuzzer.Config == nil || fuzzer.Config.NormalThresholdMicros <= 0 {
@@ -501,6 +534,21 @@ type Config struct {
 	SuccessThreshold float64
 	// ExecutionsPerAttempt is how many times to execute each delay plan
 	ExecutionsPerAttempt int
+
+	// ======== Dynamic Threshold Configuration ========
+	// EnableDynamicThreshold enables dynamic threshold adjustment based on
+	// fuzzer/validator supply-demand balancing.
+	EnableDynamicThreshold bool
+	// DynamicThresholdInitialUs is the starting threshold (microseconds). Default: 1000.
+	DynamicThresholdInitialUs int64
+	// DynamicThresholdMinUs is the minimum threshold (microseconds). Default: 50.
+	DynamicThresholdMinUs int64
+	// DynamicThresholdMaxUs is the maximum threshold (microseconds). Default: 50000.
+	DynamicThresholdMaxUs int64
+	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Default: 60.
+	DynamicThresholdEvalSec int
+	// Workdir is used for the shared state file between fuzzer and validator.
+	Workdir string
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {
