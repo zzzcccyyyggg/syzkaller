@@ -105,6 +105,11 @@ type Request struct {
 	// When true, results are processed specially to track exploration success.
 	IsTimingExploration bool
 
+	// ThreadBarrier marks requests created via merged-program thread-barrier mode.
+	// This is more precise than checking ExecFlagThreaded because default executor
+	// options may also enable threaded execution for ordinary barrier requests.
+	ThreadBarrier bool
+
 	// TimingExplorationInfo holds metadata about the timing exploration job.
 	// Only set when IsTimingExploration is true.
 	TimingExplorationInfo *TimingExplorationInfo
@@ -329,6 +334,9 @@ func (r *Request) hash() hash.Sig {
 		panic(err)
 	}
 	if err := enc.Encode(r.Barrier); err != nil {
+		panic(err)
+	}
+	if err := enc.Encode(r.ThreadBarrier); err != nil {
 		panic(err)
 	}
 	if err := enc.Encode(r.BarrierParticipants); err != nil {
@@ -606,6 +614,30 @@ func (a *alternate) Next() *Request {
 		return nil
 	}
 	return a.base.Next()
+}
+
+type periodic struct {
+	base Source
+	nth  int
+	seq  atomic.Int64
+}
+
+// Periodic proxies base, but only polls it every nth Next() call.
+func Periodic(base Source, nth int) Source {
+	if nth <= 1 {
+		return base
+	}
+	return &periodic{
+		base: base,
+		nth:  nth,
+	}
+}
+
+func (p *periodic) Next() *Request {
+	if p.seq.Add(1)%int64(p.nth) != 0 {
+		return nil
+	}
+	return p.base.Next()
 }
 
 type DynamicOrderer struct {

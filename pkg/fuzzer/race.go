@@ -466,22 +466,21 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 		return
 	}
 
+	timingCandidates := u.timingExplorationCandidates(batch)
+
 	// Determine history count before recording pairs
 	var historyCount int
 	if u.historyBuffer != nil && u.fuzzer.raceGroup != nil {
 		historyCount = u.determineHistoryCount(batch)
 	}
 
-	// Detect thread-barrier mode from request ExecFlags
-	isThreadBarrier := req != nil && req.ExecOpts.ExecFlags&flatrpc.ExecFlagThreaded != 0
+	isThreadBarrier := isThreadBarrierRequest(req)
 
 	// DUAL-QUEUE: Enqueue NEW VarName pairs to Timing Exploration
 	// Skip for thread-barrier entries — they already share address space and don't need timing exploration.
 	if !isThreadBarrier && u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
-		for _, pair := range batch {
-			if u.fuzzer.timingScheduler.IsNewVarNamePair(pair) {
-				u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, pair)
-			}
+		for _, pair := range timingCandidates {
+			u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, pair)
 		}
 	}
 
@@ -549,6 +548,36 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 	u.enqueueSeed(seed)
 }
 
+func isThreadBarrierRequest(req *queue.Request) bool {
+	// We can't rely on ExecFlagThreaded because default executor options may
+	// enable threaded execution for ordinary multi-process barrier requests too.
+	return req != nil && req.ThreadBarrier
+}
+
+func (u *uafMode) timingExplorationCandidates(pairs []*ddrd.MayUAFPair) []*ddrd.MayUAFPair {
+	if u == nil || u.corpus == nil || len(pairs) == 0 {
+		return nil
+	}
+
+	var candidates []*ddrd.MayUAFPair
+	seenVarNames := make(map[uint64]struct{})
+	for _, pair := range pairs {
+		if pair == nil {
+			continue
+		}
+		varnameID := varnamePairID(pair.FreeAccessName, pair.UseAccessName)
+		if _, exists := seenVarNames[varnameID]; exists {
+			continue
+		}
+		if u.corpus.GetVarNamePairCount(pair.FreeAccessName, pair.UseAccessName) != 0 {
+			continue
+		}
+		seenVarNames[varnameID] = struct{}{}
+		candidates = append(candidates, pair)
+	}
+	return candidates
+}
+
 // determineHistoryCount determines how many history records to save based on pair newness.
 // If any pair is a new VarName pair, save NewVarNamePairHistory records (from config or default).
 // If any pair is a new stack for existing VarName pair, save NewStackHistory records (from config or default).
@@ -571,6 +600,9 @@ func (u *uafMode) determineHistoryCount(pairs []*ddrd.MayUAFPair) int {
 	// Default: at least 1 history record for any UAF corpus entry with pairs
 	// This ensures replay is possible even for known pairs
 	maxCount := 1
+	if len(u.timingExplorationCandidates(pairs)) > 0 {
+		return newVarNamePairHistory
+	}
 	for _, pair := range pairs {
 		if pair == nil {
 			continue

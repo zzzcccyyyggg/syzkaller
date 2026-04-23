@@ -106,6 +106,11 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 			cfg.EnableTimingExploration = false
 			log.Logf(0, "[RANDOM-BASELINE] Race-guided strategies DISABLED for A/B testing (including timing exploration)")
 		}
+		// EnableObjectLinking: default true, user can disable for ablation
+		if cfg.EnableObjectLinking != nil && !*cfg.EnableObjectLinking {
+			raceConfig.EnableObjectLinking = false
+			log.Logf(0, "[ABLATION] Object-level program linking DISABLED (enable_object_linking=false)")
+		}
 		f.raceGroup = NewRaceGroupManager(raceConfig)
 
 		// Initialize Dual-Queue Timing Exploration System
@@ -203,6 +208,22 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		go f.logCurrentStats()
 	}
 
+	if f.timingScheduler != nil {
+		stat.New("timing pending", "Pending timing exploration jobs (Phase 1 + Phase 2)",
+			stat.Console, func() int {
+				exploration, validation := f.timingScheduler.GetPendingJobCounts()
+				return exploration + validation
+			})
+		stat.New("timing jobs generated", "Timing exploration jobs generated",
+			stat.Console, func() int {
+				return f.timingScheduler.GetStats().TotalJobsGenerated
+			})
+		stat.New("timing jobs completed", "Timing exploration jobs completed",
+			stat.Console, func() int {
+				return f.timingScheduler.GetStats().TotalJobsCompleted
+			})
+	}
+
 	// Register ddrd.Store-based stats for source tracking
 	stat.New("ddrd pairs total", "Total unique pairs in ddrd.Store",
 		stat.Console, stat.Graph("ddrd"), func() int {
@@ -265,25 +286,27 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	if fuzzer.uaf != nil {
 		// Set the smash queue for uaf mode to submit barrier requests
 		fuzzer.uaf.setQueue(ret.smashQueue)
-		sources = append(sources, ret.triageQueue)
 
 		// Add timing exploration source if enabled
 		if fuzzer.timingScheduler != nil && fuzzer.timingScheduler.Config().EnableTimingExploration {
-			// Timing exploration runs at configured ratio (e.g., 10% of the time)
-			// Use skipQueue based on ratio: ratio=0.1 means run every ~10 jobs
-			timingSkip := 10 // Default: run 1 in 10 jobs
+			// Poll timing exploration before the continuously replenished triage
+			// queue so Phase 1/2 jobs cannot starve behind triage backlog.
+			// We still limit it to the configured ratio by only polling it every
+			// Nth scheduling pass.
+			timingEvery := 10 // Default: run 1 in 10 scheduling passes
 			if fuzzer.timingScheduler.Config().TimingExplorationRatio > 0 {
-				timingSkip = int(1.0 / fuzzer.timingScheduler.Config().TimingExplorationRatio)
-				if timingSkip < 1 {
-					timingSkip = 1
+				timingEvery = int(1.0 / fuzzer.timingScheduler.Config().TimingExplorationRatio)
+				if timingEvery < 1 {
+					timingEvery = 1
 				}
 			}
 			sources = append(sources,
-				queue.Alternate(queue.Callback(fuzzer.genTimingExploration), timingSkip),
+				queue.Periodic(queue.Callback(fuzzer.genTimingExploration), timingEvery),
 			)
 		}
 
 		sources = append(sources,
+			ret.triageQueue,
 			queue.Alternate(ret.smashQueue, skipQueue),
 			queue.Callback(fuzzer.genFuzz),
 		)
@@ -332,15 +355,56 @@ func (fuzzer *Fuzzer) applyNormalTimingThreshold(req *queue.Request) {
 	if req == nil || req.IsTimingExploration || req.TimingThresholdUs > 0 {
 		return
 	}
-	// Use dynamic threshold if controller is active
+	req.TimingThresholdUs = fuzzer.currentNormalTimingThreshold()
+}
+
+func (fuzzer *Fuzzer) currentNormalTimingThreshold() int64 {
+	if fuzzer == nil {
+		return 0
+	}
 	if fuzzer.thresholdController != nil {
-		req.TimingThresholdUs = fuzzer.thresholdController.CurrentThreshold()
-		return
+		return fuzzer.thresholdController.CurrentThreshold()
 	}
 	if fuzzer.Config == nil || fuzzer.Config.NormalThresholdMicros <= 0 {
-		return
+		return 0
 	}
-	req.TimingThresholdUs = fuzzer.Config.NormalThresholdMicros
+	return fuzzer.Config.NormalThresholdMicros
+}
+
+func (fuzzer *Fuzzer) currentWidenedTimingThreshold() int64 {
+	if fuzzer == nil {
+		return 0
+	}
+
+	var widened int64
+	if fuzzer.timingScheduler != nil {
+		widened = fuzzer.timingScheduler.Config().WidenedThresholdMicros
+	}
+
+	normal := fuzzer.currentNormalTimingThreshold()
+	if normal <= 0 {
+		return widened
+	}
+
+	// In dynamic-threshold mode, keep timing exploration tied to the current
+	// normal threshold instead of a fixed 20ms/500ms window. We use the
+	// documented 8x widening rule, but cap it by the configured widened ceiling
+	// to avoid flooding the queue with very loose candidates.
+	if fuzzer.thresholdController != nil {
+		dynamicWidened := normal * 8
+		if dynamicWidened < normal {
+			dynamicWidened = normal
+		}
+		if widened > 0 && dynamicWidened > widened {
+			dynamicWidened = widened
+		}
+		return dynamicWidened
+	}
+
+	if widened > 0 {
+		return widened
+	}
+	return normal
 }
 
 func inheritTimingThreshold(req, parent *queue.Request) {
@@ -505,6 +569,10 @@ type Config struct {
 	NewStackAffinityWeight       int // Affinity weight for new stack (default: 1)
 	// A/B Testing
 	RandomBaselineMode bool // Disable all race-guided strategies for baseline comparison
+
+	// EnableObjectLinking enables resource-aware object linking (ObjectLinker V2).
+	// Defaults to true. Set to false for ablation experiments.
+	EnableObjectLinking *bool
 
 	// ======== Dual-Queue Timing Exploration Configuration ========
 	// EnableTimingExploration enables the timing exploration queue
@@ -676,9 +744,9 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 		return nil
 	}
 
-	// Get thresholds
-	widenedThreshold := fuzzer.timingScheduler.Config().WidenedThresholdMicros
-	normalThreshold := int64(0) // 0 means use the executor default (currently 10ms)
+	// Get thresholds.
+	widenedThreshold := fuzzer.currentWidenedTimingThreshold()
+	normalThreshold := fuzzer.currentNormalTimingThreshold()
 
 	// Determine phase based on whether delay plan exists
 	// Phase 1: no delays, use widened threshold (discovery)
@@ -752,6 +820,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 					}
 					req.Prog = merged
 					req.Barrier = true
+					req.ThreadBarrier = true
 					req.BarrierPrograms = programs
 					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
 					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
@@ -766,6 +835,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 
 			// Default: multi-process barrier
 			req.SetBarrier(mask)
+			req.ThreadBarrier = false
 			if err := req.SetBarrierPrograms(programs); err != nil {
 				log.Logf(0, "[TIMING-EXPLORE] Failed to set barrier programs: %v", err)
 				return nil
@@ -987,6 +1057,7 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 			}
 			req.Prog = merged
 			req.Barrier = true
+			req.ThreadBarrier = true
 			req.BarrierPrograms = programs // Preserve for soloFilter
 			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
 			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
@@ -1000,6 +1071,7 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 	// Default: multi-process barrier mode
 	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
+	req.ThreadBarrier = false
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)

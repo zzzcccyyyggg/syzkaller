@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/prog"
 )
@@ -172,5 +173,49 @@ func TestTryPersistSeedMarksSynced(t *testing.T) {
 	}
 	if !seed.synced {
 		t.Fatal("expected seed to be marked synced after successful persist")
+	}
+}
+
+func TestIsThreadBarrierRequestUsesExplicitMarker(t *testing.T) {
+	req := &queue.Request{
+		ExecOpts: flatrpc.ExecOpts{
+			ExecFlags: flatrpc.ExecFlagThreaded,
+		},
+	}
+	if isThreadBarrierRequest(req) {
+		t.Fatal("plain threaded execution must not be treated as thread-barrier")
+	}
+
+	req.ThreadBarrier = true
+	if !isThreadBarrierRequest(req) {
+		t.Fatal("explicit thread-barrier marker should be honored")
+	}
+}
+
+func TestTimingExplorationCandidatesUseUAFCorpusNewness(t *testing.T) {
+	u := &uafMode{
+		corpus: newUAFCorpus(10),
+	}
+
+	pairA1 := testMayUAFPair(0x10, 0x20, 0x100, 0x200)
+	pairA2 := testMayUAFPair(0x10, 0x20, 0x300, 0x400)
+	pairB := testMayUAFPair(0x30, 0x40, 0x500, 0x600)
+
+	candidates := u.timingExplorationCandidates([]*ddrd.MayUAFPair{pairA1, pairA2, pairB})
+	if len(candidates) != 2 {
+		t.Fatalf("got %d candidates for fresh corpus, want 2", len(candidates))
+	}
+
+	entry := &UAFCorpusEntry{
+		Pairs: []*ddrd.MayUAFPair{pairA1},
+	}
+	u.corpus.addSeed("seed-a", entry, SourceFuzz)
+
+	candidates = u.timingExplorationCandidates([]*ddrd.MayUAFPair{pairA1, pairA2, pairB})
+	if len(candidates) != 1 {
+		t.Fatalf("got %d candidates after existing varname pair, want 1", len(candidates))
+	}
+	if candidates[0].FreeAccessName != pairB.FreeAccessName || candidates[0].UseAccessName != pairB.UseAccessName {
+		t.Fatal("expected only unseen varname pair to remain eligible for timing exploration")
 	}
 }

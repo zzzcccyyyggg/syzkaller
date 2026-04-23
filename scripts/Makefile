@@ -26,6 +26,7 @@ MOD_ARGS := $(if $(MODULES),$(MODULES),)
         fuzz fuzz-stop fuzz-status fuzz-log \
         validate validate-stop validate-status validate-log \
         corpus-stat corpus-backup corpus-import corpus-migrate \
+        capability-check capability-prepare capability-start-shared capability-start-batch1 capability-start-batch2 capability-status capability-stop \
         status stop list extract-data clean-config
 
 help:
@@ -59,6 +60,14 @@ help:
 	@echo "  make corpus-backup         备份所有 corpus 到 corpus-backup/"
 	@echo '  make corpus-import MODULES="xfs"  从 DDRD-Corpus 导入'
 	@echo "  make corpus-migrate        从旧 test/ 目录迁移 corpus"
+	@echo ""
+	@echo "  make capability-check      检查 8 模块 24h 主实验环境"
+	@echo "  make capability-prepare    清理旧状态 + 导入统一 corpus + 重生成配置"
+	@echo "  make capability-start-shared   启动 8 模块共享槽位模式"
+	@echo "  make capability-start-batch1   启动严格 2+2 模式第一批"
+	@echo "  make capability-start-batch2   启动严格 2+2 模式第二批"
+	@echo "  make capability-status     查看 8 模块主实验状态"
+	@echo "  make capability-stop       停止 8 模块主实验"
 	@echo ""
 	@echo "  make status                查看所有运行状态"
 	@echo "  make stop                  停止所有 fuzz + validate"
@@ -189,6 +198,28 @@ corpus-import:
 
 corpus-migrate:
 	bash $(SCRIPTS)/manage_corpus.sh migrate --include-uaf --force
+
+# ---- 8 模块 24h 主实验 ----
+capability-check:
+	bash $(SCRIPTS)/run_capability_24h.sh check
+
+capability-prepare:
+	bash $(SCRIPTS)/run_capability_24h.sh prepare
+
+capability-start-shared:
+	bash $(SCRIPTS)/run_capability_24h.sh start-shared
+
+capability-start-batch1:
+	bash $(SCRIPTS)/run_capability_24h.sh start-batch1
+
+capability-start-batch2:
+	bash $(SCRIPTS)/run_capability_24h.sh start-batch2
+
+capability-status:
+	bash $(SCRIPTS)/run_capability_24h.sh status
+
+capability-stop:
+	bash $(SCRIPTS)/run_capability_24h.sh stop
 
 # ---- 通用 ----
 status:

@@ -862,6 +862,8 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 
 // runUAFValidateModeStreaming runs validation with memory-efficient streaming load.
 // This is designed for large uaf-corpus.db files (>1GB) that would otherwise cause OOM.
+// It supports co-start with fuzz: if the corpus file does not yet exist, it waits
+// until fuzz creates it, then enters a continuous polling loop to pick up new entries.
 func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 	cfg := mgr.cfg.Experimental.UAFValidate
 	log.Logf(0, "uaf validation: entering streaming mode...")
@@ -869,8 +871,21 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 	// Determine corpus path
 	corpusPath := filepath.Join(mgr.cfg.Workdir, "uaf-corpus.db")
 	log.Logf(0, "uaf validation: checking corpus file: %s", corpusPath)
-	if _, err := os.Stat(corpusPath); os.IsNotExist(err) {
-		log.Fatalf("uaf validation: corpus file not found: %s", corpusPath)
+
+	// Wait for corpus file to appear (supports co-start with fuzz).
+	const corpusWaitInterval = 10 * time.Second
+	for {
+		if _, err := os.Stat(corpusPath); err == nil {
+			break
+		}
+		log.Logf(0, "uaf validation: corpus file %s not yet available, waiting %v for fuzz to create it...", corpusPath, corpusWaitInterval)
+		select {
+		case <-ctx.Done():
+			log.Logf(0, "uaf validation: context cancelled while waiting for corpus")
+			mgr.exit("uaf-validate")
+			return
+		case <-time.After(corpusWaitInterval):
+		}
 	}
 
 	// Get file size for progress reporting
@@ -881,24 +896,22 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 	fileSizeMB := fi.Size() / (1024 * 1024)
 	log.Logf(0, "uaf validation: streaming mode enabled for %s (%d MB)", corpusPath, fileSizeMB)
 
-	// Create streaming reader
-	log.Logf(0, "uaf validation: creating streaming reader...")
-	reader := manager.NewStreamingUAFCorpusReader(corpusPath, mgr.target)
-
-	// Skip counting for large files - it takes too long for 5GB+ files
-	// Instead, estimate based on file size (rough estimate: ~50KB per entry average)
-	estimatedCount := int(fi.Size() / (50 * 1024))
-	if estimatedCount < 100 {
-		estimatedCount = 100
-	}
-	log.Logf(0, "uaf validation: estimated ~%d entries based on file size (%d MB)", estimatedCount, fileSizeMB)
-
 	// Determine batch size
 	batchSize := cfg.StreamingBatchSize
 	if batchSize <= 0 {
 		batchSize = 500
 	}
 	log.Logf(0, "uaf validation: using batch size %d", batchSize)
+
+	// Determine reload intervals
+	reloadInterval := time.Duration(cfg.IncrementalReloadMinutes) * time.Minute
+	if reloadInterval <= 0 {
+		reloadInterval = 10 * time.Minute
+	}
+	idleReloadInterval := time.Duration(cfg.IdleReloadSeconds) * time.Second
+	if idleReloadInterval <= 0 {
+		idleReloadInterval = 30 * time.Second
+	}
 
 	// Setup validator
 	validatorCfg := uafvalidate.Config{
@@ -957,49 +970,86 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 		close(runDone)
 	}()
 
-	// Stream and enqueue entries in batches
-	enqueued := 0
-	skipped := 0
-	withHistory := 0
 	maxEntries := cfg.MaxEntries
-	lastBatchLog := time.Now()
 
-	log.Logf(0, "uaf validation: starting to stream entries...")
+	// Helper: do one streaming scan and enqueue new entries.
+	// Returns the new maxSeq and cumulative enqueue count.
+	streamOnce := func(sinceSeq uint64, totalEnqueued int) (uint64, int) {
+		reader := manager.NewStreamingUAFCorpusReader(corpusPath, mgr.target)
+		batchEnqueued := 0
+		withHistory := 0
+		lastBatchLog := time.Now()
+		limitHit := false
 
-	_, err = reader.IterateEntriesBatched(0, batchSize, func(entries []*fuzzer.UAFCorpusEntry, seqs []uint64) bool {
-		for _, entry := range entries {
-			// Check max_entries limit
-			if maxEntries > 0 && enqueued >= maxEntries {
-				log.Logf(0, "uaf validation: reached max_entries limit (%d)", maxEntries)
-				return false
+		newMaxSeq, err := reader.IterateEntriesBatched(sinceSeq, batchSize, func(entries []*fuzzer.UAFCorpusEntry, seqs []uint64) bool {
+			for _, entry := range entries {
+				if maxEntries > 0 && totalEnqueued+batchEnqueued >= maxEntries {
+					log.Logf(0, "uaf validation: reached max_entries limit (%d)", maxEntries)
+					limitHit = true
+					return false
+				}
+				if entry != nil && len(entry.ReplayHistory) > 0 {
+					withHistory++
+				}
+				stage.Enqueue(entry)
+				batchEnqueued++
 			}
-
-			if entry != nil && len(entry.ReplayHistory) > 0 {
-				withHistory++
+			if time.Since(lastBatchLog) > 3*time.Second || batchEnqueued <= batchSize {
+				log.Logf(0, "uaf validation: enqueued %d entries (total=%d, with_history=%d)",
+					batchEnqueued, totalEnqueued+batchEnqueued, withHistory)
+				lastBatchLog = time.Now()
 			}
-			stage.Enqueue(entry)
-			enqueued++
+			return !limitHit
+		})
+		if err != nil {
+			log.Logf(0, "uaf validation: streaming scan error: %v", err)
 		}
-
-		// Progress reporting every batch
-		if time.Since(lastBatchLog) > 3*time.Second || enqueued <= batchSize {
-			log.Logf(0, "uaf validation: enqueued %d entries (%d skipped, %d with history)",
-				enqueued, skipped, withHistory)
-			lastBatchLog = time.Now()
+		if newMaxSeq < sinceSeq {
+			newMaxSeq = sinceSeq
 		}
-
-		return true
-	})
-
-	if err != nil {
-		log.Logf(0, "uaf validation: streaming load error: %v", err)
+		if batchEnqueued > 0 {
+			log.Logf(0, "uaf validation: scan complete - enqueued %d new entries (total=%d, seq=%d)",
+				batchEnqueued, totalEnqueued+batchEnqueued, newMaxSeq)
+		}
+		return newMaxSeq, totalEnqueued + batchEnqueued
 	}
 
-	log.Logf(0, "uaf validation: streaming load complete - enqueued %d entries, skipped %d, %d with history",
-		enqueued, skipped, withHistory)
+	// Initial scan
+	log.Logf(0, "uaf validation: starting initial streaming scan...")
+	var lastSeq uint64
+	totalEnqueued := 0
+	lastSeq, totalEnqueued = streamOnce(0, 0)
+	log.Logf(0, "uaf validation: initial scan done - enqueued %d entries (seq=%d)", totalEnqueued, lastSeq)
 
-	stage.Close()
-	<-runDone
-	<-resultsDone
-	mgr.exit("uaf-validate")
+	// Continuous polling loop: periodically re-read corpus for new entries from fuzz.
+	ticker := time.NewTicker(reloadInterval)
+	defer ticker.Stop()
+	idleTicker := time.NewTicker(idleReloadInterval)
+	defer idleTicker.Stop()
+
+	log.Logf(0, "uaf validation: entering continuous streaming loop (reload=%v, idle_reload=%v)", reloadInterval, idleReloadInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Logf(0, "uaf validation: context cancelled, shutting down")
+			stage.Shutdown()
+			<-runDone
+			<-resultsDone
+			mgr.exit("uaf-validate")
+			return
+
+		case <-ticker.C:
+			newSeq, newTotal := streamOnce(lastSeq, totalEnqueued)
+			lastSeq = newSeq
+			totalEnqueued = newTotal
+
+		case <-idleTicker.C:
+			if !stage.HasPending() {
+				newSeq, newTotal := streamOnce(lastSeq, totalEnqueued)
+				lastSeq = newSeq
+				totalEnqueued = newTotal
+			}
+		}
+	}
 }

@@ -1334,6 +1334,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			NewVarNamePairAffinityWeight: mgr.cfg.Experimental.NewVarNamePairAffinityWeight,
 			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
 			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
+			EnableObjectLinking:          mgr.cfg.Experimental.EnableObjectLinking,
 			// Dual-Queue Timing Exploration Configuration
 			EnableTimingExploration:    mgr.cfg.Experimental.EnableTimingExploration,
 			TimingExplorationQueueSize: mgr.cfg.Experimental.TimingExplorationQueueSize,

@@ -58,10 +58,13 @@ scripts/__pycache__/
 __pycache__/
 .experiment/*.state
 .experiment/.cpuset_owned
+.experiment/
 config.tar.gz
 
 # Compiled Go binaries at repo root (e.g. syz-inject-async-corpus)
 /syz-inject-async-corpus
+/syz-deltat-analysis
 
 # Experiment output directories
 exp-unified/
+paper/results/

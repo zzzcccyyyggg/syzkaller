@@ -385,6 +385,11 @@ func (ts *TimingScheduler) GetQueueStats() (enqueued, explored, pairsFound, curr
 	return ts.explorationQueue.GetStats()
 }
 
+// GetPendingJobCounts returns the current queue depths for discovery and validation.
+func (ts *TimingScheduler) GetPendingJobCounts() (exploration, validation int) {
+	return ts.explorationQueue.PendingCounts()
+}
+
 // ============================================================================
 // Integration Helpers
 // ============================================================================

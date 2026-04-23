@@ -1,0 +1,42 @@
+[
+  {
+    "program": "r0 = syz_open_dev$tty20(0xc, 0x4, 0x0)\nioctl$TIOCGDEV(r0, 0x80045432, &(0x7f0000000000))\nioctl$KDSKBMODE(r0, 0x4b45, &(0x7f0000000040)=0x4)\nr1 = openat$ptmx(0xffffffffffffff9c, &(0x7f0000000080), 0x0, 0x0)\nioctl$TIOCNOTTY(r1, 0x5422) (async)\nioctl$KDGKBTYPE(r1, 0x4b33, 0x0) (async)\nioctl$TIOCNXCL(r0, 0x540d) (async)\nioctl$KDGKBSENT(r1, 0x4b48, &(0x7f0000000100)={0x40, \"46eba8cd...\"}) (async)\nioctl$KDGKBMETA(0xffffffffffffffff, 0x4b62, &(0x7f0000000380))\nioctl$TCXONC(r1, 0x540a, 0x0)\nr2 = syz_open_dev$tty1(0xc, 0x4, 0x3)\nioctl$TIOCSSOFTCAR(0xffffffffffffffff, 0x541a, &(0x7f00000005c0)=0x2) (async)\nioctl$VT_RESIZE(0xffffffffffffffff, 0x5609, 0x0)\nioctl$TIOCMSET(r2, 0x5418, 0x0) (async)\nioctl$KDSKBMETA(r2, 0x4b63, &(0x7f0000000700)=0x4) (async)\nr3 = syz_open_dev$tty20(0xc, 0x4, 0x0)\nr4 = syz_open_dev$tty1(0xc, 0x4, 0x4)\nioctl$TCSETSF(0xffffffffffffffff, 0x5404, 0x0)\nr5 = syz_open_dev$tty1(0xc, 0x4, 0x2)\nioctl$PIO_UNIMAP(r5, 0x4b67, 0x0) (async)\nioctl$TCSETSF(0xffffffffffffffff, 0x5404, &(0x7f0000000000)={0xe81f, 0x427, 0x1, 0x7fff, 0x10, \"9498ac3f...\"})\nioctl$KDFONTOP_SET(r4, 0x4b72, &(0x7f0000000580)={0x0, 0x0, 0x8, 0x1d, 0x200, &(0x7f0000000180)=\"733f5f5d...\"})\nsyz_open_dev$tty20(0xc, 0x4, 0x0)\nioctl$TIOCL_PASTESEL(r3, 0x541c, &(0x7f0000000080))\nr6 = syz_open_dev$tty1(0xc, 0x4, 0x1)\nioctl$KDSIGACCEPT(r6, 0x4b4e, 0x33)\nr7 = syz_open_dev$tty1(0xc, 0x4, 0x3)\nioctl$KDSKBMODE(r6, 0x4b45, &(0x7f0000000000)=0x4)\nioctl$GIO_SCRNMAP(r7, 0x4b40, &(0x7f0000001c40)=\"\"/65)\nsyz_open_dev$tty20(0xc, 0x4, 0x0)\n",
+    "pairs": [
+      {
+        "free_access_name": 1836311903,
+        "use_access_name": 2971215073,
+        "free_call_stack": 987654321,
+        "use_call_stack": 1234567890,
+        "signal": 0,
+        "time_diff": 1000,
+        "free_sn": 1,
+        "use_sn": 2,
+        "lock_type": 0,
+        "use_access_type": 1
+      }
+    ],
+    "barrier_participants": 2,
+    "barrier_proc_list": [0, 1],
+    "replay_delays": [100, 200]
+  },
+  {
+    "program": "r0 = syz_open_dev$tty20(0xc, 0x4, 0x0)\nr1 = openat$ptmx(0xffffffffffffff9c, &(0x7f0000000000), 0x28000, 0x0)\nioctl$TIOCSPTLCK(r1, 0x40045431, &(0x7f0000000040)) (async)\nr2 = syz_open_dev$tty20(0xc, 0x4, 0x1)\nioctl$TIOCSPTLCK(r0, 0x40045431, &(0x7f0000000240)) (async)\nioctl$TCFLSH(r2, 0x540b, 0x1)\nioctl$TIOCGETD(r2, 0x5424, &(0x7f0000000280)) (async)\nr3 = ioctl$TIOCGPTPEER(r1, 0x5441, 0x9) (async, rerun: 64)\nioctl$KDGKBDIACR(r1, 0x4b4a, 0x0) (rerun: 64)\nioctl$TIOCGPTPEER(r3, 0x5441, 0x9)\nr4 = syz_open_dev$tty1(0xc, 0x4, 0x4)\nr5 = syz_open_dev$tty20(0xc, 0x4, 0x1)\nioctl$KDSKBSENT(r5, 0x4b49, &(0x7f0000000000)={0x0, \"54dec309...\"}) (async)\nioctl$TCSETSF(r5, 0x5404, &(0x7f0000000000)={0x2, 0x8, 0x4, 0x5f7b, 0xc, \"a2823b64...\"}) (async)\nioctl$KDFONTOP_SET(r4, 0x4b72, &(0x7f0000000580)={0x0, 0x0, 0x8, 0x1d, 0x200, 0x0}) (async)\nioctl$TIOCL_PASTESEL(r0, 0x541c, &(0x7f0000000080))\n",
+    "pairs": [
+      {
+        "free_access_name": 4807526976,
+        "use_access_name": 7778742049,
+        "free_call_stack": 222333444,
+        "use_call_stack": 555666777,
+        "signal": 0,
+        "time_diff": 2000,
+        "free_sn": 3,
+        "use_sn": 4,
+        "lock_type": 1,
+        "use_access_type": 2
+      }
+    ],
+    "barrier_participants": 2,
+    "barrier_proc_list": [0, 1],
+    "replay_delays": [150, 250]
+  }
+]

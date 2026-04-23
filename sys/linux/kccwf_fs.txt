@@ -1,20 +1,32 @@
 # syzkaller/sys/linux/kccwf_fs.txt
-# 专门针对 OverlayFS copy-up 机制的测试
+# Filesystem syscall descriptions for concurrent race detection.
+# Mount point /mnt/kccwf is fixed; object names use choice pools for diversity.
 
 include <uapi/linux/fcntl.h>
+
+# ============================================================================
+# Object name pools — gives syzkaller multiple distinct targets per family
+# ============================================================================
+kccwf_abs_paths = "/mnt/kccwf/testfile0", "/mnt/kccwf/testfile1", "/mnt/kccwf/testfile2", "/mnt/kccwf/testfile3", "/mnt/kccwf/data_a", "/mnt/kccwf/data_b", "/mnt/kccwf/xattr_target", "/mnt/kccwf/subdir/nested0"
+kccwf_rel_names = "testfile0", "testfile1", "testfile2", "testfile3", "data_a", "data_b", "xattr_target"
+kccwf_link_names = "/mnt/kccwf/hardlink0", "/mnt/kccwf/hardlink1", "/mnt/kccwf/hardlink2", "/mnt/kccwf/link_a"
+kccwf_symlink_targets = "/mnt/kccwf/sym_target0", "/mnt/kccwf/sym_target1", "/mnt/kccwf/sym_target2"
+kccwf_symlink_names = "/mnt/kccwf/symlink0", "/mnt/kccwf/symlink1", "/mnt/kccwf/symlink2"
+kccwf_dir_paths = "/mnt/kccwf/testdir", "/mnt/kccwf/subdir", "/mnt/kccwf/workdir"
+kccwf_xattr_keys = "user.test", "user.data", "user.meta", "user.kccwf"
 
 close$kccwf(fd fd)
 dup$kccwf(oldfd fd) fd
 dup2$kccwf(oldfd fd, newfd fd) fd
 dup3$kccwf(oldfd fd, newfd fd, flags flags[dup_flags]) fd
 
-mknodat$loop$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev proc[1792, 2])
-mknodat$null$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev const[0x103])
-mknodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev int32)
+mknodat$loop$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_names]], mode flags[mknod_mode], dev proc[1792, 2])
+mknodat$null$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_names]], mode flags[mknod_mode], dev const[0x103])
+mknodat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_names]], mode flags[mknod_mode], dev int32)
 
 getdents$kccwf(fd fd_dir, ent buffer[out], count len[ent])
 getdents64$kccwf(fd fd_dir, ent buffer[out], count len[ent])
-name_to_handle_at$kccwf(fd fd_dir, file ptr[in, string["testfile"]], handle ptr[in, file_handle], mnt ptr[out, int32], flags flags[name_to_handle_at_flags])
+name_to_handle_at$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_names]], handle ptr[in, file_handle], mnt ptr[out, int32], flags flags[name_to_handle_at_flags])
 getcwd$kccwf(buf buffer[out], size len[buf])
 fchdir$kccwf(fd fd)
 
@@ -47,11 +59,11 @@ fadvise64$kccwf(fd fd, offset fileoff, len intptr, advice flags[fadvise_flags])
 fchmod$kccwf(fd fd, mode flags[open_mode])
 fchown$kccwf(fd fd, uid uid, gid gid)
 fallocate$kccwf(fd fd, mode flags[fallocate_mode], off intptr, len intptr)
-faccessat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
-futimesat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval])
-utimensat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval], flags flags[utimensat_flags])
-statx$kccwf(fd fd_dir, file ptr[in, string["testfile"]], flags flags[statx_flags], mask flags[statx_mask], statxbuf ptr[out, statx])
-fchmodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
+faccessat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_names]], mode flags[open_mode])
+futimesat$kccwf(dir fd_dir, file ptr[in, string[kccwf_rel_names]], times ptr[in, itimerval])
+utimensat$kccwf(dir fd_dir, file ptr[in, string[kccwf_rel_names]], times ptr[in, itimerval], flags flags[utimensat_flags])
+statx$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_names]], flags flags[statx_flags], mask flags[statx_mask], statxbuf ptr[out, statx])
+fchmodat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_names]], mode flags[open_mode])
 
 ftruncate$kccwf(fd fd, len intptr)
 flock$kccwf(fd fd, op flags[flock_op])
@@ -88,35 +100,35 @@ syncfs$kccwf(fd fd)
 sync_file_range$kccwf(fd fd, off intptr, nbytes intptr, flags flags[sync_file_flags])
 
 # 基础文件操作
-open$kccwf(file ptr[in, string["/mnt/kccwf/testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
-open$kccwf_dir(file ptr[in, string["/mnt/kccwf"]], flags flags[open_flags], mode flags[open_mode]) fd_dir
-openat$kccwf(fd fd_dir, file ptr[in, string["testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
+open$kccwf(file ptr[in, string[kccwf_abs_paths]], flags flags[open_flags], mode flags[open_mode]) fd
+open$kccwf_dir(file ptr[in, string[kccwf_dir_paths]], flags flags[open_flags], mode flags[open_mode]) fd_dir
+openat$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_names]], flags flags[open_flags], mode flags[open_mode]) fd
 
 # 目录操作
-mkdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]], mode flags[open_mode])
-rmdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]])
+mkdir$kccwf(path ptr[in, string[kccwf_dir_paths]], mode flags[open_mode])
+rmdir$kccwf(path ptr[in, string[kccwf_dir_paths]])
 
 # 文件元数据
-chmod$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], mode flags[open_mode])
-chown$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], uid int32, gid int32)
-utimes$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], times ptr[in, timeval])
+chmod$kccwf(path ptr[in, string[kccwf_abs_paths]], mode flags[open_mode])
+chown$kccwf(path ptr[in, string[kccwf_abs_paths]], uid int32, gid int32)
+utimes$kccwf(path ptr[in, string[kccwf_abs_paths]], times ptr[in, timeval])
 
 # 高级文件操作
-rename$kccwf(old ptr[in, string["/mnt/kccwf/testfile#"]], new ptr[in, string["/mnt/kccwf/testfile#"]])
-truncate$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], length intptr)
+rename$kccwf(old ptr[in, string[kccwf_abs_paths]], new ptr[in, string[kccwf_abs_paths]])
+truncate$kccwf(path ptr[in, string[kccwf_abs_paths]], length intptr)
 
 # 链接操作
-link$kccwf(oldpath ptr[in, string["/mnt/kccwf/testfile#"]], newpath ptr[in, string["/mnt/kccwf/hardlink#"]])
-unlink$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]])
-symlink$kccwf(target ptr[in, string["/mnt/kccwf/target_%d"]], linkpath ptr[in, string["/mnt/kccwf/symlink#"]])
+link$kccwf(oldpath ptr[in, string[kccwf_abs_paths]], newpath ptr[in, string[kccwf_link_names]])
+unlink$kccwf(path ptr[in, string[kccwf_abs_paths]])
+symlink$kccwf(target ptr[in, string[kccwf_symlink_targets]], linkpath ptr[in, string[kccwf_symlink_names]])
 
-# 扩展属性 (修正指针参数)
-setxattr$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+# 扩展属性
+setxattr$kccwf(path ptr[in, string[kccwf_abs_paths]], name ptr[in, string[kccwf_xattr_keys]], value ptr[in, array[int8]], size len[value], flags int32)
 
-fsetxattr$kccwf(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+fsetxattr$kccwf(fd fd, name ptr[in, string[kccwf_xattr_keys]], value ptr[in, array[int8]], size len[value], flags int32)
 
-# 文件状态获取 (修正指针嵌套)
-stat$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], buf ptr[out, stat_buffer])
+# 文件状态获取
+stat$kccwf(path ptr[in, string[kccwf_abs_paths]], buf ptr[out, stat_buffer])
 
 stat_buffer {
 	st_dev		int64

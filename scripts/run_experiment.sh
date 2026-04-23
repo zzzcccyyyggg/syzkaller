@@ -3,8 +3,8 @@
 # run_experiment.sh — 统一实验管理 (fuzz / validate 分步运行, CPU 核心隔离)
 #
 # 为每个模块分配指定数量的 CPU 核心 (默认 2 核):
-#   • fuzz:     全部核心, 2 VMs, procs=2
-#   • validate: 全部核心, 2 VMs, procs=2 (streaming 一次性处理)
+#   • fuzz:     全部核心, 默认 3 VMs, procs=2
+#   • validate: 全部核心, 默认 2 VMs, procs=2 (streaming 一次性处理)
 # fuzz 和 validate 分步运行, 不会同时占用同一槽位
 #
 # 典型流程:
@@ -28,16 +28,25 @@
 # 选项:
 #   --all / -a     操作所有可用模块
 #   --vanilla      使用 vanilla 配置
+#   --variant STR  使用 ablation 变体配置 (e.g. --variant no-timing → fuzz-no-timing.cfg)
+#   --separate-validate-slot  validate 使用独立 CPU 槽位，不复用 fuzz 槽位
 #   --no-pin       不绑定 CPU，不使用 cset / taskset，直接运行
 #   --except / -e  排除指定模块 (与 --all 搭配: --all --except floppy usb-driver)
 #
 # 环境变量 (可选覆盖):
 #   CORES_PER_MODULE=2        每模块 CPU 核心数
 #   SYSTEM_RESERVED_CORES=8   预留给系统的核心数 (从 CPU0 开始)
-#   EXP_VM_COUNT=2            每端 VM 数量
-#   EXP_VM_CPU=2              每 VM vCPU
-#   EXP_VM_MEM=4096           每 VM 内存 (MB)
-#   EXP_PROCS=2               syz-manager procs
+#   EXP_VM_COUNT              fuzz / validate 共用覆盖 (仅在显式设置时生效)
+#   EXP_FUZZ_VM_COUNT=3       默认 fuzz VM 数量
+#   EXP_VALIDATE_VM_COUNT=2   默认 validate VM 数量
+#   EXP_VM_CPU=2              默认每 VM vCPU
+#   EXP_VM_MEM=4096           默认每 VM 内存 (MB)
+#   EXP_PROCS=2               默认 syz-manager procs
+#   EXP_VM_COUNT_XFS=3        模块级覆盖 (模块名转大写, '-' 转 '_')
+#   EXP_FUZZ_VM_COUNT_XFS=3   模块级 fuzz VM 数量覆盖
+#   EXP_VALIDATE_VM_COUNT_XFS=2 模块级 validate VM 数量覆盖
+#   EXP_VM_CPU_XFS=2          例如: xfs 使用 3VM/2vCPU
+#   EXP_PROCS_BT_STACK=4      例如: bt-stack 使用独立 procs 配置
 #   NO_PIN=true               不绑定 CPU，直接运行
 #
 # 自动检测/创建 cset 布局, 使用未被 /system 占用的核心
@@ -53,11 +62,15 @@ source "$SCRIPT_DIR/functions.sh"
 # ---------------------------------------------------------------------------
 CORES_PER_MODULE=${CORES_PER_MODULE:-2}
 SYSTEM_RESERVED_CORES=${SYSTEM_RESERVED_CORES:-8}
-EXP_VM_COUNT=${EXP_VM_COUNT:-2}
+EXP_VM_COUNT=${EXP_VM_COUNT-}
+EXP_FUZZ_VM_COUNT=${EXP_FUZZ_VM_COUNT:-3}
+EXP_VALIDATE_VM_COUNT=${EXP_VALIDATE_VM_COUNT:-2}
 EXP_VM_CPU=${EXP_VM_CPU:-2}
 EXP_VM_MEM=${EXP_VM_MEM:-4096}
 EXP_PROCS=${EXP_PROCS:-2}
 NO_PIN=${NO_PIN:-false}
+SEPARATE_VALIDATE_SLOT=${SEPARATE_VALIDATE_SLOT:-false}
+EXP_VALIDATE_WORKDIR_NAME=${EXP_VALIDATE_WORKDIR_NAME:-validate-run}
 
 STATE_DIR="$PROJECT_HOME/.experiment"
 CPUSETS_OWNED_MARKER="$STATE_DIR/.cpuset_owned"
@@ -66,12 +79,76 @@ CPUS_AVAILABLE=()
 AVAIL_CORES=0
 AVAIL_DESC=""
 USE_CSET=false
+USE_CGROUP_V2_CPUSET=false
 MAX_MODULES=0
 declare -a BATCH_RESERVED_IDXS=()
+CGROUP_V2_CPUSET_ROOT="/sys/fs/cgroup/ddrd"
 
 join_by_comma() {
     local IFS=,
     echo "$*"
+}
+
+module_env_suffix() {
+    local slug=${1^^}
+    slug=${slug//[^A-Z0-9]/_}
+    echo "$slug"
+}
+
+resolve_module_param() {
+    local slug=$1
+    local base_var=$2
+    local default_value=$3
+    local suffix override_name override_value
+
+    suffix=$(module_env_suffix "$slug")
+    override_name="${base_var}_${suffix}"
+    override_value="${!override_name-}"
+
+    if [[ -n "${override_value:-}" ]]; then
+        echo "$override_value"
+    else
+        echo "$default_value"
+    fi
+}
+
+resolve_env_chain() {
+    local default_value=$1
+    shift
+
+    local name value
+    for name in "$@"; do
+        value="${!name-}"
+        if [[ -n "${value:-}" ]]; then
+            echo "$value"
+            return 0
+        fi
+    done
+
+    echo "$default_value"
+}
+
+load_module_runtime_profile() {
+    local slug=$1
+    local mode=${2:-fuzz}
+    local suffix mode_var mode_default
+
+    suffix=$(module_env_suffix "$slug")
+    mode_var="EXP_${mode^^}_VM_COUNT"
+    mode_default="${!mode_var}"
+
+    MODULE_VM_COUNT=$(resolve_env_chain \
+        "$mode_default" \
+        "${mode_var}_${suffix}" \
+        "EXP_VM_COUNT_${suffix}" \
+        "EXP_VM_COUNT")
+    MODULE_VM_CPU=$(resolve_module_param "$slug" "EXP_VM_CPU" "$EXP_VM_CPU")
+    MODULE_VM_MEM=$(resolve_module_param "$slug" "EXP_VM_MEM" "$EXP_VM_MEM")
+    MODULE_PROCS=$(resolve_module_param "$slug" "EXP_PROCS" "$EXP_PROCS")
+}
+
+describe_module_runtime_profile() {
+    echo "VMs=$MODULE_VM_COUNT, vm_cpu=$MODULE_VM_CPU, vm_mem=${MODULE_VM_MEM}MB, procs=$MODULE_PROCS"
 }
 
 normalize_module_slug() {
@@ -109,6 +186,42 @@ ensure_mode_configs_exist() {
             fi
         }
     done
+}
+
+uses_unified_cgroup_v2() {
+    [[ -f /sys/fs/cgroup/cgroup.controllers ]] || return 1
+    grep -q '^0::' /proc/self/cgroup 2>/dev/null
+}
+
+can_run_privileged_noninteractive() {
+    if [[ $EUID -eq 0 ]]; then
+        return 0
+    fi
+    command -v sudo &>/dev/null || return 1
+    sudo -n true 2>/dev/null
+}
+
+run_privileged_noninteractive() {
+    if [[ $EUID -eq 0 ]]; then
+        "$@"
+        return $?
+    fi
+    sudo -n "$@"
+}
+
+init_cgroup_v2_cpuset_root() {
+    local root_cpus=$1
+    local mems
+    mems=$(cat /sys/fs/cgroup/cpuset.mems.effective 2>/dev/null || echo "0")
+
+    run_privileged_noninteractive bash -lc "
+        set -euo pipefail
+        mkdir -p '$CGROUP_V2_CPUSET_ROOT'
+        echo +cpuset > /sys/fs/cgroup/cgroup.subtree_control 2>/dev/null || true
+        [[ -f '$CGROUP_V2_CPUSET_ROOT/cpuset.cpus' ]] && echo '$root_cpus' > '$CGROUP_V2_CPUSET_ROOT/cpuset.cpus'
+        [[ -f '$CGROUP_V2_CPUSET_ROOT/cpuset.mems' ]] && echo '$mems' > '$CGROUP_V2_CPUSET_ROOT/cpuset.mems'
+        echo +cpuset > '$CGROUP_V2_CPUSET_ROOT/cgroup.subtree_control' 2>/dev/null || true
+    "
 }
 
 # ---------------------------------------------------------------------------
@@ -167,15 +280,30 @@ detect_available_cores() {
         fi
     fi
 
-    local total c
+    local total c reserved start_core
     total=$(nproc)
-    for ((c=0; c<total; c++)); do
+    reserved=$SYSTEM_RESERVED_CORES
+    if (( reserved < 0 )); then
+        reserved=0
+    fi
+
+    if (( total > reserved )); then
+        start_core=$reserved
+    else
+        start_core=0
+    fi
+
+    for ((c=start_core; c<total; c++)); do
         CPUS_AVAILABLE+=("$c")
     done
     AVAIL_CORES=${#CPUS_AVAILABLE[@]}
     AVAIL_DESC=$(join_by_comma "${CPUS_AVAILABLE[@]}")
     USE_CSET=false
-    $quiet || log_warn "未检测到可用 cset 分区，回退 taskset (核心=$AVAIL_DESC)"
+    if (( start_core > 0 )); then
+        $quiet || log_warn "未检测到可用 cset 分区，回退 taskset，并保留系统核心 0-$((start_core - 1)) (实验核心=$AVAIL_DESC)"
+    else
+        $quiet || log_warn "未检测到可用 cset 分区，回退 taskset (核心=$AVAIL_DESC)"
+    fi
 }
 
 ensure_cpuset_layout() {
@@ -185,6 +313,36 @@ ensure_cpuset_layout() {
 
     if ! command -v cset &>/dev/null; then
         log_warn "未安装 cset，回退 taskset（无法提供硬隔离）"
+        return 0
+    fi
+
+    if uses_unified_cgroup_v2; then
+        local total reserved user_start user_end user_desc
+        total=$(nproc)
+        reserved=$SYSTEM_RESERVED_CORES
+        if (( reserved < 1 )); then
+            reserved=1
+        fi
+        if (( total <= reserved )); then
+            log_warn "检测到 unified cgroup v2，但 CPU 核心数=$total <= 预留系统核心数=$reserved，回退 taskset"
+            return 0
+        fi
+
+        user_start=$reserved
+        user_end=$((total - 1))
+        user_desc="$user_start-$user_end"
+
+        if ! can_run_privileged_noninteractive; then
+            log_warn "检测到 unified cgroup v2；可用 cpuset cgroup 做硬隔离，但当前没有可用的 sudo 凭据，回退 taskset（先执行 sudo -v 可启用硬隔离）"
+            return 0
+        fi
+
+        if init_cgroup_v2_cpuset_root "$user_desc"; then
+            USE_CGROUP_V2_CPUSET=true
+            log_info "检测到 unified cgroup v2；使用 cpuset cgroup 进行硬隔离 (实验核心=$user_desc)"
+        else
+            log_warn "初始化 cgroup v2 cpuset 失败，回退 taskset"
+        fi
         return 0
     fi
 
@@ -257,12 +415,15 @@ maybe_teardown_cpuset_layout() {
 ACTION="help"
 ALL_MODE=false
 USE_VANILLA=false
+VARIANT_SUFFIX=""
 EXCEPT_MODULES=()
 TARGETS=()
 
 while [[ $# -gt 0 ]]; do
     case "$1" in
         --vanilla) USE_VANILLA=true; shift ;;
+        --variant) VARIANT_SUFFIX="-$2"; shift 2 ;;
+        --separate-validate-slot) SEPARATE_VALIDATE_SLOT=true; shift ;;
         --no-pin)  NO_PIN=true; shift ;;
         *) ACTION="$1"; shift; break ;;
     esac
@@ -272,6 +433,8 @@ while [[ $# -gt 0 ]]; do
     case "$1" in
         --all|-a)   ALL_MODE=true; shift ;;
         --vanilla)  USE_VANILLA=true; shift ;;
+        --variant)  VARIANT_SUFFIX="-$2"; shift 2 ;;
+        --separate-validate-slot) SEPARATE_VALIDATE_SLOT=true; shift ;;
         --no-pin)   NO_PIN=true; shift ;;
         --except|-e)
             shift
@@ -301,6 +464,7 @@ fi
 
 CFG_SUFFIX=""
 $USE_VANILLA && CFG_SUFFIX="-vanilla"
+[[ -n "$VARIANT_SUFFIX" ]] && CFG_SUFFIX="$VARIANT_SUFFIX"
 
 if $ALL_MODE; then
     mapfile -t TARGETS < <(
@@ -327,9 +491,11 @@ gen_exp_config() {
         fi
     fi
 
-    python3 - "$src" "$dst" "$EXP_VM_COUNT" "$EXP_VM_CPU" "$EXP_VM_MEM" "$EXP_PROCS" "$mode" <<'PYEOF'
+    load_module_runtime_profile "$slug" "$mode"
+
+    python3 - "$src" "$dst" "$MODULE_VM_COUNT" "$MODULE_VM_CPU" "$MODULE_VM_MEM" "$MODULE_PROCS" "$mode" "$EXP_VALIDATE_WORKDIR_NAME" <<'PYEOF'
 import json, sys, os
-src, dst, vm_count, vm_cpu, vm_mem, procs, mode = sys.argv[1:8]
+src, dst, vm_count, vm_cpu, vm_mem, procs, mode, validate_dirname = sys.argv[1:9]
 with open(src) as f:
     cfg = json.load(f)
 cfg["vm"]["count"] = int(vm_count)
@@ -337,13 +503,13 @@ cfg["vm"]["cpu"]   = int(vm_cpu)
 cfg["vm"]["mem"]   = int(vm_mem)
 cfg["procs"]       = int(procs)
 if mode == "validate":
-    cfg["workdir"] = os.path.join(cfg["workdir"], "validate-run")
+    cfg["workdir"] = os.path.join(cfg["workdir"], validate_dirname)
     if "experimental" in cfg:
         exp = cfg["experimental"]
         uv = exp.get("uaf_validate", {})
         uv["continuous_mode"] = False
         uv["streaming_load"] = True
-        uv["continue_after_backoff"] = True
+        uv["continue_after_hb"] = True
         exp["uaf_validate"] = uv
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=4)
@@ -370,8 +536,13 @@ calc_cores() {
 get_exp_fuzz_pid() {
     local sfile="$STATE_DIR/$1.state"
     if [[ -f "$sfile" ]]; then
-        local _idx _fp _vp
-        read -r _idx _fp _vp < "$sfile" || true
+        local _fidx _vidx _fp _vp
+        read -r _fidx _vidx _fp _vp < "$sfile" || true
+        if [[ -z "${_vp:-}" ]]; then
+            _vp="${_fp:-}"
+            _fp="${_vidx:-}"
+            _vidx=""
+        fi
         if [[ -n "${_fp:-}" ]] && [[ "${_fp:-0}" != "0" ]] && kill -0 "$_fp" 2>/dev/null; then
             echo "$_fp"
             return 0
@@ -383,8 +554,13 @@ get_exp_fuzz_pid() {
 get_exp_validate_pid() {
     local sfile="$STATE_DIR/$1.state"
     if [[ -f "$sfile" ]]; then
-        local _idx _fp _vp
-        read -r _idx _fp _vp < "$sfile" || true
+        local _fidx _vidx _fp _vp
+        read -r _fidx _vidx _fp _vp < "$sfile" || true
+        if [[ -z "${_vp:-}" ]]; then
+            _vp="${_fp:-}"
+            _fp="${_vidx:-}"
+            _vidx=""
+        fi
         if [[ -n "${_vp:-}" ]] && [[ "${_vp:-0}" != "0" ]] && kill -0 "$_vp" 2>/dev/null; then
             echo "$_vp"
             return 0
@@ -400,7 +576,7 @@ get_any_regular_pid() {
 
 save_state() {
     mkdir -p "$STATE_DIR"
-    echo "$2 $3 $4" > "$STATE_DIR/$1.state"
+    echo "$2 $3 $4 $5" > "$STATE_DIR/$1.state"
 }
 
 remove_state() {
@@ -408,11 +584,22 @@ remove_state() {
 }
 
 load_state() {
-    STATE_IDX=""
+    STATE_FUZZ_IDX=""
+    STATE_VAL_IDX=""
     STATE_FUZZ_PID=""
     STATE_VAL_PID=""
-    [[ -f "$STATE_DIR/$1.state" ]] && \
-        read -r STATE_IDX STATE_FUZZ_PID STATE_VAL_PID < "$STATE_DIR/$1.state"
+    if [[ -f "$STATE_DIR/$1.state" ]]; then
+        read -r STATE_FUZZ_IDX STATE_VAL_IDX STATE_FUZZ_PID STATE_VAL_PID < "$STATE_DIR/$1.state" || true
+        [[ "${STATE_VAL_IDX:-}" == "-" ]] && STATE_VAL_IDX=""
+        if [[ -z "${STATE_VAL_PID:-}" ]]; then
+            STATE_VAL_PID="${STATE_FUZZ_PID:-}"
+            STATE_FUZZ_PID="${STATE_VAL_IDX:-}"
+            STATE_VAL_IDX=""
+        fi
+        if [[ -z "${STATE_VAL_IDX:-}" ]] && [[ -n "${STATE_VAL_PID:-}" ]] && [[ "${STATE_VAL_PID:-0}" != "0" ]]; then
+            STATE_VAL_IDX="$STATE_FUZZ_IDX"
+        fi
+    fi
     return 0
 }
 
@@ -436,7 +623,15 @@ next_module_index() {
     if [[ -d "$STATE_DIR" ]]; then
         for f in "$STATE_DIR"/*.state; do
             [[ -f "$f" ]] || continue
-            used+=($(awk '{print $1}' "$f"))
+            local fidx vidx fp vp
+            read -r fidx vidx fp vp < "$f" || true
+            if [[ -z "${vp:-}" ]]; then
+                vp="${fp:-}"
+                fp="${vidx:-}"
+                vidx=""
+            fi
+            [[ -n "${fidx:-}" ]] && [[ "${fidx:-}" != "-" ]] && used+=("$fidx")
+            [[ -n "${vidx:-}" ]] && [[ "${vidx:-}" != "-" ]] && used+=("$vidx")
         done
     fi
 
@@ -462,6 +657,22 @@ pin_to_cores() {
 
     $NO_PIN && return 0
 
+    if $USE_CGROUP_V2_CPUSET; then
+        local cgdir="$CGROUP_V2_CPUSET_ROOT/$label"
+        local mems
+        mems=$(cat /sys/fs/cgroup/cpuset.mems.effective 2>/dev/null || echo "0")
+        if run_privileged_noninteractive bash -lc "
+            set -euo pipefail
+            mkdir -p '$cgdir'
+            echo '$cores' > '$cgdir/cpuset.cpus'
+            echo '$mems' > '$cgdir/cpuset.mems'
+            echo '$pid' > '$cgdir/cgroup.procs'
+        "; then
+            return 0
+        fi
+        log_warn "cpuset cgroup 绑定失败，回退 taskset: label=$label cores=$cores pid=$pid"
+    fi
+
     if $USE_CSET && command -v cset &>/dev/null; then
         cset set -d -s "$label" &>/dev/null || cset set -d -s "/$label" &>/dev/null || true
         if cset set -c "$cores" -s "$label" &>/dev/null; then
@@ -476,12 +687,26 @@ pin_to_cores() {
 }
 
 cleanup_cpuset() {
-    command -v cset &>/dev/null || return 0
     local name="$1"
+
+    if [[ -d "$CGROUP_V2_CPUSET_ROOT/$name" ]]; then
+        run_privileged_noninteractive rmdir "$CGROUP_V2_CPUSET_ROOT/$name" &>/dev/null || true
+    fi
+
+    command -v cset &>/dev/null || return 0
     cset set -d -s "$name" &>/dev/null || cset set -d -s "/$name" &>/dev/null || true
 }
 
 cleanup_all_ddrd_cpusets() {
+    if [[ -d "$CGROUP_V2_CPUSET_ROOT" ]]; then
+        local cg
+        while read -r cg; do
+            [[ -n "$cg" ]] || continue
+            run_privileged_noninteractive rmdir "$cg" &>/dev/null || true
+        done < <(find "$CGROUP_V2_CPUSET_ROOT" -mindepth 1 -maxdepth 1 -type d 2>/dev/null | sort -r)
+        run_privileged_noninteractive rmdir "$CGROUP_V2_CPUSET_ROOT" &>/dev/null || true
+    fi
+
     command -v cset &>/dev/null || return 0
     local n
     while read -r n; do
@@ -521,6 +746,7 @@ do_start() {
     fi
 
     gen_exp_config "$slug" "fuzz"
+    log_info "[$slug] fuzz 参数: $(describe_module_runtime_profile)"
 
     local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz${CFG_SUFFIX}.cfg"
     local log_dir="$EXP_DIR/$slug/logs"
@@ -543,7 +769,7 @@ do_start() {
         return 1
     fi
 
-    save_state "$slug" "$idx" "$fuzz_pid" ""
+    save_state "$slug" "$idx" "-" "$fuzz_pid" "0"
     log_ok "[$slug] fuzz 已启动  PID=$fuzz_pid  cores=$ALL_CORES"
     if $USE_VANILLA; then
         log_info "[$slug] fuzz 跑够后运行: sudo $0 --vanilla ${NO_PIN:+} $( $NO_PIN && echo '--no-pin' ) validate $slug" >/dev/null 2>&1 || true
@@ -565,29 +791,42 @@ do_validate() {
     fi
 
     local main_workdir="$EXP_DIR/$slug/workdir"
+    mkdir -p "$main_workdir"
     if [[ ! -f "$main_workdir/uaf-corpus.db" ]]; then
-        die "[$slug] corpus 文件不存在: $main_workdir/uaf-corpus.db — 请先运行 fuzz 产生 corpus"
+        log_warn "[$slug] corpus 文件尚不存在: $main_workdir/uaf-corpus.db — validate 将等待 fuzz 产生 corpus"
     fi
 
     local idx
+    local val_idx=""
     if $NO_PIN; then
         idx="-1"
+        val_idx="-1"
         ALL_CORES="unbound"
         log_info "[$slug] validate 不绑定 CPU，直接启动"
     else
         load_state "$slug"
-        if [[ -n "${STATE_IDX:-}" ]] && [[ "$STATE_IDX" != "-1" ]]; then
-            idx=$STATE_IDX
+        if $SEPARATE_VALIDATE_SLOT; then
+            if [[ -n "${STATE_VAL_IDX:-}" ]] && [[ "$STATE_VAL_IDX" != "-1" ]]; then
+                idx=$STATE_VAL_IDX
+            else
+                idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+            fi
         else
-            idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+            if [[ -n "${STATE_FUZZ_IDX:-}" ]] && [[ "$STATE_FUZZ_IDX" != "-1" ]]; then
+                idx=$STATE_FUZZ_IDX
+            else
+                idx=$(next_module_index) || die "CPU 槽位不足 (最大 $MAX_MODULES)"
+            fi
         fi
+        val_idx=$idx
         calc_cores "$idx"
         log_info "[$slug] validate 使用核心: $ALL_CORES"
     fi
 
     gen_exp_config "$slug" "validate"
+    log_info "[$slug] validate 参数: $(describe_module_runtime_profile)"
 
-    local val_workdir="$main_workdir/validate-run"
+    local val_workdir="$main_workdir/$EXP_VALIDATE_WORKDIR_NAME"
     mkdir -p "$val_workdir"
     if [[ ! -e "$val_workdir/uaf-corpus.db" ]]; then
         ln -sf "$main_workdir/uaf-corpus.db" "$val_workdir/uaf-corpus.db"
@@ -616,7 +855,9 @@ do_validate() {
 
     local fp
     fp=$(get_exp_fuzz_pid "$slug")
-    save_state "$slug" "$idx" "${fp:-0}" "$val_pid"
+    load_state "$slug"
+    local fuzz_idx="${STATE_FUZZ_IDX:--1}"
+    save_state "$slug" "$fuzz_idx" "$val_idx" "${fp:-0}" "$val_pid"
     log_ok "[$slug] validate 已启动  PID=$val_pid  cores=$ALL_CORES"
     return 0
 }
@@ -659,34 +900,46 @@ do_stop() {
 # status
 # ---------------------------------------------------------------------------
 do_status() {
-    printf "%-14s %-9s %-8s %-9s %-8s %-10s\n" \
-        "MODULE" "FUZZ" "F-PID" "VALIDATE" "V-PID" "CORES"
-    printf "%-14s %-9s %-8s %-9s %-8s %-10s\n" \
-        "------" "----" "-----" "--------" "-----" "-----"
+    if ! $NO_PIN && (( ${#CPUS_AVAILABLE[@]} == 0 )); then
+        detect_available_cores true
+    fi
+
+    printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
+        "MODULE" "FUZZ" "F-PID" "VALIDATE" "V-PID" "F-CORES" "V-CORES"
+    printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
+        "------" "----" "-----" "--------" "-----" "-------" "-------"
 
     for d in "$EXP_DIR"/*/; do
         local slug
         slug=$(basename "$d")
         [[ -f "$d/fuzz${CFG_SUFFIX}.cfg" ]] || continue
 
-        local fp vp fs vs cores="—"
+        local fp vp fs vs fuzz_cores="—" val_cores="—"
         fp=$(get_exp_fuzz_pid "$slug")
         vp=$(get_exp_validate_pid "$slug")
         fs="stopped"; [[ -n "$fp" ]] && fs="running"
         vs="stopped"; [[ -n "$vp" ]] && vs="running"
 
         load_state "$slug"
-        if [[ -n "${STATE_IDX:-}" ]]; then
-            if [[ "$STATE_IDX" == "-1" ]]; then
-                cores="unbound"
-            else
-                calc_cores "$STATE_IDX"
-                cores="$ALL_CORES"
+        if [[ -n "${STATE_FUZZ_IDX:-}" ]]; then
+            if [[ "$STATE_FUZZ_IDX" == "-1" ]]; then
+                fuzz_cores="unbound"
+            elif [[ -n "$STATE_FUZZ_IDX" ]]; then
+                calc_cores "$STATE_FUZZ_IDX"
+                fuzz_cores="$ALL_CORES"
+            fi
+        fi
+        if [[ -n "${STATE_VAL_IDX:-}" ]]; then
+            if [[ "$STATE_VAL_IDX" == "-1" ]]; then
+                val_cores="unbound"
+            elif [[ -n "$STATE_VAL_IDX" ]]; then
+                calc_cores "$STATE_VAL_IDX"
+                val_cores="$ALL_CORES"
             fi
         fi
 
-        printf "%-14s %-9s %-8s %-9s %-8s %-10s\n" \
-            "$slug" "$fs" "${fp:-—}" "$vs" "${vp:-—}" "$cores"
+        printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
+            "$slug" "$fs" "${fp:-—}" "$vs" "${vp:-—}" "$fuzz_cores" "$val_cores"
     done
 }
 
@@ -849,13 +1102,13 @@ case "$ACTION" in
             if $NO_PIN; then
                 log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (no CPU pinning)"
             else
-                log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+                log_info "启动 fuzz(vanilla): ${#TARGETS[@]} 个模块 (默认 ${EXP_FUZZ_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
             fi
         else
             if $NO_PIN; then
                 log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (no CPU pinning)"
             else
-                log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (${EXP_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
+                log_info "启动 fuzz: ${#TARGETS[@]} 个模块 (默认 ${EXP_FUZZ_VM_COUNT}VMs, ${CORES_PER_MODULE}核/模块)"
             fi
         fi
 

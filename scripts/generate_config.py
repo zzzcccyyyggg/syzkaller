@@ -10,14 +10,33 @@ generate_config.py — 为指定模块生成 fuzz.cfg 和 validate.cfg
     python3 scripts/generate_config.py --validate-only xfs
     python3 scripts/generate_config.py --vanilla-only xfs
 
+Ablation 变体 (直接生成可用于敏感度实验的配置):
+    python3 scripts/generate_config.py --ablation fuzz-no-timing xfs btrfs ptmx dsp
+    python3 scripts/generate_config.py --ablation fuzz-no-objlink xfs btrfs ptmx dsp
+    python3 scripts/generate_config.py --ablation validate-no-delay xfs btrfs ptmx dsp
+    python3 scripts/generate_config.py --ablation validate-no-replay xfs btrfs ptmx dsp
+    python3 scripts/generate_config.py --ablation validate-no-backoff xfs btrfs ptmx dsp
+
 配置生成到:
     默认:      exp/<slug>/fuzz.cfg / validate.cfg
     纯净版:    exp/<slug>/fuzz-vanilla.cfg / validate-vanilla.cfg
+    Ablation:  exp/<slug>/fuzz-<variant>.cfg / validate-<variant>.cfg
 """
 import argparse
 import json
 import os
 import sys
+
+
+def deep_merge_dict(base: dict, override: dict) -> dict:
+    """Recursively merge override into base and return a new dict."""
+    merged = json.loads(json.dumps(base))
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge_dict(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
 
 # ---------------------------------------------------------------------------
 # 路径常量
@@ -74,6 +93,7 @@ FUZZ_EXPERIMENTAL = {
     "barrier_mode": True,
     "barrier_procs": [0, 1],
     "max_stacks_per_varname_pair": 100,
+    "normal_threshold_micros": 10000,
     "enable_timing_exploration": True,
     "timing_exploration_queue_size": 500,
     "timing_exploration_ratio": 0.1,
@@ -85,6 +105,11 @@ FUZZ_EXPERIMENTAL = {
     "max_attempts_per_pair": 20,
     "success_threshold": 0.1,
     "executions_per_attempt": 5,
+    "enable_dynamic_threshold": True,
+    "dynamic_threshold_initial_us": 2500,
+    "dynamic_threshold_min_us": 500,
+    "dynamic_threshold_max_us": 10000,
+    "dynamic_threshold_eval_sec": 60,
 }
 
 # ---------------------------------------------------------------------------
@@ -283,12 +308,98 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
         if is_validate:
             config["experimental"] = json.loads(json.dumps(VALIDATE_EXPERIMENTAL))
         else:
-            # 使用模块自带的 experimental 或默认
+            # 使用默认 fuzz experimental，并允许模块 overrides 做增量覆盖。
             mod_exp = overrides.get("experimental", {})
-            if mod_exp:
-                config["experimental"] = mod_exp
-            else:
-                config["experimental"] = json.loads(json.dumps(FUZZ_EXPERIMENTAL))
+            config["experimental"] = deep_merge_dict(FUZZ_EXPERIMENTAL, mod_exp)
+
+    return config
+
+
+# ---------------------------------------------------------------------------
+# Ablation variant definitions
+# ---------------------------------------------------------------------------
+# Each variant specifies: (suffix, mode, experimental_overrides)
+ABLATION_VARIANTS = {
+    # --- Fuzz-side ablations ---
+    "fuzz-no-timing": {
+        "description": "Disable timing exploration (pair-guided delay mutation)",
+        "mode": "fuzz",
+        "suffix": "-no-timing",
+        "overrides": {
+            "enable_timing_exploration": False,
+        },
+    },
+    "fuzz-no-objlink": {
+        "description": "Disable resource-aware object linking (ObjectLinker V2)",
+        "mode": "fuzz",
+        "suffix": "-no-objlink",
+        "overrides": {
+            "enable_object_linking": False,
+        },
+    },
+    "fuzz-random": {
+        "description": "Pure random baseline (no race-guided strategies)",
+        "mode": "fuzz",
+        "suffix": "-random",
+        "overrides": {
+            "random_baseline_mode": True,
+            "enable_timing_exploration": False,
+        },
+    },
+    # --- Validate-side ablations ---
+    "validate-no-delay": {
+        "description": "Disable directed delay scheduling",
+        "mode": "validate",
+        "suffix": "-no-delay",
+        "overrides": {
+            "uaf_validate": {
+                "disable_verify_delay": True,
+            },
+        },
+    },
+    "validate-no-replay": {
+        "description": "Disable state replay/restoration",
+        "mode": "validate",
+        "suffix": "-no-replay",
+        "overrides": {
+            "uaf_validate": {
+                "enable_replay": False,
+            },
+        },
+    },
+    "validate-no-backoff": {
+        "description": "Disable adaptive validation backoff",
+        "mode": "validate",
+        "suffix": "-no-backoff",
+        "overrides": {
+            "uaf_validate": {
+                "continue_after_backoff": False,
+                "enable_varname_scheduling": False,
+            },
+        },
+    },
+}
+
+
+def apply_ablation_overrides(config: dict, variant_name: str) -> dict:
+    """Apply ablation overrides to a generated config."""
+    variant = ABLATION_VARIANTS[variant_name]
+    overrides = variant["overrides"]
+
+    if "experimental" not in config:
+        return config
+
+    exp = config["experimental"]
+
+    for key, value in overrides.items():
+        if key == "uaf_validate" and isinstance(value, dict):
+            # Merge into uaf_validate sub-dict
+            if "uaf_validate" not in exp:
+                exp["uaf_validate"] = {}
+            for vk, vv in value.items():
+                exp["uaf_validate"][vk] = vv
+        else:
+            exp[key] = value
 
     return config
 
@@ -312,6 +423,9 @@ def main():
     parser.add_argument("--validate-only", action="store_true", help="仅生成 validate 配置")
     parser.add_argument("--vanilla", action="store_true", help="额外生成纯净配置(不含 experimental), 文件名为 *-vanilla.cfg")
     parser.add_argument("--vanilla-only", action="store_true", help="仅生成纯净配置(不含 experimental)")
+    parser.add_argument("--ablation", type=str, metavar="VARIANT",
+                        help=f"生成 ablation 变体配置. 可选: {', '.join(sorted(ABLATION_VARIANTS.keys()))}")
+    parser.add_argument("--list-ablations", action="store_true", help="列出所有 ablation 变体")
     parser.add_argument("--force", "-f", action="store_true", help="覆盖已存在的配置")
     parser.add_argument("--dry-run", action="store_true", help="仅打印, 不写入文件")
     args = parser.parse_args()
@@ -319,6 +433,12 @@ def main():
     if args.vanilla and args.vanilla_only:
         print("ERROR: --vanilla 和 --vanilla-only 不能同时使用", file=sys.stderr)
         sys.exit(1)
+
+    if args.list_ablations:
+        print("可用 ablation 变体:")
+        for name, info in sorted(ABLATION_VARIANTS.items()):
+            print(f"  {name:25s}  [{info['mode']:8s}]  {info['description']}")
+        return
 
     if args.list:
         print("可用模块:")
@@ -333,6 +453,43 @@ def main():
     if not targets:
         parser.print_help()
         sys.exit(1)
+
+    # --- Ablation mode: generate single variant per module ---
+    if args.ablation:
+        variant_name = args.ablation
+        if variant_name not in ABLATION_VARIANTS:
+            print(f"ERROR: 未知 ablation 变体: {variant_name}", file=sys.stderr)
+            print(f"       可选: {', '.join(sorted(ABLATION_VARIANTS.keys()))}", file=sys.stderr)
+            sys.exit(1)
+
+        variant = ABLATION_VARIANTS[variant_name]
+        mode = variant["mode"]
+        suffix = variant["suffix"]
+
+        ok = 0
+        for slug in targets:
+            cfg = generate_config(slug, mode, include_experimental=True)
+            cfg = apply_ablation_overrides(cfg, variant_name)
+            out_path = os.path.join(EXP_DIR, slug, f"{mode}{suffix}.cfg")
+
+            if os.path.exists(out_path) and not args.force:
+                print(f"SKIP {out_path} (已存在, 使用 --force 覆盖)")
+                continue
+
+            if args.dry_run:
+                print(f"--- {out_path} ---")
+                print(json.dumps(cfg, indent=4))
+                continue
+
+            os.makedirs(os.path.dirname(out_path), exist_ok=True)
+            with open(out_path, "w") as f:
+                json.dump(cfg, f, indent=4)
+            print(f"OK {out_path}  [{variant['description']}]")
+            ok += 1
+
+        if not args.dry_run:
+            print(f"\n生成完成: {ok} 个 {variant_name} 配置文件")
+        return
 
     modes = []
     if args.validate_only:

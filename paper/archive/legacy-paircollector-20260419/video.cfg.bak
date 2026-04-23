@@ -1,0 +1,74 @@
+{
+    "target": "linux/amd64",
+    "http": "127.0.0.1:56816",
+    "workdir": "/home/zzzccc/BASS/DDRD-syzkaller/test/DDRD-PairCollector/test/workdir-video",
+    "kernel_obj": "/home/zzzccc/Linux-Kernel/DDRD-Kernel",
+    "image": "/home/zzzccc/BASS/DDRD-syzkaller/test/fs/bookworm.img",
+    "sshkey": "/home/zzzccc/BASS/DDRD-syzkaller/test/fs/bookworm.id_rsa",
+    "syzkaller": "/home/zzzccc/BASS/DDRD-syzkaller/",
+    "procs": 2,
+    "type": "qemu",
+    "reproduce": false,
+    "vm": {
+        "count": 2,
+        "kernel": "/home/zzzccc/Linux-Kernel/DDRD-Kernel/arch/x86/boot/bzImage",
+        "cpu": 2,
+        "mem": 4096,
+        "cmdline": "net.ifnames=0 vivid.n_devs=16 vivid.multiplanar=1,2,1,2,1,2,1,2,1,2,1,2,1,2,1,2",
+        "qemu_args": " -enable-kvm -hdb /home/zzzccc/BASS/DDRD-syzkaller/test/fs/btrfs-2G.qcow2"
+    },
+    "enable_syscalls": [
+        "syz_open_dev$video",
+        "syz_open_dev$video4linux",
+        "syz_open_dev$vivid",
+        "syz_open_dev$swradio",
+        "syz_open_dev$radio",
+        "syz_open_dev$vbi",
+        "openat$vimc0",
+        "openat$vimc1",
+        "openat$vimc2",
+        "openat$vicodec0",
+        "openat$vicodec1",
+        "ioctl$VIDIOC_*",
+        "ioctl$VIDIOC_SUBDEV_*",
+        "ioctl$VIDIOC_DBG_*",
+        "ioctl$VIDIOC_CREATE_BUFS",
+        "ioctl$VIDIOC_PREPARE_BUF",
+        "ioctl$VIDIOC_EXPBUF",
+        "ioctl$VIDIOC_DQEVENT",
+        "ioctl$VIDIOC_SUBSCRIBE_EVENT",
+        "ioctl$VIDIOC_UNSUBSCRIBE_EVENT",
+        "close$fd_v4l2_buffer"
+    ],
+    "disable_syscalls": [
+        "ioctl$VIDIOC_LOG_STATUS",
+        "ioctl$VIDIOC_REQBUFS",
+        "ioctl$VIDIOC_CREATE_BUFS",
+        "ioctl$VIDIOC_PREPARE_BUF",
+        "ioctl$VIDIOC_QBUF",
+        "ioctl$VIDIOC_EXPBUF",
+        "ioctl$VIDIOC_STREAMON",
+        "ioctl$VIDIOC_STREAMOFF",
+        "syz_open_dev$radio",
+        "syz_open_dev$swradio",
+        "syz_open_dev$vbi"
+    ],
+    "experimental": {
+        "skip_duplicate_data_races": true,
+        "barrier_mode": true,
+        "barrier_procs": [
+            0,
+            1,
+            2,
+            3
+        ],
+        "uaf_mode": true,
+        "uaf_validate": {
+            "max_concurrent": 1,
+            "delay_retry_budget": 2,
+            "timeout_seconds": 120,
+            "repeat_count": 3
+        },
+        "ddrd_monitor": false
+    }
+}

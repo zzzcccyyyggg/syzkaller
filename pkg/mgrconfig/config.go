@@ -339,6 +339,12 @@ type Experimental struct {
 	// This is useful for comparing the effectiveness of race-guided strategies.
 	RandomBaselineMode bool `json:"random_baseline_mode,omitempty"`
 
+	// EnableObjectLinking enables resource-aware cross-syscall object linking (ObjectLinker V2).
+	// When disabled, concurrent program pairs will not have their object identifiers unified,
+	// which is useful for ablation experiments measuring the contribution of resource-aware
+	// program group generation. Defaults to true when uaf_mode is enabled.
+	EnableObjectLinking *bool `json:"enable_object_linking,omitempty"`
+
 	// ======== Dual-Queue Timing Exploration Configuration ========
 	// EnableTimingExploration enables the timing exploration queue for race optimization.
 	// When enabled, newly discovered VarName pairs are enqueued for timing optimization

@@ -79,3 +79,35 @@ func TestTee(t *testing.T) {
 	assert.Empty(t, copy.ReturnOutput)
 	assert.Empty(t, copy.Important)
 }
+
+func TestAlternate(t *testing.T) {
+	req := &Request{}
+	calls := 0
+	src := Alternate(Callback(func() *Request {
+		calls++
+		return req
+	}), 3)
+
+	assert.Equal(t, req, src.Next())
+	assert.Equal(t, req, src.Next())
+	assert.Nil(t, src.Next())
+	assert.Equal(t, req, src.Next())
+	assert.Equal(t, 3, calls)
+}
+
+func TestPeriodic(t *testing.T) {
+	req := &Request{}
+	calls := 0
+	src := Periodic(Callback(func() *Request {
+		calls++
+		return req
+	}), 3)
+
+	assert.Nil(t, src.Next())
+	assert.Nil(t, src.Next())
+	assert.Equal(t, req, src.Next())
+	assert.Nil(t, src.Next())
+	assert.Nil(t, src.Next())
+	assert.Equal(t, req, src.Next())
+	assert.Equal(t, 2, calls)
+}

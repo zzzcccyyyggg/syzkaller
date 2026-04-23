@@ -1,0 +1,26 @@
+[
+  {
+    "program": "",
+    "programs": [
+      "r0 = syz_open_dev$tty20(0xc, 0x4, 0x0)\nioctl$TIOCGDEV(r0, 0x80045432, &(0x7f0000000000))\nioctl$KDSKBMODE(r0, 0x4b45, &(0x7f0000000040)=0x4)\nr1 = openat$ptmx(0xffffffffffffff9c, &(0x7f0000000080), 0x0, 0x0)\nioctl$TIOCNOTTY(r1, 0x5422)\nioctl$KDGKBTYPE(r1, 0x4b33, 0x0)\nioctl$TIOCNXCL(r0, 0x540d)\nioctl$TCXONC(r1, 0x540a, 0x0)\n",
+      "r0 = syz_open_dev$tty20(0xc, 0x4, 0x0)\nr1 = openat$ptmx(0xffffffffffffff9c, &(0x7f0000000000), 0x28000, 0x0)\nioctl$TIOCSPTLCK(r1, 0x40045431, &(0x7f0000000040))\nr2 = syz_open_dev$tty20(0xc, 0x4, 0x1)\nioctl$TIOCSPTLCK(r0, 0x40045431, &(0x7f0000000240))\nioctl$TCFLSH(r2, 0x540b, 0x1)\nioctl$TIOCGETD(r2, 0x5424, &(0x7f0000000280))\nr3 = ioctl$TIOCGPTPEER(r1, 0x5441, 0x9)\nioctl$TIOCGPTPEER(r3, 0x5441, 0x9)\n"
+    ],
+    "pairs": [
+      {
+        "free_access_name": 0,
+        "use_access_name": 0,
+        "free_call_stack": 0,
+        "use_call_stack": 0,
+        "signal": 0,
+        "time_diff": 1000,
+        "free_sn": 4,
+        "use_sn": 7,
+        "lock_type": 0,
+        "use_access_type": 1
+      }
+    ],
+    "barrier_participants": 2,
+    "barrier_proc_list": [0, 1],
+    "replay_delays": [0, 0]
+  }
+]

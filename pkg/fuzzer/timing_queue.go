@@ -249,6 +249,13 @@ func (q *TimingExplorationQueue) GetStats() (enqueued, explored, pairsFound, cur
 	return q.totalEnqueued, q.totalExplored, q.totalPairsFound, len(q.entries)
 }
 
+// PendingCounts returns the current queue depths for discovery and validation.
+func (q *TimingExplorationQueue) PendingCounts() (exploration, validation int) {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return len(q.entries), len(q.validationQueue)
+}
+
 // Clear removes all entries from the queue.
 func (q *TimingExplorationQueue) Clear() {
 	q.mu.Lock()

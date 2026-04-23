@@ -186,6 +186,46 @@ func TestInheritTimingThreshold(t *testing.T) {
 	})
 }
 
+func TestCurrentWidenedTimingThreshold(t *testing.T) {
+	t.Run("uses static widened threshold without controller", func(t *testing.T) {
+		f := &Fuzzer{
+			Config: &Config{NormalThresholdMicros: 2500},
+			timingScheduler: &TimingScheduler{
+				config: TimingExplorationConfig{WidenedThresholdMicros: 20000},
+			},
+		}
+		assert.Equal(t, int64(20000), f.currentWidenedTimingThreshold())
+	})
+
+	t.Run("uses dynamic threshold scaled by 8x", func(t *testing.T) {
+		config := DefaultThresholdControllerConfig()
+		config.InitialThresholdUs = 1000
+		tc := NewThresholdController(config, func() int { return 0 })
+		f := &Fuzzer{
+			Config:              &Config{NormalThresholdMicros: 2500},
+			thresholdController: tc,
+			timingScheduler: &TimingScheduler{
+				config: TimingExplorationConfig{WidenedThresholdMicros: 20000},
+			},
+		}
+		assert.Equal(t, int64(8000), f.currentWidenedTimingThreshold())
+	})
+
+	t.Run("caps dynamic widened threshold at configured ceiling", func(t *testing.T) {
+		config := DefaultThresholdControllerConfig()
+		config.InitialThresholdUs = 4000
+		tc := NewThresholdController(config, func() int { return 0 })
+		f := &Fuzzer{
+			Config:              &Config{NormalThresholdMicros: 2500},
+			thresholdController: tc,
+			timingScheduler: &TimingScheduler{
+				config: TimingExplorationConfig{WidenedThresholdMicros: 20000},
+			},
+		}
+		assert.Equal(t, int64(20000), f.currentWidenedTimingThreshold())
+	})
+}
+
 func getTestTarget() (*prog.Target, error) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
 	if err == nil {
