@@ -387,15 +387,15 @@ func (fuzzer *Fuzzer) currentWidenedTimingThreshold() int64 {
 	}
 
 	// In dynamic-threshold mode, keep timing exploration tied to the current
-	// normal threshold instead of a fixed 20ms/500ms window. We use the
-	// documented 8x widening rule, but cap it by the configured widened ceiling
-	// to avoid flooding the queue with very loose candidates.
+	// normal threshold, but do not let Phase 1 collapse below the configured
+	// widened threshold. This preserves a stable discovery window even when the
+	// normal threshold temporarily shrinks to focus validation effort.
 	if fuzzer.thresholdController != nil {
 		dynamicWidened := normal * 8
 		if dynamicWidened < normal {
 			dynamicWidened = normal
 		}
-		if widened > 0 && dynamicWidened > widened {
+		if widened > 0 && dynamicWidened < widened {
 			dynamicWidened = widened
 		}
 		return dynamicWidened
@@ -592,7 +592,8 @@ type Config struct {
 	// NormalThresholdMicros overrides the default 10ms threshold for barrier/solo DDRD requests.
 	// 0 uses the executor default.
 	NormalThresholdMicros int64
-	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds)
+	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
+	// In dynamic-threshold mode this acts as the minimum Phase 1 discovery window.
 	WidenedThresholdMicros int64
 	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair
 	MaxAttemptsPerPair int
@@ -613,7 +614,7 @@ type Config struct {
 	DynamicThresholdMinUs int64
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds). Default: 50000.
 	DynamicThresholdMaxUs int64
-	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Default: 60.
+	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Default: 120.
 	DynamicThresholdEvalSec int
 	// Workdir is used for the shared state file between fuzzer and validator.
 	Workdir string

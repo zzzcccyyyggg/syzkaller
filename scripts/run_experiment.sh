@@ -507,7 +507,7 @@ if mode == "validate":
     if "experimental" in cfg:
         exp = cfg["experimental"]
         uv = exp.get("uaf_validate", {})
-        uv["continuous_mode"] = False
+        uv["continuous_mode"] = True
         uv["streaming_load"] = True
         uv["continue_after_hb"] = True
         exp["uaf_validate"] = uv
@@ -828,9 +828,10 @@ do_validate() {
 
     local val_workdir="$main_workdir/$EXP_VALIDATE_WORKDIR_NAME"
     mkdir -p "$val_workdir"
-    if [[ ! -e "$val_workdir/uaf-corpus.db" ]]; then
-        ln -sf "$main_workdir/uaf-corpus.db" "$val_workdir/uaf-corpus.db"
-    fi
+    ln -sfn "$main_workdir/uaf-corpus.db" "$val_workdir/uaf-corpus.db"
+    ln -sfn "$main_workdir/uaf-validate-queue.db" "$val_workdir/uaf-validate-queue.db"
+    ln -sfn "$main_workdir/race-pair-index.db" "$val_workdir/race-pair-index.db"
+    ln -sfn "$main_workdir/threshold-state.json" "$val_workdir/threshold-state.json"
 
     local val_cfg="$EXP_DIR/$slug/exp-validate${CFG_SUFFIX}.cfg"
     local log_dir="$EXP_DIR/$slug/logs"
@@ -925,16 +926,24 @@ do_status() {
             if [[ "$STATE_FUZZ_IDX" == "-1" ]]; then
                 fuzz_cores="unbound"
             elif [[ -n "$STATE_FUZZ_IDX" ]]; then
-                calc_cores "$STATE_FUZZ_IDX"
-                fuzz_cores="$ALL_CORES"
+                if $NO_PIN; then
+                    fuzz_cores="idx=$STATE_FUZZ_IDX"
+                else
+                    calc_cores "$STATE_FUZZ_IDX"
+                    fuzz_cores="$ALL_CORES"
+                fi
             fi
         fi
         if [[ -n "${STATE_VAL_IDX:-}" ]]; then
             if [[ "$STATE_VAL_IDX" == "-1" ]]; then
                 val_cores="unbound"
             elif [[ -n "$STATE_VAL_IDX" ]]; then
-                calc_cores "$STATE_VAL_IDX"
-                val_cores="$ALL_CORES"
+                if $NO_PIN; then
+                    val_cores="idx=$STATE_VAL_IDX"
+                else
+                    calc_cores "$STATE_VAL_IDX"
+                    val_cores="$ALL_CORES"
+                fi
             fi
         fi
 
@@ -944,7 +953,7 @@ do_status() {
 }
 
 # ---------------------------------------------------------------------------
-# clean — 清除 workdir 中的 uaf corpus
+# clean — 清除 workdir 中的 uaf corpus 和 queue/threshold 协调状态
 # ---------------------------------------------------------------------------
 do_clean() {
     local slug=$1
@@ -966,6 +975,13 @@ do_clean() {
     local cnt=0
 
     for f in "$workdir"/uaf-corpus.db "$workdir"/*-uaf-corpus.db; do
+        [[ -f "$f" ]] || continue
+        rm -f "$f"
+        log_ok "[$slug] 已删除 $(basename "$f")"
+        ((cnt++)) || true
+    done
+
+    for f in "$workdir"/uaf-validate-queue.db "$workdir"/race-pair-index.db "$workdir"/threshold-state.json; do
         [[ -f "$f" ]] || continue
         rm -f "$f"
         log_ok "[$slug] 已删除 $(basename "$f")"
@@ -1017,7 +1033,7 @@ do_clean_log() {
 }
 
 # ---------------------------------------------------------------------------
-# clean-validate — 清除 validate 相关数据库文件 (保留 uaf corpus)
+# clean-validate — 清除 validate 相关数据库文件和协调状态 (保留 uaf corpus)
 # ---------------------------------------------------------------------------
 do_clean_validate() {
     local slug=$1
@@ -1037,6 +1053,9 @@ do_clean_validate() {
         "validated_uaf.db"
         "varname_backoff_stats.db"
         "varname_hb_stats.db"
+        "uaf-validate-queue.db"
+        "race-pair-index.db"
+        "threshold-state.json"
     )
 
     for dir in "$workdir" "$val_workdir"; do

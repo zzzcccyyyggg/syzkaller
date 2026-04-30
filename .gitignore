@@ -25,6 +25,8 @@ executor/syscalls.h
 
 # vscode
 .vscode
+.claude/
+.venv/
 
 /build
 

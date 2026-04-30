@@ -128,6 +128,7 @@ const (
 
 type validationTask struct {
 	entry          *fuzzer.UAFCorpusEntry
+	ref            *ValidationEntryRef
 	signature      fuzzer.UAFPairProfile
 	key            string
 	attempts       int
@@ -217,15 +218,28 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 	return sm
 }
 
-func (sm *StageManager) Enqueue(entry *fuzzer.UAFCorpusEntry) {
+func (sm *StageManager) Enqueue(entry *fuzzer.UAFCorpusEntry) bool {
 	if entry == nil {
-		return
+		return false
 	}
 	task := sm.prepareTask(entry)
 	if task == nil {
-		return
+		return false
 	}
 	sm.dispatch(task)
+	return true
+}
+
+func (sm *StageManager) EnqueueRef(ref *ValidationEntryRef) bool {
+	if ref == nil || ref.PairKey == "" || ref.CorpusRecordID == "" {
+		return false
+	}
+	task := sm.prepareTaskRef(ref)
+	if task == nil {
+		return false
+	}
+	sm.dispatch(task)
+	return true
 }
 
 func (sm *StageManager) Run(ctx context.Context) {
@@ -373,7 +387,21 @@ func (sm *StageManager) workerVarNameSchedule(ctx context.Context) {
 }
 
 func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
-	if task == nil || task.entry == nil {
+	if task == nil {
+		return
+	}
+	if err := sm.materializeTaskEntry(task); err != nil {
+		result := &ValidationResult{
+			Entry:     task.lightResultEntry(),
+			Signature: task.signature,
+			Err:       err,
+			Attempt:   task.attempts + 1,
+		}
+		sm.results <- result
+		sm.complete(task)
+		return
+	}
+	if task.entry == nil {
 		return
 	}
 
@@ -400,7 +428,7 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		}
 		log.Logf(0, "uafvalidate: task start key=%s attempt=%d repeat=%d/%d delays=%d", task.key, task.attempts, task.repeats+1, sm.cfg.RepeatCount, len(delays))
 		result := &ValidationResult{
-			Entry:     task.entry.Clone(),
+			Entry:     task.lightResultEntry(),
 			Signature: task.signature,
 			Delays:    append([]int64(nil), delays...),
 			Attempt:   task.attempts,
@@ -675,6 +703,139 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 	sm.pending[key] = task
 	sm.seenKeys[key] = struct{}{}
 	return task
+}
+
+func (sm *StageManager) prepareTaskRef(ref *ValidationEntryRef) *validationTask {
+	if ref == nil {
+		return nil
+	}
+	pair := ref.Pair
+	if pair.UAFPairID() == 0 {
+		return nil
+	}
+	signature := SignatureFromPair(&pair)
+	entryKey := SignatureKey(signature)
+	pairCopy := pair
+	lightEntry := &fuzzer.UAFCorpusEntry{
+		PairBasicInfo:    pairCopy,
+		Pairs:            []*ddrd.MayUAFPair{&pairCopy},
+		Profile:          signature,
+		ValidateQueueKey: ref.QueueKey,
+		ValidateQueueSeq: ref.QueueSeq,
+		ValidatePairKey:  ref.PairKey,
+		CorpusRecordID:   ref.CorpusRecordID,
+	}
+
+	if sm.cfg.TargetCorpusKey != "" {
+		if entryKey != sm.cfg.TargetCorpusKey {
+			return nil
+		}
+		log.Logf(1, "uafvalidate: [debug mode] ref matches target corpus key %s", sm.cfg.TargetCorpusKey)
+	}
+	if sm.cfg.TargetVarNamePair != "" {
+		if !entryContainsTargetVarName(lightEntry, sm.cfg.TargetVarNamePair) {
+			return nil
+		}
+		log.Logf(1, "uafvalidate: [debug mode] ref matches target VarName pair %s", sm.cfg.TargetVarNamePair)
+	}
+
+	sm.mu.Lock()
+	backoffDone := sm.backoffPhaseComplete
+	sm.mu.Unlock()
+	if sm.cfg.TargetVarNamePair == "" && sm.cfg.TargetCorpusKey == "" && !sm.cfg.DisableBackoffSkip && !backoffDone {
+		if skip, reason := sm.shouldSkipEntry(lightEntry); skip {
+			log.Logf(0, "uafvalidate: skipping ref (all pairs high backoff score): %s", reason)
+			if sm.cfg.ContinueAfterBackoff {
+				sm.mu.Lock()
+				sm.backoffSkippedEntries = append(sm.backoffSkippedEntries, lightEntry)
+				sm.mu.Unlock()
+			}
+			return nil
+		}
+	}
+
+	sm.mu.Lock()
+	defer sm.mu.Unlock()
+	if sm.closed {
+		return nil
+	}
+	key := entryKey
+	if key == "" || key == zeroSignatureKey {
+		sm.seq++
+		key = fmt.Sprintf("anon-%d", sm.seq)
+	}
+	if _, exists := sm.seenKeys[key]; exists {
+		return nil
+	}
+	if _, exists := sm.pending[key]; exists {
+		return nil
+	}
+	task := &validationTask{
+		entry:          lightEntry,
+		ref:            ref,
+		signature:      signature,
+		key:            key,
+		historyCount:   ref.HistoryCount,
+		pairOriginalTD: map[string]uint64{pairKey(pair): pair.TimeDiff},
+	}
+	sm.pending[key] = task
+	sm.seenKeys[key] = struct{}{}
+	return task
+}
+
+func (sm *StageManager) materializeTaskEntry(task *validationTask) error {
+	if task == nil || task.ref == nil {
+		return nil
+	}
+	if sm.cfg.EntryResolver == nil {
+		return fmt.Errorf("validation ref requires an entry resolver")
+	}
+	entry, err := sm.cfg.EntryResolver.ResolveValidationEntry(task.ref)
+	if err != nil {
+		return err
+	}
+	if entry == nil {
+		return fmt.Errorf("corpus record %s not found for pair %s", task.ref.CorpusRecordID, task.ref.PairKey)
+	}
+	entry.ValidateQueueKey = task.ref.QueueKey
+	entry.ValidateQueueSeq = task.ref.QueueSeq
+	entry.ValidatePairKey = task.ref.PairKey
+	entry.CorpusRecordID = task.ref.CorpusRecordID
+	task.entry = entry
+	task.historyCount = len(entry.ReplayHistory)
+	return nil
+}
+
+func (task *validationTask) lightResultEntry() *fuzzer.UAFCorpusEntry {
+	if task == nil {
+		return nil
+	}
+	var pair ddrd.MayUAFPair
+	if task.ref != nil {
+		pair = task.ref.Pair
+	} else if task.entry != nil {
+		pair = task.entry.PairBasicInfo
+	}
+	entry := &fuzzer.UAFCorpusEntry{
+		PairBasicInfo: pair,
+		Profile:       task.signature,
+	}
+	if pair.UAFPairID() != 0 {
+		pairCopy := pair
+		entry.Pairs = []*ddrd.MayUAFPair{&pairCopy}
+	}
+	if task.ref != nil {
+		entry.ValidateQueueKey = task.ref.QueueKey
+		entry.ValidateQueueSeq = task.ref.QueueSeq
+		entry.ValidatePairKey = task.ref.PairKey
+		entry.CorpusRecordID = task.ref.CorpusRecordID
+	} else if task.entry != nil {
+		entry.ValidateQueueKey = task.entry.ValidateQueueKey
+		entry.ValidateQueueSeq = task.entry.ValidateQueueSeq
+		entry.ValidatePairKey = task.entry.ValidatePairKey
+		entry.CorpusRecordID = task.entry.CorpusRecordID
+	}
+	return entry
 }
 
 func (sm *StageManager) dispatch(task *validationTask) {
@@ -1638,6 +1799,9 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			// Serialize the validated entry including triggering programs and minimized history
 			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
 			sm.markValidated(fullKey, reportData)
+			if sm.cfg.PairStatusSink != nil {
+				sm.cfg.PairStatusSink.MarkPairValidated(pairCopy, reportData)
+			}
 
 			// Update VarName backoff statistics (success) and mark as verified
 			// This will cause ALL future entries with the same VarName pair to be skipped
@@ -1663,6 +1827,9 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
+		if sm.cfg.PairStatusSink != nil {
+			sm.cfg.PairStatusSink.MarkPairInvalid(pairCopy)
+		}
 
 		// Layer 2: Update VarName backoff statistics (failure)
 		if sm.varNameBackoffStore != nil {
@@ -1873,6 +2040,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			}
 
 			sm.markValidated(fullKey, reportData)
+			if sm.cfg.PairStatusSink != nil {
+				sm.cfg.PairStatusSink.MarkPairValidated(pair, reportData)
+			}
 
 			// Update VarName backoff statistics (success) and mark as verified
 			// This will cause ALL future entries with the same VarName pair to be skipped
@@ -1905,6 +2075,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
+		if sm.cfg.PairStatusSink != nil {
+			sm.cfg.PairStatusSink.MarkPairInvalid(pair)
+		}
 
 		// Layer 2: Update VarName backoff statistics (failure)
 		if sm.varNameBackoffStore != nil {

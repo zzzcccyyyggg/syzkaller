@@ -189,10 +189,10 @@ sudo scripts/run_experiment.sh validate --all
   - `dynamic_threshold_initial_us=2500`
   - `dynamic_threshold_min_us=500`
   - `dynamic_threshold_max_us=10000`
-  - `dynamic_threshold_eval_sec=60`
+  - `dynamic_threshold_eval_sec=120`
 - timing exploration 阈值策略:
   - 普通 fuzz 请求使用当前动态阈值
-  - Timing Phase 1 使用 `min(当前动态阈值 × 8, widened_threshold_micros)`，当前上限为 `20000us`
+  - Timing Phase 1 使用 `max(当前动态阈值 × 8, widened_threshold_micros)`，当前下界为 `20000us`
   - Timing Phase 2 回到当前动态阈值，不再固定写死 `10ms`
 
 对应快捷入口：

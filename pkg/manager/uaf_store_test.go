@@ -59,12 +59,12 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 		Timestamp: time.Unix(0, 1234),
 	}
 
-	added, err := store.Add([]*fuzzer.UAFCorpusEntry{entry})
+	refs, err := store.AddWithRefs([]*fuzzer.UAFCorpusEntry{entry})
 	if err != nil {
-		t.Fatalf("Add failed: %v", err)
+		t.Fatalf("AddWithRefs failed: %v", err)
 	}
-	if added != 1 {
-		t.Fatalf("unexpected add count %d", added)
+	if len(refs) != 1 {
+		t.Fatalf("unexpected add count %d", len(refs))
 	}
 
 	loaded, err := store.Entries()
@@ -106,29 +106,25 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 			t.Fatalf("delay[%d]=%d want %d", i, got.ReplayPlan.DelaysMicros[i], delay)
 		}
 	}
-	if len(got.Pairs) != len(entry.Pairs) {
-		t.Fatalf("pairs length mismatch: got %d want %d", len(got.Pairs), len(entry.Pairs))
+	if len(got.Pairs) != 0 {
+		t.Fatalf("heavy corpus records must not carry pair details, got %d pairs", len(got.Pairs))
 	}
-	for i, want := range entry.Pairs {
-		gotPair := got.Pairs[i]
-		if gotPair == nil {
-			t.Fatalf("missing pair at %d", i)
-		}
-		if *gotPair != *want {
-			t.Fatalf("pair %d mismatch: got=%+v want=%+v", i, *gotPair, *want)
-		}
+	if !got.Profile.IsZero() {
+		t.Fatalf("heavy corpus records must not carry pair profile: %+v", got.Profile)
 	}
-	if got.Profile.FreeAccessName != entry.PairBasicInfo.FreeAccessName {
-		t.Fatalf("free access mismatch: got %x want %x", got.Profile.FreeAccessName, entry.PairBasicInfo.FreeAccessName)
+	reader := NewStreamingUAFCorpusReader(store.path, target)
+	materialized, _, err := reader.LoadEntryByKey(refs[0].ID, primary)
+	if err != nil {
+		t.Fatalf("LoadEntryByKey failed: %v", err)
 	}
-	if got.Profile.UseAccessName != entry.PairBasicInfo.UseAccessName {
-		t.Fatalf("use access mismatch: got %x want %x", got.Profile.UseAccessName, entry.PairBasicInfo.UseAccessName)
+	if materialized == nil {
+		t.Fatalf("materialized entry is nil")
 	}
-	if got.Profile.FreeCallStack != entry.PairBasicInfo.FreeCallStack {
-		t.Fatalf("free callstack mismatch: got %x want %x", got.Profile.FreeCallStack, entry.PairBasicInfo.FreeCallStack)
+	if len(materialized.Pairs) != 1 || materialized.Pairs[0] == nil || *materialized.Pairs[0] != *primary {
+		t.Fatalf("materialized pair mismatch: got=%+v want=%+v", materialized.Pairs, primary)
 	}
-	if got.Profile.UseCallStack != entry.PairBasicInfo.UseCallStack {
-		t.Fatalf("use callstack mismatch: got %x want %x", got.Profile.UseCallStack, entry.PairBasicInfo.UseCallStack)
+	if materialized.Profile.FreeAccessName != entry.PairBasicInfo.FreeAccessName {
+		t.Fatalf("free access mismatch: got %x want %x", materialized.Profile.FreeAccessName, entry.PairBasicInfo.FreeAccessName)
 	}
 }
 
@@ -191,5 +187,79 @@ func TestUAFCorpusStoreIterateEntriesBatched(t *testing.T) {
 	}
 	if len(batchSizes) != 3 || batchSizes[0] != 2 || batchSizes[1] != 2 || batchSizes[2] != 1 {
 		t.Fatalf("unexpected batch sizes: %v", batchSizes)
+	}
+}
+
+func TestUAFCorpusStoreReloadDiscardsHeavyValues(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+
+	store, err := NewUAFCorpusStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close store: %v", cerr)
+		}
+	})
+
+	pair := &ddrd.MayUAFPair{
+		Signal:         0x200,
+		FreeAccessName: 0x21,
+		UseAccessName:  0x22,
+		FreeCallStack:  0x23,
+		UseCallStack:   0x24,
+	}
+	entry := &fuzzer.UAFCorpusEntry{
+		PairBasicInfo: *pair,
+		Pairs:         []*ddrd.MayUAFPair{pair},
+		ReplayHistory: []*fuzzer.BarrierExecutionRecord{
+			{Timestamp: time.Unix(0, 10), GroupID: 1},
+			{Timestamp: time.Unix(0, 11), GroupID: 2},
+		},
+		Timestamp: time.Unix(0, 123),
+	}
+
+	refs, err := store.AddWithRefs([]*fuzzer.UAFCorpusEntry{entry})
+	if err != nil {
+		t.Fatalf("AddWithRefs failed: %v", err)
+	}
+	if len(refs) != 1 {
+		t.Fatalf("unexpected ref count %d", len(refs))
+	}
+
+	rec, ok := store.db.Records[refs[0].ID]
+	if !ok {
+		t.Fatalf("missing record %q", refs[0].ID)
+	}
+	if len(rec.Val) != 0 {
+		t.Fatalf("expected heavy value to be discarded after add, got %d bytes", len(rec.Val))
+	}
+
+	if err := store.Reload(); err != nil {
+		t.Fatalf("Reload failed: %v", err)
+	}
+
+	rec, ok = store.db.Records[refs[0].ID]
+	if !ok {
+		t.Fatalf("missing record %q after reload", refs[0].ID)
+	}
+	if len(rec.Val) != 0 {
+		t.Fatalf("expected heavy value to stay discarded after reload, got %d bytes", len(rec.Val))
+	}
+
+	reader := NewStreamingUAFCorpusReader(store.path, target)
+	materialized, _, err := reader.LoadEntryByKey(refs[0].ID, pair)
+	if err != nil {
+		t.Fatalf("LoadEntryByKey failed: %v", err)
+	}
+	if materialized == nil {
+		t.Fatalf("materialized entry is nil")
+	}
+	if len(materialized.ReplayHistory) != len(entry.ReplayHistory) {
+		t.Fatalf("history length mismatch after reload: got %d want %d", len(materialized.ReplayHistory), len(entry.ReplayHistory))
 	}
 }

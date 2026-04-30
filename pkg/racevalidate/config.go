@@ -1,6 +1,29 @@
 package uafvalidate
 
-import "time"
+import (
+	"time"
+
+	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer"
+)
+
+type ValidationEntryRef struct {
+	QueueKey       string
+	QueueSeq       uint64
+	PairKey        string
+	CorpusRecordID string
+	Pair           ddrd.MayUAFPair
+	HistoryCount   int
+}
+
+type ValidationEntryResolver interface {
+	ResolveValidationEntry(ref *ValidationEntryRef) (*fuzzer.UAFCorpusEntry, error)
+}
+
+type PairStatusSink interface {
+	MarkPairValidated(pair ddrd.MayUAFPair, data []byte)
+	MarkPairInvalid(pair ddrd.MayUAFPair)
+}
 
 // Config captures high level knobs for the validation stage.
 type Config struct {
@@ -104,6 +127,9 @@ type Config struct {
 	// - "greedy": Greedy removal - slower but finds better minimum
 	// - "hybrid": Binary first, then greedy refinement
 	MinimizationStrategy string
+
+	EntryResolver  ValidationEntryResolver
+	PairStatusSink PairStatusSink
 }
 
 func (cfg Config) withDefaults() Config {

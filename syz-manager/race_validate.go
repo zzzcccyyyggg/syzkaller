@@ -18,11 +18,32 @@ import (
 	"github.com/google/syzkaller/pkg/mgrconfig"
 	"github.com/google/syzkaller/pkg/osutil"
 	uafvalidate "github.com/google/syzkaller/pkg/racevalidate"
+	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/vm"
 )
 
+type validationEntryResolver struct {
+	workdir string
+	target  *prog.Target
+}
+
+func (r *validationEntryResolver) ResolveValidationEntry(ref *uafvalidate.ValidationEntryRef) (*fuzzer.UAFCorpusEntry, error) {
+	if r == nil || ref == nil {
+		return nil, nil
+	}
+	corpusPath := filepath.Join(r.workdir, "uaf-corpus.db")
+	reader := manager.NewStreamingUAFCorpusReader(corpusPath, r.target)
+	entry, _, err := reader.LoadEntryByKey(ref.CorpusRecordID, &ref.Pair)
+	return entry, err
+}
+
 func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	cfg := mgr.cfg.Experimental.UAFValidate
+
+	if (cfg.StreamingLoad || cfg.ContinuousMode) && mgr.uafValidateQueue != nil {
+		mgr.runUAFValidateQueueMode(ctx)
+		return
+	}
 
 	// Check if streaming mode is enabled (bypasses uafStore requirement)
 	if cfg.StreamingLoad {
@@ -92,6 +113,8 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,
+		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:            mgr.uafPairIndex,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -127,6 +150,269 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	<-runDone
 	<-resultsDone
 	mgr.exit("uaf-validate")
+}
+
+func (mgr *Manager) newUAFValidatorConfig(cfg *mgrconfig.UAFValidateConfig) uafvalidate.Config {
+	validatorCfg := uafvalidate.Config{
+		MaxConcurrent:             cfg.MaxConcurrent,
+		DelayRetryBudget:          cfg.DelayRetryBudget,
+		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		Debug:                     *flagDebug,
+		RepeatCount:               cfg.RepeatCount,
+		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
+		Workdir:                   mgr.cfg.Workdir,
+		TargetVarNamePair:         cfg.TargetVarNamePair,
+		TargetCorpusKey:           cfg.TargetCorpusKey,
+		DisableAsyncSplit:         cfg.DisableAsyncSplit,
+		DisableCollectionDelay:    cfg.DisableCollectionDelay,
+		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		VerifyDelaySweep:          cfg.VerifyDelaySweep,
+		VerifyDelaySteps:          cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:          cfg.VerifyDelayPower,
+		EnableReplay:              cfg.EnableReplay,
+		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
+		PriorityLowHistory:        cfg.PriorityLowHistory,
+		RequireOriginMatch:        cfg.RequireOriginMatch,
+		DisableBackoffSkip:        cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
+		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:      cfg.MinimizationStrategy,
+		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:            mgr.uafPairIndex,
+	}
+	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
+		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
+	}
+	if validatorCfg.MaxConcurrent <= 0 {
+		validatorCfg.MaxConcurrent = 1
+	}
+	return validatorCfg
+}
+
+func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
+	cfg := mgr.cfg.Experimental.UAFValidate
+	if mgr.uafValidateQueue == nil {
+		log.Fatalf("uaf validation queue mode requires validate queue store")
+	}
+
+	pollInterval := time.Duration(cfg.IdleReloadSeconds) * time.Second
+	if pollInterval <= 0 {
+		pollInterval = 10 * time.Second
+	}
+
+	validatorCfg := mgr.newUAFValidatorConfig(cfg)
+	stage := uafvalidate.NewStageManager(validatorCfg, mgr.selectExecutorFactory(cfg, validatorCfg))
+
+	runCtx, cancel := context.WithCancel(ctx)
+	defer cancel()
+
+	var validatorProcessed int32
+	var validatorSuccess int32
+
+	resultsDone := make(chan struct{})
+	go func() {
+		for res := range stage.Results() {
+			mgr.handleValidationResult(res)
+			repeatTotal := res.RepeatTotal
+			if repeatTotal <= 0 {
+				repeatTotal = 1
+			}
+			if res.RepeatIndex+1 >= repeatTotal {
+				atomic.AddInt32(&validatorProcessed, 1)
+				if res.Success {
+					atomic.AddInt32(&validatorSuccess, 1)
+				}
+				if res.Entry != nil && res.Entry.ValidateQueueKey != "" {
+					if mgr.uafPairIndex != nil && res.Entry.ValidatePairKey != "" {
+						if err := mgr.uafPairIndex.MarkProcessed(res.Entry.ValidatePairKey); err != nil {
+							log.Errorf("uaf validation queue: failed to mark processed %s: %v", res.Entry.ValidatePairKey, err)
+						}
+					}
+					if err := mgr.uafValidateQueue.Ack(res.Entry.ValidateQueueKey); err != nil {
+						log.Errorf("uaf validation queue: failed to ack %s: %v", res.Entry.ValidateQueueKey, err)
+					}
+				}
+			}
+		}
+		close(resultsDone)
+	}()
+
+	runDone := make(chan struct{})
+	go func() {
+		stage.Run(runCtx)
+		close(runDone)
+	}()
+
+	mgr.logRaceValidationStorageState("validate-start")
+	lastSeq, accepted, acked, err := mgr.loadValidationQueueEntries(stage, 0)
+	if err != nil {
+		log.Errorf("uaf validation queue: initial load failed: %v", err)
+	} else {
+		log.Logf(0, "uaf validation queue: initial load accepted=%d acked=%d pending=%d seq=%d",
+			accepted, acked, stage.PendingCount(), lastSeq)
+		if accepted != 0 || acked != 0 {
+			mgr.logRaceValidationStorageState("validate-initial")
+		}
+	}
+	if accepted == 0 && acked == 0 && mgr.uafStore != nil {
+		bootstrapQueued, err := mgr.bootstrapValidationQueueFromCorpus(stage)
+		if err != nil {
+			log.Errorf("uaf validation queue: corpus bootstrap failed: %v", err)
+		} else if bootstrapQueued != 0 {
+			log.Logf(0, "uaf validation queue: bootstrapped %d legacy corpus entries", bootstrapQueued)
+		}
+	}
+
+	statsStartTime := time.Now()
+	statsTicker := time.NewTicker(15 * time.Second)
+	defer statsTicker.Stop()
+
+	pollTicker := time.NewTicker(pollInterval)
+	defer pollTicker.Stop()
+
+	log.Logf(0, "uaf validation queue: continuous mode started (poll=%v)", pollInterval)
+
+	for {
+		select {
+		case <-ctx.Done():
+			log.Logf(0, "uaf validation queue: context cancelled, shutting down")
+			stage.Shutdown()
+			<-runDone
+			<-resultsDone
+			mgr.exit("uaf-validate")
+			return
+
+		case <-statsTicker.C:
+			processed := int(atomic.LoadInt32(&validatorProcessed))
+			success := int(atomic.LoadInt32(&validatorSuccess))
+			pending := stage.PendingCount()
+			idle := !stage.HasPending()
+			var rate float64
+			if processed > 0 {
+				rate = float64(processed) / time.Since(statsStartTime).Minutes()
+			}
+			_ = ddrd.WriteValidatorStats(mgr.uafSharedWorkdir, ddrd.ValidatorStats{
+				PendingCount:       pending,
+				ProcessedCount:     processed,
+				SuccessCount:       success,
+				ProcessingRatePerM: rate,
+				LastUpdate:         time.Now(),
+				Idle:               idle,
+			})
+			log.Logf(1, "uaf validation queue: status pending=%d processed=%d success=%d rate_per_min=%.2f idle=%t",
+				pending, processed, success, rate, idle)
+
+		case <-pollTicker.C:
+			newLastSeq, newAccepted, newAcked, err := mgr.loadValidationQueueEntries(stage, lastSeq)
+			if err != nil {
+				log.Errorf("uaf validation queue: poll failed: %v", err)
+				continue
+			}
+			lastSeq = newLastSeq
+			if newAccepted != 0 || newAcked != 0 {
+				log.Logf(0, "uaf validation queue: poll accepted=%d acked=%d pending=%d seq=%d",
+					newAccepted, newAcked, stage.PendingCount(), lastSeq)
+				mgr.logRaceValidationStorageState("validate-poll")
+			}
+		}
+	}
+}
+
+func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, sinceSeq uint64) (uint64, int, int, error) {
+	if mgr.uafValidateQueue == nil || stage == nil {
+		return sinceSeq, 0, 0, nil
+	}
+	if err := mgr.uafValidateQueue.Reload(); err != nil {
+		return sinceSeq, 0, 0, err
+	}
+	if mgr.uafPairIndex != nil {
+		if err := mgr.uafPairIndex.Reload(); err != nil {
+			return sinceSeq, 0, 0, err
+		}
+	}
+
+	items, maxSeq, err := mgr.uafValidateQueue.EntriesSince(sinceSeq)
+	if err != nil {
+		return sinceSeq, 0, 0, err
+	}
+
+	accepted := 0
+	acked := 0
+	malformed := 0
+	skipped := 0
+	maxHistory := 0
+	for _, item := range items {
+		if item == nil || item.PairKey == "" || item.CorpusRecordID == "" {
+			malformed++
+			if item != nil && item.Key != "" {
+				if err := mgr.uafValidateQueue.Ack(item.Key); err != nil {
+					log.Errorf("uaf validation queue: failed to ack empty item %s: %v", item.Key, err)
+				} else {
+					acked++
+				}
+			}
+			continue
+		}
+		if item.HistoryCount > maxHistory {
+			maxHistory = item.HistoryCount
+		}
+		ref := &uafvalidate.ValidationEntryRef{
+			QueueKey:       item.Key,
+			QueueSeq:       item.Seq,
+			PairKey:        item.PairKey,
+			CorpusRecordID: item.CorpusRecordID,
+			Pair:           item.Pair,
+			HistoryCount:   item.HistoryCount,
+		}
+		if stage.EnqueueRef(ref) {
+			if mgr.uafPairIndex != nil {
+				if err := mgr.uafPairIndex.MarkProcessing(item.PairKey); err != nil {
+					log.Errorf("uaf validation queue: failed to mark processing %s: %v", item.PairKey, err)
+				}
+			}
+			accepted++
+			continue
+		}
+		skipped++
+		if mgr.uafPairIndex != nil {
+			if err := mgr.uafPairIndex.MarkProcessed(item.PairKey); err != nil {
+				log.Errorf("uaf validation queue: failed to mark skipped pair %s processed: %v", item.PairKey, err)
+			}
+		}
+		if err := mgr.uafValidateQueue.Ack(item.Key); err != nil {
+			log.Errorf("uaf validation queue: failed to ack skipped item %s: %v", item.Key, err)
+		} else {
+			acked++
+		}
+	}
+	if len(items) != 0 {
+		log.Logf(1, "uaf validation queue: loaded refs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
+			len(items), accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
+	}
+
+	return maxSeq, accepted, acked, nil
+}
+
+func (mgr *Manager) bootstrapValidationQueueFromCorpus(stage *uafvalidate.StageManager) (int, error) {
+	if mgr.uafStore == nil || stage == nil {
+		return 0, nil
+	}
+
+	entries, err := mgr.uafStore.Entries()
+	if err != nil {
+		return 0, err
+	}
+
+	queued := 0
+	for _, entry := range entries {
+		if stage.Enqueue(entry) {
+			queued++
+		}
+	}
+	return queued, nil
 }
 
 // selectExecutorFactory chooses between snapshot-enabled and standard executor factory
@@ -687,6 +973,8 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,
+		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:            mgr.uafPairIndex,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -779,7 +1067,7 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 				if processed > 0 {
 					rate = float64(processed) / time.Since(validatorStartTime).Minutes()
 				}
-				_ = ddrd.WriteValidatorStats(mgr.cfg.Workdir, ddrd.ValidatorStats{
+				_ = ddrd.WriteValidatorStats(mgr.uafSharedWorkdir, ddrd.ValidatorStats{
 					PendingCount:       pending,
 					ProcessedCount:     processed,
 					SuccessCount:       success,
@@ -869,7 +1157,7 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 	log.Logf(0, "uaf validation: entering streaming mode...")
 
 	// Determine corpus path
-	corpusPath := filepath.Join(mgr.cfg.Workdir, "uaf-corpus.db")
+	corpusPath := filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db")
 	log.Logf(0, "uaf validation: checking corpus file: %s", corpusPath)
 
 	// Wait for corpus file to appear (supports co-start with fuzz).
@@ -941,6 +1229,8 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
 		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
 		MinimizationStrategy:      cfg.MinimizationStrategy,
+		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:            mgr.uafPairIndex,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()

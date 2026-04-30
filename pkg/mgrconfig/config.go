@@ -379,6 +379,7 @@ type Experimental struct {
 	NormalThresholdMicros int64 `json:"normal_threshold_micros,omitempty"`
 	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
 	// This allows timing exploration to detect pairs with larger timediff that normal threshold misses.
+	// When dynamic threshold is enabled, this acts as the minimum Phase 1 discovery window.
 	// Defaults to 500000 (500ms) if unset or zero.
 	WidenedThresholdMicros int64 `json:"widened_threshold_micros,omitempty"`
 	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair.
@@ -408,7 +409,7 @@ type Experimental struct {
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
 	// Default: 50000 (50ms).
 	DynamicThresholdMaxUs int64 `json:"dynamic_threshold_max_us,omitempty"`
-	// DynamicThresholdEvalSec is the evaluation interval (seconds). Default: 60.
+	// DynamicThresholdEvalSec is the evaluation interval (seconds). Default: 120.
 	DynamicThresholdEvalSec int `json:"dynamic_threshold_eval_sec,omitempty"`
 }
 

@@ -208,10 +208,10 @@ func TestCurrentWidenedTimingThreshold(t *testing.T) {
 				config: TimingExplorationConfig{WidenedThresholdMicros: 20000},
 			},
 		}
-		assert.Equal(t, int64(8000), f.currentWidenedTimingThreshold())
+		assert.Equal(t, int64(20000), f.currentWidenedTimingThreshold())
 	})
 
-	t.Run("caps dynamic widened threshold at configured ceiling", func(t *testing.T) {
+	t.Run("lets dynamic widened threshold grow above configured floor", func(t *testing.T) {
 		config := DefaultThresholdControllerConfig()
 		config.InitialThresholdUs = 4000
 		tc := NewThresholdController(config, func() int { return 0 })
@@ -222,7 +222,7 @@ func TestCurrentWidenedTimingThreshold(t *testing.T) {
 				config: TimingExplorationConfig{WidenedThresholdMicros: 20000},
 			},
 		}
-		assert.Equal(t, int64(20000), f.currentWidenedTimingThreshold())
+		assert.Equal(t, int64(32000), f.currentWidenedTimingThreshold())
 	})
 }
 

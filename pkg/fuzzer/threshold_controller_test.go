@@ -20,6 +20,14 @@ func TestThresholdControllerDefaults(t *testing.T) {
 	}
 }
 
+func TestThresholdControllerZeroConfigUsesDefaultEvalWindow(t *testing.T) {
+	tc := NewThresholdController(ThresholdControllerConfig{}, func() int { return 0 })
+
+	if tc.config.EvalWindowSeconds != 120 {
+		t.Fatalf("default eval window: got %d, want 120", tc.config.EvalWindowSeconds)
+	}
+}
+
 func TestThresholdControllerGrowsOnLowDiscovery(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	config.EvalWindowSeconds = 1 // fast evaluation
@@ -46,7 +54,7 @@ func TestThresholdControllerGrowsOnLowDiscovery(t *testing.T) {
 	}
 }
 
-func TestThresholdControllerShrinksOnHighDiscovery(t *testing.T) {
+func TestThresholdControllerDoesNotShrinkWithoutValidator(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	config.EvalWindowSeconds = 1
 	config.MinDiscoveryRatePerMin = 1.0
@@ -55,7 +63,7 @@ func TestThresholdControllerShrinksOnHighDiscovery(t *testing.T) {
 	tc := NewThresholdController(config, func() int { return counter })
 	tc.ForceThreshold(10000) // Start high
 
-	// Simulate very high discovery rate (>10x min rate)
+	// Simulate very high discovery rate without validator stats.
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
 	tc.lastMRPCount = 0
@@ -64,8 +72,8 @@ func TestThresholdControllerShrinksOnHighDiscovery(t *testing.T) {
 	counter = 1000 // 1000 new MRPs in ~2 seconds = very high rate
 	tc.Evaluate()
 
-	if tc.CurrentThreshold() >= 10000 {
-		t.Fatalf("threshold should shrink on high discovery rate: got %d", tc.CurrentThreshold())
+	if tc.CurrentThreshold() != 10000 {
+		t.Fatalf("threshold should stay stable without validator feedback: got %d", tc.CurrentThreshold())
 	}
 }
 
@@ -130,7 +138,14 @@ func TestThresholdControllerValidatorHungry(t *testing.T) {
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
 	tc.lastMRPCount = counter
 	tc.mu.Unlock()
-
+	tc.Evaluate()
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
+	tc.Evaluate()
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
 	tc.Evaluate()
 
 	if tc.CurrentThreshold() <= initial {
@@ -163,7 +178,10 @@ func TestThresholdControllerValidatorOverloaded(t *testing.T) {
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
 	tc.lastMRPCount = counter
 	tc.mu.Unlock()
-
+	tc.Evaluate()
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
 	tc.Evaluate()
 
 	if tc.CurrentThreshold() >= 10000 {

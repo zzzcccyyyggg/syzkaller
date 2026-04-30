@@ -42,6 +42,17 @@ type Record struct {
 // If the database is corrupted and reading failed, then it returns an non-nil db
 // with whatever records were recovered and a non-nil error at the same time.
 func Open(filename string, repair bool) (*DB, error) {
+	return open(filename, repair, true)
+}
+
+// OpenNoCompact opens the specified database file without rewriting it.
+// This is useful for multi-process readers that only need the latest view and
+// must avoid creating temporary files on every refresh.
+func OpenNoCompact(filename string, repair bool) (*DB, error) {
+	return open(filename, repair, false)
+}
+
+func open(filename string, repair, compact bool) (*DB, error) {
 	db := &DB{
 		filename: filename,
 	}
@@ -52,10 +63,20 @@ func Open(filename string, repair bool) (*DB, error) {
 	if deserializeErr != nil && !repair {
 		return nil, deserializeErr
 	}
-	if err := db.compact(); err != nil {
-		return nil, err
+	if compact || db.uncompacted == 0 {
+		if err := db.compact(); err != nil {
+			return nil, err
+		}
 	}
 	return db, deserializeErr
+}
+
+// Compact rewrites the database file into a single compacted snapshot.
+func (db *DB) Compact() error {
+	if db == nil {
+		return nil
+	}
+	return db.compact()
 }
 
 func (db *DB) Save(key string, val []byte, seq uint64) {

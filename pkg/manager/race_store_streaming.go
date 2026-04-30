@@ -188,12 +188,64 @@ func (r *StreamingUAFCorpusReader) IterateEntries(sinceSeq uint64, callback func
 			log.Logf(0, "streaming: failed to deserialize entry %s: %v", ks.key, err)
 			continue
 		}
+		entry.CorpusRecordID = ks.key
 		if !callback(entry, info.seq) {
 			break
 		}
 	}
 
 	return maxSeq, nil
+}
+
+// LoadEntryByKey materializes a single heavy corpus record and injects the
+// target pair into the returned entry. It scans the append-only DB file without
+// caching all corpus values in memory.
+func (r *StreamingUAFCorpusReader) LoadEntryByKey(key string, pair *ddrd.MayUAFPair) (*fuzzer.UAFCorpusEntry, uint64, error) {
+	if r == nil || key == "" {
+		return nil, 0, nil
+	}
+	f, err := os.Open(r.path)
+	if err != nil {
+		return nil, 0, err
+	}
+	defer f.Close()
+
+	reader := bufio.NewReaderSize(f, 256*1024)
+	if err := r.skipHeader(reader); err != nil {
+		return nil, 0, err
+	}
+
+	var latest []byte
+	var latestSeq uint64
+	for {
+		recKey, data, seq, err := r.readRecord(reader)
+		if err == io.EOF {
+			break
+		}
+		if err != nil {
+			return nil, latestSeq, fmt.Errorf("read record: %w", err)
+		}
+		if recKey != key {
+			continue
+		}
+		if seq == streamSeqDeleted {
+			latest = nil
+			latestSeq = seq
+			continue
+		}
+		latest = data
+		latestSeq = seq
+	}
+	if len(latest) == 0 || latestSeq == streamSeqDeleted {
+		return nil, latestSeq, nil
+	}
+	entry, err := r.deserializeEntry(latest)
+	if err != nil {
+		return nil, latestSeq, err
+	}
+	entry.CorpusRecordID = key
+	attachPairToEntry(entry, pair)
+	return entry, latestSeq, nil
 }
 
 // IterateEntriesBatched streams entries in batches for better efficiency.
@@ -417,15 +469,9 @@ func (r *StreamingUAFCorpusReader) deserializeEntry(data []byte) (*fuzzer.UAFCor
 		}
 	}
 
-	// Deserialize replay history - but limit to save memory
+	// Deserialize replay history. This is only used when a worker materializes
+	// a concrete validation task; queue/index paths keep history out of memory.
 	if len(stored.ReplayHistory) != 0 && r.target != nil {
-		maxHistory := 10 // Limit history to save memory during validation
-		historyLen := len(stored.ReplayHistory)
-		if historyLen > maxHistory {
-			// Keep only the most recent history
-			stored.ReplayHistory = stored.ReplayHistory[historyLen-maxHistory:]
-		}
-
 		history := make([]*fuzzer.BarrierExecutionRecord, 0, len(stored.ReplayHistory))
 		for _, rec := range stored.ReplayHistory {
 			record := &fuzzer.BarrierExecutionRecord{

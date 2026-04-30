@@ -127,6 +127,13 @@ type UAFCorpusEntry struct {
 	// AsyncRaceCalls identifies the two call indices in Prog that race against each other.
 	// Only meaningful when AsyncMode is true.
 	AsyncRaceCalls [2]int
+
+	// ValidateQueueKey/Seq are runtime-only metadata populated when an entry is
+	// loaded from the validate queue. They are not persisted in uaf-corpus.db.
+	ValidateQueueKey string
+	ValidateQueueSeq uint64
+	ValidatePairKey  string
+	CorpusRecordID   string
 }
 
 // BarrierSnapshot records the barrier configuration used when discovering a UAF pair.

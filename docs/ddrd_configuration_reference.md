@@ -355,6 +355,10 @@ Phase 2 timing exploration 队列的最大容量。超出时新任务被丢弃�
 
 Phase 1（Pair Discovery）使用的放宽 timing 阈值（微秒）。允许检测到 time diff 较大的 pair，这些 pair 在正常阈值下会被忽略。随后由 Phase 2 通过插入 delay 来缩小时间差。
 
+当启用动态时间阈值时，`widened_threshold_micros` 作为 Phase 1 的**最小探索窗口**：
+- `Phase 1 threshold = max(当前 normal 阈值 × 8, widened_threshold_micros)`
+- 这样即使 normal 阈值临时收缩，Phase 1 的候选发现窗口也不会一起塌缩
+
 ### `delay_min_micros`
 
 | 属性 | 值 |

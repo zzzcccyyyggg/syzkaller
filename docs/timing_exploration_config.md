@@ -59,7 +59,7 @@ All configuration options are placed in the `experimental` section of your `syz-
 | `delay_max_micros` | int | `200000` | Maximum delay in microseconds for `syz_delay()` (200ms) |
 | `max_delays_per_program` | int | `5` | Maximum number of `syz_delay()` calls to insert per program |
 | `timing_mutation_strategy` | string | `"targeted"` | Mutation strategy: `"timediff"`, `"targeted"`, `"binary_search"`, or `"random"` |
-| `widened_threshold_micros` | int64 | `500000` | Widened timing threshold (μs) for Phase 1 pair discovery. Allows detecting pairs with larger time differences. |
+| `widened_threshold_micros` | int64 | `500000` | Widened timing threshold (μs) for Phase 1 pair discovery. In dynamic-threshold mode it acts as the minimum Phase 1 discovery window. |
 | `max_attempts_per_pair` | int | `20` | Max timing exploration attempts per unique pair |
 | `max_corpus_count_per_varname` | int | `0` (no limit) | Skip timing exploration for VarName pairs with this many corpus entries |
 | `success_threshold` | float | `0.1` | Trigger rate threshold to consider exploration successful (0.0-1.0) |
@@ -74,6 +74,10 @@ When enabled, the fuzzer will:
 - Insert `syz_delay()` calls to control timing between syscalls
 - Use widened race detection thresholds (8x normal) for timing exploration
 - Track timing attempts and success rates per variable pair
+
+When dynamic threshold is enabled, the widened threshold is not used as a cap. Instead:
+- `Phase 1 threshold = max(current normal threshold * 8, widened_threshold_micros)`
+- `Phase 2 threshold = current normal threshold`
 
 ### `enable_partner_selection`
 

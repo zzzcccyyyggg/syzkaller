@@ -11,6 +11,7 @@ import (
 	"github.com/google/syzkaller/pkg/db"
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/fuzzer"
+	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
@@ -20,6 +21,17 @@ type UAFCorpusStore struct {
 	db     *db.DB
 	target *prog.Target
 	path   string
+}
+
+type RaceCorpusRecordRef struct {
+	ID    string
+	Seq   uint64
+	Entry *fuzzer.UAFCorpusEntry
+}
+
+type UAFCorpusStoreStats struct {
+	Records int
+	MaxSeq  uint64
 }
 
 type storedUAFCorpusEntry struct {
@@ -68,6 +80,9 @@ func NewUAFCorpusStore(workdir string, target *prog.Target) (*UAFCorpusStore, er
 		}
 		log.Errorf("uaf corpus db: recovered with errors: %v", err)
 	}
+	// The corpus DB stores heavy replay/program payloads. Keep only keys/seqs in
+	// memory; validators and fuzzers can stream materialize records by id.
+	corpusDB.DiscardData()
 	return &UAFCorpusStore{db: corpusDB, target: target, path: path}, nil
 }
 
@@ -87,6 +102,7 @@ func (store *UAFCorpusStore) Reload() error {
 		}
 		log.Errorf("uaf corpus db: reload recovered with errors: %v", err)
 	}
+	newDB.DiscardData()
 	store.db = newDB
 	return nil
 }
@@ -107,6 +123,22 @@ func (store *UAFCorpusStore) Count() int {
 	store.mu.Lock()
 	defer store.mu.Unlock()
 	return len(store.db.Records)
+}
+
+func (store *UAFCorpusStore) Stats() UAFCorpusStoreStats {
+	var stats UAFCorpusStoreStats
+	if store == nil || store.db == nil {
+		return stats
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	stats.Records = len(store.db.Records)
+	for _, rec := range store.db.Records {
+		if rec.Seq > stats.MaxSeq {
+			stats.MaxSeq = rec.Seq
+		}
+	}
+	return stats
 }
 
 // IterateEntriesBatched streams corpus entries from disk in bounded batches.
@@ -130,30 +162,22 @@ func (store *UAFCorpusStore) IterateEntriesBatched(batchSize int, callback func(
 // EntriesSince returns entries with seq greater than sinceSeq along with the max seq seen.
 // This enables incremental reads of the corpus without reprocessing already-seen entries.
 func (store *UAFCorpusStore) EntriesSince(sinceSeq uint64) ([]*fuzzer.UAFCorpusEntry, uint64, error) {
-	if store == nil || store.db == nil {
+	if store == nil {
 		return nil, sinceSeq, nil
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
+	path := store.path
+	target := store.target
+	store.mu.Unlock()
 
-	maxSeq := sinceSeq
+	reader := NewStreamingUAFCorpusReader(path, target)
 	entries := make([]*fuzzer.UAFCorpusEntry, 0)
-	for _, rec := range store.db.Records {
-		if rec.Seq <= sinceSeq {
-			continue
-		}
-		if len(rec.Val) == 0 {
-			continue
-		}
-		if rec.Seq > maxSeq {
-			maxSeq = rec.Seq
-		}
-		entry, err := store.deserialize(rec.Val)
-		if err != nil {
-			log.Errorf("failed to deserialize uaf corpus entry: %v", err)
-			continue
-		}
+	maxSeq, err := reader.IterateEntries(sinceSeq, func(entry *fuzzer.UAFCorpusEntry, _ uint64) bool {
 		entries = append(entries, entry)
+		return true
+	})
+	if err != nil {
+		return nil, sinceSeq, err
 	}
 	// Sort entries: prioritize entries with ReplayHistory, then by Timestamp.
 	// This ensures that when multiple entries have the same signature/key,
@@ -172,81 +196,58 @@ func (store *UAFCorpusStore) EntriesSince(sinceSeq uint64) ([]*fuzzer.UAFCorpusE
 }
 
 func (store *UAFCorpusStore) Add(entries []*fuzzer.UAFCorpusEntry) (int, error) {
+	refs, err := store.AddWithRefs(entries)
+	return len(refs), err
+}
+
+func (store *UAFCorpusStore) AddWithRefs(entries []*fuzzer.UAFCorpusEntry) ([]RaceCorpusRecordRef, error) {
 	if store == nil || store.db == nil || len(entries) == 0 {
-		return 0, nil
+		return nil, nil
 	}
 	store.mu.Lock()
 	defer store.mu.Unlock()
 
-	added := 0
-	updated := 0
+	refs := make([]RaceCorpusRecordRef, 0, len(entries))
 	for _, entry := range entries {
 		if entry == nil {
 			continue
 		}
-		id := entry.PairID()
-		if id == 0 {
-			continue
-		}
-		key := fmt.Sprintf("%016x", id)
-		if existingRec, exists := store.db.Records[key]; exists {
-			// Entry already exists - check if we should update it (if new entry has history but existing doesn't)
-			if len(entry.ReplayHistory) > 0 {
-				// Deserialize existing entry to check if it has history
-				existingEntry, err := store.deserialize(existingRec.Val)
-				if err == nil && len(existingEntry.ReplayHistory) == 0 {
-					// Existing entry has no history, update with new entry that has history
-					data, err := serializeUAFCorpusEntry(entry)
-					if err != nil {
-						log.Errorf("failed to serialize updated uaf corpus entry: %v", err)
-						continue
-					}
-					// Use current time as seq so that EntriesSince() will pick up
-					// this updated entry in incremental reads. Using the original
-					// entry.Timestamp would keep the old seq and the update would
-					// be missed by validate's incremental reload.
-					seq := uint64(time.Now().UnixNano())
-					store.db.Save(key, data, seq)
-					updated++
-					// Debug logging disabled for production
-					// log.Logf(0, "[history] race_store: updated existing entry with %d history records (new_seq=%d)", len(entry.ReplayHistory), seq)
-				}
-			}
-			continue
-		}
 		data, err := serializeUAFCorpusEntry(entry)
 		if err != nil {
-			return added, err
+			return refs, err
 		}
-		seq := uint64(entry.Timestamp.UnixNano())
-		store.db.Save(key, data, seq)
-		added++
+		key := entry.CorpusRecordID
+		if key == "" {
+			key = hash.String("race-corpus-record-v2", data)
+		}
+		seq := uint64(time.Now().UnixNano())
+		if !entry.Timestamp.IsZero() {
+			seq = uint64(entry.Timestamp.UnixNano())
+		}
+		entry.CorpusRecordID = key
+		if _, exists := store.db.Records[key]; !exists {
+			store.db.Save(key, data, seq)
+		}
+		refs = append(refs, RaceCorpusRecordRef{
+			ID:    key,
+			Seq:   seq,
+			Entry: entry,
+		})
 	}
-	if added == 0 && updated == 0 {
-		return 0, nil
+	if len(refs) == 0 {
+		return nil, nil
 	}
-	return added + updated, store.db.Flush()
+	return refs, store.db.Flush()
 }
 
 func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	stored := storedUAFCorpusEntry{
 		CallIdx:        entry.CallIdx,
-		Pair:           entry.PairBasicInfo,
-		Signals:        entry.SignalsSlice(),
 		Barrier:        entry.Barrier,
 		Timestamp:      entry.Timestamp,
 		Source:         int(entry.Source),
 		AsyncMode:      entry.AsyncMode,
 		AsyncRaceCalls: entry.AsyncRaceCalls,
-	}
-	if len(entry.Pairs) != 0 {
-		stored.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
-		for _, pair := range entry.Pairs {
-			if pair == nil {
-				continue
-			}
-			stored.Pairs = append(stored.Pairs, *pair)
-		}
 	}
 	if entry.Prog != nil && (len(entry.Programs) == 0 || entry.AsyncMode) {
 		stored.Program = entry.Prog.Serialize()
@@ -257,14 +258,6 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	if !entry.ReplayPlan.IsZero() {
 		stored.ReplayPlan = &storedReplayPlan{
 			DelaysMicros: append([]int64(nil), entry.ReplayPlan.DelaysMicros...),
-		}
-	}
-	if !entry.Profile.IsZero() {
-		stored.Profile = &storedPairProfile{
-			FreeAccessName: entry.Profile.FreeAccessName,
-			UseAccessName:  entry.Profile.UseAccessName,
-			FreeCallStack:  entry.Profile.FreeCallStack,
-			UseCallStack:   entry.Profile.UseCallStack,
 		}
 	}
 	// Serialize replay history
@@ -298,22 +291,18 @@ func serializeReplayHistory(history []*fuzzer.BarrierExecutionRecord) []storedBa
 }
 
 func (store *UAFCorpusStore) Entries() ([]*fuzzer.UAFCorpusEntry, error) {
-	if store == nil || store.db == nil {
+	if store == nil {
 		return nil, nil
 	}
 	store.mu.Lock()
-	defer store.mu.Unlock()
-	entries := make([]*fuzzer.UAFCorpusEntry, 0, len(store.db.Records))
-	for _, rec := range store.db.Records {
-		if len(rec.Val) == 0 {
-			continue
-		}
-		entry, err := store.deserialize(rec.Val)
-		if err != nil {
-			log.Errorf("failed to deserialize uaf corpus entry: %v", err)
-			continue
-		}
-		entries = append(entries, entry)
+	path := store.path
+	target := store.target
+	store.mu.Unlock()
+
+	reader := NewStreamingUAFCorpusReader(path, target)
+	entries, _, err := reader.LoadEntriesWithProgress(0, nil)
+	if err != nil {
+		return nil, err
 	}
 	// Sort entries: prioritize entries with ReplayHistory, then by Timestamp.
 	// This ensures that when multiple entries have the same signature/key,
@@ -440,6 +429,23 @@ func (store *UAFCorpusStore) deserializeReplayHistory(records []storedBarrierRec
 func isZeroMayUAFPair(pair ddrd.MayUAFPair) bool {
 	return pair.FreeAccessName == 0 && pair.UseAccessName == 0 &&
 		pair.FreeCallStack == 0 && pair.UseCallStack == 0
+}
+
+func attachPairToEntry(entry *fuzzer.UAFCorpusEntry, pair *ddrd.MayUAFPair) {
+	if entry == nil || pair == nil || pair.UAFPairID() == 0 {
+		return
+	}
+	pairCopy := *pair
+	entry.PairBasicInfo = pairCopy
+	entry.Pairs = []*ddrd.MayUAFPair{&pairCopy}
+	entry.Signals = ddrd.FromUAFPairs(entry.Pairs, ddrd.UAFSignalPrioHigh)
+	entry.Profile = fuzzer.UAFPairProfile{
+		FreeAccessName: pair.FreeAccessName,
+		UseAccessName:  pair.UseAccessName,
+		FreeCallStack:  pair.FreeCallStack,
+		UseCallStack:   pair.UseCallStack,
+	}
+	entry.ValidatePairKey = ddrd.RacePairKeyString(pair)
 }
 
 func sliceToSignal(values []uint64) ddrd.UAFSignal {

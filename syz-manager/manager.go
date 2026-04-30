@@ -112,9 +112,35 @@ type Manager struct {
 
 	reproLoop *manager.ReproLoop
 
-	uafStore *manager.UAFCorpusStore
+	uafStore         *manager.UAFCorpusStore
+	uafValidateQueue *manager.UAFValidateQueueStore
+	uafPairIndex     *manager.RacePairIndexStore
+	uafSharedWorkdir string
 
 	Stats
+}
+
+func resolveUAFSharedWorkdir(cfg *mgrconfig.Config) string {
+	if cfg == nil {
+		return ""
+	}
+	workdir := cfg.Workdir
+	if cfg.Experimental.UAFValidate == nil {
+		return workdir
+	}
+	if filepath.Base(workdir) != "validate-run" {
+		return workdir
+	}
+	parent := filepath.Dir(workdir)
+	if parent == "" || parent == workdir {
+		return workdir
+	}
+	if osutil.IsExist(filepath.Join(parent, "uaf-corpus.db")) ||
+		osutil.IsExist(filepath.Join(parent, "uaf-validate-queue.db")) ||
+		osutil.IsExist(filepath.Join(parent, "race-pair-index.db")) {
+		return parent
+	}
+	return workdir
 }
 
 type Mode struct {
@@ -315,6 +341,10 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		crashes:            make(chan *manager.Crash, 10),
 		saturatedCalls:     make(map[string]bool),
 		reportGenerator:    manager.ReportGeneratorCache(cfg),
+		uafSharedWorkdir:   resolveUAFSharedWorkdir(cfg),
+	}
+	if mgr.uafSharedWorkdir != "" && mgr.uafSharedWorkdir != cfg.Workdir {
+		log.Logf(0, "uaf validation: using shared workdir %s for corpus/queue coordination", mgr.uafSharedWorkdir)
 	}
 	if cfg.Experimental.SkipDuplicateDataRaces {
 		mgr.reportedDataRaceCombinations = make(map[string]struct{})
@@ -331,18 +361,40 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 			mgr.uafStore = nil // Will use streaming reader directly
 		} else {
 			log.Logf(0, "uaf corpus: loading database (this may take a while for large files)...")
-			store, err := manager.NewUAFCorpusStore(cfg.Workdir, cfg.Target)
+			store, err := manager.NewUAFCorpusStore(mgr.uafSharedWorkdir, cfg.Target)
 			if err != nil {
 				log.Fatalf("failed to initialize uaf corpus store: %v", err)
 			}
 			mgr.uafStore = store
-			log.Logf(0, "uaf corpus: loaded %d entries", store.Count())
 			defer func() {
 				if err := store.Close(); err != nil {
 					log.Errorf("uaf corpus store close failed: %v", err)
 				}
 			}()
 		}
+
+		queueStore, err := manager.NewUAFValidateQueueStore(mgr.uafSharedWorkdir, cfg.Target)
+		if err != nil {
+			log.Fatalf("failed to initialize uaf validate queue store: %v", err)
+		}
+		mgr.uafValidateQueue = queueStore
+		defer func() {
+			if err := queueStore.Close(); err != nil {
+				log.Errorf("uaf validate queue store close failed: %v", err)
+			}
+		}()
+
+		pairIndex, err := manager.NewRacePairIndexStore(mgr.uafSharedWorkdir)
+		if err != nil {
+			log.Fatalf("failed to initialize race pair index store: %v", err)
+		}
+		mgr.uafPairIndex = pairIndex
+		defer func() {
+			if err := pairIndex.Close(); err != nil {
+				log.Errorf("race pair index store close failed: %v", err)
+			}
+		}()
+		mgr.logRaceValidationStorageState("startup")
 	}
 	if *flagDebug {
 		mgr.cfg.Procs = mgr.cfg.Procs
@@ -1310,11 +1362,10 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				log.Logf(level, msg, args...)
 			},
 			PersistUAFCorpusEntry: func(entry *fuzzer.UAFCorpusEntry) error {
-				if mgr.uafStore == nil || entry == nil {
+				if entry == nil {
 					return nil
 				}
-				_, err := mgr.uafStore.Add([]*fuzzer.UAFCorpusEntry{entry})
-				return err
+				return mgr.persistUAFCorpusEntry(entry)
 			},
 			NewInputFilter: func(call string) bool {
 				mgr.mu.Lock()
@@ -1486,11 +1537,14 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 		if mgr.cfg.Experimental.UAFMode && mgr.uafStore != nil {
 			entries := fuzzer.PendingUAFCorpusEntries()
 			if len(entries) != 0 {
-				added, err := mgr.uafStore.Add(entries)
+				added, queued, err := mgr.persistUAFCorpusEntries(entries)
 				if err != nil {
-					log.Errorf("uaf corpus store add failed: %v", err)
+					log.Errorf("uaf persistence failed: %v", err)
 				} else if added != 0 {
 					log.Logf(1, "uaf corpus: stored %d new entries (total=%d)", added, mgr.uafStore.Count())
+					if queued != 0 {
+						log.Logf(1, "uaf validate queue: enqueued %d entries (pending=%d)", queued, mgr.uafValidateQueue.Count())
+					}
 				}
 			}
 		}
@@ -1527,6 +1581,105 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 			mgr.mu.Unlock()
 		}
 	}
+}
+
+func (mgr *Manager) persistUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) error {
+	_, _, err := mgr.persistUAFCorpusEntries([]*fuzzer.UAFCorpusEntry{entry})
+	return err
+}
+
+func (mgr *Manager) logRaceValidationStorageState(reason string) {
+	if mgr == nil {
+		return
+	}
+	if mgr.uafStore != nil {
+		stats := mgr.uafStore.Stats()
+		log.Logf(0, "race storage[%s]: corpus_records=%d max_seq=%d heavy_values=discarded",
+			reason, stats.Records, stats.MaxSeq)
+	}
+	if mgr.uafValidateQueue != nil {
+		if err := mgr.uafValidateQueue.Reload(); err != nil {
+			log.Errorf("race storage[%s]: failed to reload queue stats: %v", reason, err)
+		}
+		stats, err := mgr.uafValidateQueue.Stats()
+		if err != nil {
+			log.Errorf("race storage[%s]: failed to read queue stats: %v", reason, err)
+		} else {
+			log.Logf(0, "race storage[%s]: queue_refs=%d pair_keys=%d corpus_refs=%d with_history=%d malformed=%d max_seq=%d",
+				reason, stats.Pending, stats.WithPairKey, stats.WithCorpusRecord,
+				stats.WithHistory, stats.Malformed, stats.MaxSeq)
+		}
+	}
+	if mgr.uafPairIndex != nil {
+		if err := mgr.uafPairIndex.Reload(); err != nil {
+			log.Errorf("race storage[%s]: failed to reload pair-index stats: %v", reason, err)
+		}
+		stats, err := mgr.uafPairIndex.Stats()
+		if err != nil {
+			log.Errorf("race storage[%s]: failed to read pair-index stats: %v", reason, err)
+		} else {
+			log.Logf(0, "race storage[%s]: pair_index total=%d queueable=%d discovered=%d queued=%d processing=%d processed=%d validated=%d invalid=%d unknown=%d with_corpus=%d with_history=%d max_queue_seq=%d",
+				reason, stats.Total, stats.Queueable, stats.Discovered, stats.Queued,
+				stats.Processing, stats.Processed, stats.Validated, stats.Invalid,
+				stats.Unknown, stats.WithCorpus, stats.WithHistory, stats.MaxQueueSeq)
+		}
+	}
+}
+
+func (mgr *Manager) persistUAFCorpusEntries(entries []*fuzzer.UAFCorpusEntry) (int, int, error) {
+	if len(entries) == 0 {
+		return 0, 0, nil
+	}
+
+	if mgr.uafStore == nil {
+		return 0, 0, nil
+	}
+
+	refs, err := mgr.uafStore.AddWithRefs(entries)
+	if err != nil {
+		return 0, 0, err
+	}
+
+	queued := 0
+	observed := 0
+	queueable := 0
+	alreadyPresent := 0
+	skipped := 0
+	if mgr.uafPairIndex != nil {
+		for _, ref := range refs {
+			records, err := mgr.uafPairIndex.ObserveEntry(ref.Entry, ref.ID)
+			if err != nil {
+				return len(refs), queued, err
+			}
+			observed += len(records)
+			if mgr.uafValidateQueue == nil {
+				continue
+			}
+			for _, record := range records {
+				if !mgr.uafPairIndex.ShouldQueue(record) {
+					skipped++
+					continue
+				}
+				queueable++
+				if _, seq, enqueued, err := mgr.uafValidateQueue.EnqueueRecord(record); err != nil {
+					return len(refs), queued, err
+				} else if enqueued {
+					if err := mgr.uafPairIndex.MarkQueued(record.PairKey, seq); err != nil {
+						return len(refs), queued, err
+					}
+					queued++
+				} else {
+					alreadyPresent++
+				}
+			}
+		}
+	}
+	if observed != 0 {
+		log.Logf(2, "race storage: persisted corpus_refs=%d observed_pairs=%d queueable_pairs=%d queued_refs=%d existing_refs=%d skipped_pairs=%d",
+			len(refs), observed, queueable, queued, alreadyPresent, skipped)
+	}
+
+	return len(refs), queued, nil
 }
 
 func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {

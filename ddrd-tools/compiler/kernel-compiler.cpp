@@ -60,6 +60,32 @@ void execute_command(const vector<const char*>& args) {
     waitpid(pid, nullptr, 0);
 }
 
+// The first stage emits LLVM IR for DDRD's own instrumenter. Keep frontend
+// sanitizer flags so the IR still carries attributes such as sanitize_address,
+// but skip sanitizer pass-tuning options because LLVM passes are disabled here.
+bool should_skip_ir_sanitizer_pass_arg(const string& arg, int argc, char** argv, int& i) {
+    if (arg == "-mllvm" && i + 1 < argc) {
+        const string next = argv[i + 1];
+        if (next.rfind("-asan", 0) == 0 ||
+            next.rfind("-sancov", 0) == 0 ||
+            next.rfind("-sanitizer", 0) == 0) {
+            ++i;
+            return true;
+        }
+    }
+
+    if (arg.rfind("-mllvm=", 0) == 0) {
+        const string opt = arg.substr(strlen("-mllvm="));
+        if (opt.rfind("-asan", 0) == 0 ||
+            opt.rfind("-sancov", 0) == 0 ||
+            opt.rfind("-sanitizer", 0) == 0) {
+            return true;
+        }
+    }
+
+    return false;
+}
+
 // 处理汇编文件快速返回
 bool handle_assembly_file(int argc, char** argv) {
     string fn(argv[argc-1]);
@@ -149,6 +175,7 @@ void generate_llvm_ir(int argc, char** argv, const BuildTarget& target) {
         CLANG_PATH,
         "-Og",  // 使用-Og替代其他优化选项
         "-S", "-emit-llvm",
+        "-Xclang", "-disable-llvm-passes",
         "-g",
         "-Qunused-arguments",
         "-Wno-unused-command-line-argument"
@@ -162,6 +189,9 @@ void generate_llvm_ir(int argc, char** argv, const BuildTarget& target) {
             arg == "-O0" || arg == "-O1" || arg == "-O2" || 
             arg == "-O3" || arg == "-Os" || arg == "-Oz" ||
             arg == "-Ofast") {
+            continue;
+        }
+        if (should_skip_ir_sanitizer_pass_arg(arg, argc, argv, i)) {
             continue;
         }
         if (arg == target.output) {

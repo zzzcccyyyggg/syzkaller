@@ -92,6 +92,9 @@ FUZZ_EXPERIMENTAL = {
     "uaf_mode": True,
     "barrier_mode": True,
     "barrier_procs": [0, 1],
+    "history_buffer_size": 100,
+    "new_varname_pair_history": 100,
+    "new_stack_history": 10,
     "max_stacks_per_varname_pair": 100,
     "normal_threshold_micros": 10000,
     "enable_timing_exploration": True,
@@ -109,7 +112,7 @@ FUZZ_EXPERIMENTAL = {
     "dynamic_threshold_initial_us": 2500,
     "dynamic_threshold_min_us": 500,
     "dynamic_threshold_max_us": 10000,
-    "dynamic_threshold_eval_sec": 60,
+    "dynamic_threshold_eval_sec": 120,
 }
 
 # ---------------------------------------------------------------------------

@@ -25,7 +25,7 @@ type ThresholdControllerConfig struct {
 	MaxThresholdUs int64
 
 	// EvalWindowSeconds is how often the controller evaluates and adjusts.
-	// Default: 60 seconds.
+	// Default: 120 seconds.
 	EvalWindowSeconds int
 
 	// PendingLowWatermark: if validator pending count is below this,
@@ -62,10 +62,10 @@ type ThresholdControllerConfig struct {
 // DefaultThresholdControllerConfig returns sensible defaults.
 func DefaultThresholdControllerConfig() ThresholdControllerConfig {
 	return ThresholdControllerConfig{
-		InitialThresholdUs:     1000,    // 1ms
-		MinThresholdUs:         50,      // 50μs
-		MaxThresholdUs:         50000,   // 50ms
-		EvalWindowSeconds:      60,      // 1 minute
+		InitialThresholdUs:     1000,  // 1ms
+		MinThresholdUs:         50,    // 50μs
+		MaxThresholdUs:         50000, // 50ms
+		EvalWindowSeconds:      120,   // 2 minutes
 		PendingLowWatermark:    5,
 		PendingHighWatermark:   50,
 		GrowFactor:             1.5,
@@ -87,6 +87,9 @@ func DefaultThresholdControllerConfig() ThresholdControllerConfig {
 //   - Validator side: pending queue depth and processing rate
 //
 // It adjusts τ to keep the validator neither starved nor overwhelmed.
+// When validator stats are unavailable, the controller becomes conservative:
+// it may increase τ on sustained low discovery, but it will not shrink τ based
+// on discovery rate alone because that can prematurely suppress valuable pairs.
 type ThresholdController struct {
 	config ThresholdControllerConfig
 	mu     sync.Mutex
@@ -96,18 +99,20 @@ type ThresholdController struct {
 	currentThreshold atomic.Int64
 
 	// Tracking state
-	lastEvalTime     time.Time
-	lastMRPCount     int       // Total MRP count at last evaluation
-	lowRateStreak    int       // Consecutive windows with low discovery rate
-	prevDiscoveryRate float64  // Previous window's discovery rate
+	lastEvalTime      time.Time
+	lastMRPCount      int     // Total MRP count at last evaluation
+	lowRateStreak     int     // Consecutive windows with low discovery rate
+	prevDiscoveryRate float64 // Previous window's discovery rate
+	highPendingStreak int     // Consecutive windows with high validator backlog
+	idlePendingStreak int     // Consecutive windows with empty/idle validator backlog
 
 	// MRP count provider (from ddrd.Store or uafCorpus)
 	mrpCountFunc func() int
 
 	// Stats
-	statThreshold    *stat.Val
+	statThreshold     *stat.Val
 	statDiscoveryRate *stat.Val
-	statAdjustments  *stat.Val
+	statAdjustments   *stat.Val
 }
 
 // NewThresholdController creates and returns a new dynamic threshold controller.
@@ -122,7 +127,7 @@ func NewThresholdController(config ThresholdControllerConfig, mrpCountFunc func(
 		config.MaxThresholdUs = 50000
 	}
 	if config.EvalWindowSeconds <= 0 {
-		config.EvalWindowSeconds = 60
+		config.EvalWindowSeconds = 120
 	}
 	if config.PendingLowWatermark <= 0 {
 		config.PendingLowWatermark = 5
@@ -208,47 +213,44 @@ func (tc *ThresholdController) Evaluate() {
 	reason := "stable"
 
 	if validatorStats != nil {
-		// Validator is alive: use supply-demand balancing
+		// Validator is alive: drive threshold mainly from backlog pressure.
+		// We intentionally make this less sensitive than the original version:
+		// require consecutive windows and use smaller step sizes so that normal
+		// threshold does not oscillate aggressively around short-term bursts.
 		pending := validatorStats.PendingCount
 
-		if pending < tc.config.PendingLowWatermark {
-			if validatorStats.Idle {
-				// Validator has nothing to do, aggressively increase
-				newThreshold = int64(float64(oldThreshold) * tc.config.GrowFactor * 1.2)
+		switch {
+		case pending > tc.config.PendingHighWatermark:
+			tc.highPendingStreak++
+			tc.idlePendingStreak = 0
+			tc.lowRateStreak = 0
+			if tc.highPendingStreak >= 2 {
+				newThreshold = int64(float64(oldThreshold) * tc.conservativeShrinkFactor())
+				reason = "validator-overloaded-shrink"
+			}
+		case pending < tc.config.PendingLowWatermark && validatorStats.Idle:
+			tc.idlePendingStreak++
+			tc.highPendingStreak = 0
+			tc.lowRateStreak = 0
+			if tc.idlePendingStreak >= 3 {
+				newThreshold = int64(float64(oldThreshold) * tc.conservativeGrowFactor())
 				reason = "validator-idle-grow"
-			} else {
-				newThreshold = int64(float64(oldThreshold) * tc.config.GrowFactor)
-				reason = "validator-hungry-grow"
 			}
-		} else if pending > tc.config.PendingHighWatermark {
-			newThreshold = int64(float64(oldThreshold) * tc.config.ShrinkFactor)
-			reason = "validator-overloaded-shrink"
-		}
-		// Between watermarks: check discovery rate
-		if discoveryRate < tc.config.MinDiscoveryRatePerMin && pending < tc.config.PendingHighWatermark {
-			tc.lowRateStreak++
-			if tc.lowRateStreak >= 2 {
-				// Sustained low discovery: increase threshold
-				newThreshold = int64(float64(oldThreshold) * tc.config.GrowFactor)
-				reason = "low-discovery-rate-grow"
-			}
-		} else {
+		default:
+			tc.highPendingStreak = 0
+			tc.idlePendingStreak = 0
 			tc.lowRateStreak = 0
 		}
 	} else {
-		// No validator stats: supply-only mode
-		// Adjust based on discovery rate alone
+		// No validator stats: discovery-only mode.
+		// We only widen on sustained low discovery. Shrinking without validator
+		// feedback tended to overfit to easy pairs and starve later validation.
 		if discoveryRate < tc.config.MinDiscoveryRatePerMin {
 			tc.lowRateStreak++
 			if tc.lowRateStreak >= 2 {
 				newThreshold = int64(float64(oldThreshold) * tc.config.GrowFactor)
 				reason = "no-validator-low-rate-grow"
 			}
-		} else if discoveryRate > tc.config.MinDiscoveryRatePerMin*10 {
-			// Very high discovery rate: might be generating low-quality MRPs
-			newThreshold = int64(float64(oldThreshold) * tc.config.ShrinkFactor)
-			reason = "no-validator-high-rate-shrink"
-			tc.lowRateStreak = 0
 		} else {
 			tc.lowRateStreak = 0
 		}
@@ -291,6 +293,22 @@ func (tc *ThresholdController) Evaluate() {
 	tc.lastEvalTime = now
 	tc.lastMRPCount = currentMRPCount
 	tc.prevDiscoveryRate = discoveryRate
+}
+
+func (tc *ThresholdController) conservativeGrowFactor() float64 {
+	grow := tc.config.GrowFactor
+	if grow <= 1.0 {
+		return 1.0
+	}
+	return 1.0 + (grow-1.0)*0.5
+}
+
+func (tc *ThresholdController) conservativeShrinkFactor() float64 {
+	shrink := tc.config.ShrinkFactor
+	if shrink <= 0 || shrink >= 1.0 {
+		return 1.0
+	}
+	return 1.0 - (1.0-shrink)*0.5
 }
 
 // Run starts the periodic evaluation loop. Call in a goroutine.
