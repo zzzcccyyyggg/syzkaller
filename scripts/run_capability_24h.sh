@@ -58,6 +58,20 @@ SAFE4_MODULES=(xfs btrfs bt-stack ptmx)
 RUN_EXP="$SCRIPT_DIR/run_experiment.sh"
 GEN_CFG="$SCRIPT_DIR/generate_config.py"
 CORPUS_MGR="$SCRIPT_DIR/manage_corpus.sh"
+CAP_PROFILE_ENV=(
+    "EXP_FUZZ_VM_COUNT_XFS=1"
+    "EXP_VALIDATE_VM_COUNT_XFS=8"
+    "EXP_FUZZ_VM_COUNT_FLOPPY=1"
+    "EXP_VALIDATE_VM_COUNT_FLOPPY=8"
+    "EXP_FUZZ_VM_COUNT_BTRFS=1"
+    "EXP_VALIDATE_VM_COUNT_BTRFS=7"
+    "EXP_FUZZ_VM_COUNT_JFS=2"
+    "EXP_VALIDATE_VM_COUNT_JFS=4"
+    "EXP_FUZZ_VM_COUNT_F2FS=2"
+    "EXP_VALIDATE_VM_COUNT_F2FS=4"
+    "EXP_FUZZ_VM_COUNT_PTMX=2"
+    "EXP_VALIDATE_VM_COUNT_PTMX=4"
+)
 
 NO_PIN=false
 EXTRA_RUN_EXP_ARGS=()
@@ -136,6 +150,14 @@ run_safe4_command() {
         "${RUNNER_PREFIX[@]}" env "${env_args[@]}" "$RUN_EXP" "$@"
     else
         env "${env_args[@]}" "$RUN_EXP" "$@"
+    fi
+}
+
+run_cap_command() {
+    if [[ ${#RUNNER_PREFIX[@]} -gt 0 ]]; then
+        "${RUNNER_PREFIX[@]}" env "${CAP_PROFILE_ENV[@]}" "$RUN_EXP" "$@"
+    else
+        env "${CAP_PROFILE_ENV[@]}" "$RUN_EXP" "$@"
     fi
 }
 
@@ -261,8 +283,8 @@ start_shared() {
     local mods
     mods=$(modules_str "${CAP_MODULES[@]}")
     log_info "启动共享槽位模式: $mods"
-    "${RUNNER_PREFIX[@]}" "$RUN_EXP" "${EXTRA_RUN_EXP_ARGS[@]}" start "${CAP_MODULES[@]}"
-    "${RUNNER_PREFIX[@]}" "$RUN_EXP" "${EXTRA_RUN_EXP_ARGS[@]}" validate "${CAP_MODULES[@]}"
+    run_cap_command "${EXTRA_RUN_EXP_ARGS[@]}" start "${CAP_MODULES[@]}"
+    run_cap_command "${EXTRA_RUN_EXP_ARGS[@]}" validate "${CAP_MODULES[@]}"
 }
 
 start_batch() {
@@ -270,8 +292,8 @@ start_batch() {
     shift
     local mods=("$@")
     log_info "启动严格 2+2 分批模式 ${batch_name}: $(modules_str "${mods[@]}")"
-    "${RUNNER_PREFIX[@]}" "$RUN_EXP" "${EXTRA_RUN_EXP_ARGS[@]}" start "${mods[@]}"
-    "${RUNNER_PREFIX[@]}" "$RUN_EXP" --separate-validate-slot "${EXTRA_RUN_EXP_ARGS[@]}" validate "${mods[@]}"
+    run_cap_command "${EXTRA_RUN_EXP_ARGS[@]}" start "${mods[@]}"
+    run_cap_command --separate-validate-slot "${EXTRA_RUN_EXP_ARGS[@]}" validate "${mods[@]}"
 }
 
 start_safe4_fuzz() {

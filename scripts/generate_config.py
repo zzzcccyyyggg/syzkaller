@@ -131,7 +131,7 @@ VALIDATE_EXPERIMENTAL = {
     "new_stack_penalty": 1,
     "no_discovery_penalty": 2,
     "uaf_validate": {
-        "max_concurrent": 2,
+        "max_concurrent": 6,
         "delay_retry_budget": 1,
         "timeout_seconds": 120,
         "repeat_count": 1,
@@ -147,6 +147,7 @@ VALIDATE_EXPERIMENTAL = {
         "idle_reload_seconds": 10,
         "enable_replay": True,
         "enable_varname_scheduling": True,
+        "priority_low_history": True,
         "disable_verify_delay": True,
         "disable_collection_delay": True,
         "require_origin_match": False,
@@ -219,7 +220,11 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
     mode: "fuzz" | "validate"
     """
     syscalls, overrides = load_module_data(slug)
-    artifact_name = overrides.get("artifact_name", slug)
+    mode_overrides = overrides.get(mode, {})
+    base_overrides = {k: v for k, v in overrides.items() if k not in ("fuzz", "validate")}
+    effective_overrides = deep_merge_dict(base_overrides, mode_overrides)
+
+    artifact_name = effective_overrides.get("artifact_name", slug)
 
     is_validate = (mode == "validate")
     port_base = PORT_MAP.get(slug, 62099)
@@ -255,7 +260,7 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
         kernel_obj = shared_build
 
     # QEMU extra args
-    qemu_args = overrides.get("qemu_args", "")
+    qemu_args = effective_overrides.get("qemu_args", "")
     if not qemu_args:
         qemu_args = "-enable-kvm"
     elif "-enable-kvm" not in qemu_args:
@@ -267,11 +272,11 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
         qemu_args = qemu_args.replace(old_fs_dir, KERNEL_IMAGES)
 
     # VM 资源 (validate 模式可以用更多资源)
-    vm_count = overrides.get("vm_count", DEFAULTS["vm_count"])
-    vm_cpu = overrides.get("vm_cpu", DEFAULTS["vm_cpu"])
-    vm_mem = overrides.get("vm_mem", DEFAULTS["vm_mem"])
-    procs = overrides.get("procs", DEFAULTS["procs"])
-    vm_running_time = overrides.get("vm_running_time", DEFAULTS["vm_running_time"])
+    vm_count = effective_overrides.get("vm_count", DEFAULTS["vm_count"])
+    vm_cpu = effective_overrides.get("vm_cpu", DEFAULTS["vm_cpu"])
+    vm_mem = effective_overrides.get("vm_mem", DEFAULTS["vm_mem"])
+    procs = effective_overrides.get("procs", DEFAULTS["procs"])
+    vm_running_time = effective_overrides.get("vm_running_time", DEFAULTS["vm_running_time"])
 
     if is_validate:
         vm_running_time = 600  # validate 通常短一些
@@ -308,11 +313,13 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
 
     # experimental section
     if include_experimental:
+        common_exp = base_overrides.get("experimental", {})
+        mode_exp = mode_overrides.get("experimental", {})
         if is_validate:
-            config["experimental"] = json.loads(json.dumps(VALIDATE_EXPERIMENTAL))
+            config["experimental"] = deep_merge_dict(VALIDATE_EXPERIMENTAL, mode_exp)
         else:
             # 使用默认 fuzz experimental，并允许模块 overrides 做增量覆盖。
-            mod_exp = overrides.get("experimental", {})
+            mod_exp = deep_merge_dict(common_exp, mode_exp)
             config["experimental"] = deep_merge_dict(FUZZ_EXPERIMENTAL, mod_exp)
 
     return config

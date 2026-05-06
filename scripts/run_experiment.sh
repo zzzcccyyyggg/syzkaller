@@ -19,6 +19,8 @@
 #   sudo ./scripts/run_experiment.sh validate <mod> [...]  启动 validate
 #   sudo ./scripts/run_experiment.sh stop     [mod ...]    停止 fuzz+validate
 #   sudo ./scripts/run_experiment.sh status                查看运行状态
+#   sudo ./scripts/run_experiment.sh cpu-status [mod ...]  查看模块 CPU 快照
+#   sudo ./scripts/run_experiment.sh cpu-monitor [mod ...] 监视模块 CPU 使用
 #   sudo ./scripts/run_experiment.sh clean    <mod> [--all] 清除 uaf corpus
 #   sudo ./scripts/run_experiment.sh clean-log <mod> [--all] 清除日志
 #   sudo ./scripts/run_experiment.sh clean-validate <mod> [--all] 清除 validate 数据
@@ -32,6 +34,10 @@
 #   --separate-validate-slot  validate 使用独立 CPU 槽位，不复用 fuzz 槽位
 #   --no-pin       不绑定 CPU，不使用 cset / taskset，直接运行
 #   --except / -e  排除指定模块 (与 --all 搭配: --all --except floppy usb-driver)
+#   --window DUR   CPU 采样窗口 (如 1s, 500ms)
+#   --interval DUR CPU 监视采样间隔 (如 5s)
+#   --duration DUR CPU 监视持续时间 (如 20m)
+#   --output-dir DIR  CPU 监视输出目录
 #
 # 环境变量 (可选覆盖):
 #   CORES_PER_MODULE=2        每模块 CPU 核心数
@@ -71,6 +77,10 @@ EXP_PROCS=${EXP_PROCS:-2}
 NO_PIN=${NO_PIN:-false}
 SEPARATE_VALIDATE_SLOT=${SEPARATE_VALIDATE_SLOT:-false}
 EXP_VALIDATE_WORKDIR_NAME=${EXP_VALIDATE_WORKDIR_NAME:-validate-run}
+CPU_SAMPLE_WINDOW=${CPU_SAMPLE_WINDOW:-1s}
+CPU_MONITOR_INTERVAL=${CPU_MONITOR_INTERVAL:-5s}
+CPU_MONITOR_DURATION=${CPU_MONITOR_DURATION:-20m}
+CPU_MONITOR_OUTPUT=${CPU_MONITOR_OUTPUT:-}
 
 STATE_DIR="$PROJECT_HOME/.experiment"
 CPUSETS_OWNED_MARKER="$STATE_DIR/.cpuset_owned"
@@ -436,6 +446,10 @@ while [[ $# -gt 0 ]]; do
         --variant)  VARIANT_SUFFIX="-$2"; shift 2 ;;
         --separate-validate-slot) SEPARATE_VALIDATE_SLOT=true; shift ;;
         --no-pin)   NO_PIN=true; shift ;;
+        --window)   CPU_SAMPLE_WINDOW="$2"; shift 2 ;;
+        --interval) CPU_MONITOR_INTERVAL="$2"; shift 2 ;;
+        --duration) CPU_MONITOR_DURATION="$2"; shift 2 ;;
+        --output-dir) CPU_MONITOR_OUTPUT="$2"; shift 2 ;;
         --except|-e)
             shift
             while [[ $# -gt 0 && ! "$1" =~ ^- ]]; do
@@ -581,6 +595,7 @@ save_state() {
 
 remove_state() {
     rm -f "$STATE_DIR/$1.state"
+    rm -f "$STATE_DIR/$1.meta"
 }
 
 load_state() {
@@ -603,6 +618,210 @@ load_state() {
     return 0
 }
 
+load_runtime_meta() {
+    META_LAYOUT=""
+    META_PIN_MODE=""
+    META_CORES_PER_MODULE=""
+    META_FUZZ_CORES=""
+    META_VALIDATE_CORES=""
+    META_FUZZ_VM_COUNT=""
+    META_VALIDATE_VM_COUNT=""
+    META_FUZZ_VM_CPU=""
+    META_VALIDATE_VM_CPU=""
+    META_FUZZ_PROCS=""
+    META_VALIDATE_PROCS=""
+    META_VALIDATE_MAX_CONCURRENT=""
+
+    local meta="$STATE_DIR/$1.meta"
+    [[ -f "$meta" ]] || return 0
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            layout) META_LAYOUT="$value" ;;
+            pin_mode) META_PIN_MODE="$value" ;;
+            cores_per_module) META_CORES_PER_MODULE="$value" ;;
+            fuzz_cores) META_FUZZ_CORES="$value" ;;
+            validate_cores) META_VALIDATE_CORES="$value" ;;
+            fuzz_vm_count) META_FUZZ_VM_COUNT="$value" ;;
+            validate_vm_count) META_VALIDATE_VM_COUNT="$value" ;;
+            fuzz_vm_cpu) META_FUZZ_VM_CPU="$value" ;;
+            validate_vm_cpu) META_VALIDATE_VM_CPU="$value" ;;
+            fuzz_procs) META_FUZZ_PROCS="$value" ;;
+            validate_procs) META_VALIDATE_PROCS="$value" ;;
+            validate_max_concurrent) META_VALIDATE_MAX_CONCURRENT="$value" ;;
+        esac
+    done < "$meta"
+}
+
+write_runtime_meta() {
+    local slug=$1
+    local fuzz_cores=${2:-}
+    local validate_cores=${3:-}
+    local layout=${4:-}
+
+    load_runtime_meta "$slug"
+    [[ -n "$fuzz_cores" ]] || fuzz_cores="$META_FUZZ_CORES"
+    [[ -n "$validate_cores" ]] || validate_cores="$META_VALIDATE_CORES"
+    [[ -n "$layout" ]] || layout="$META_LAYOUT"
+
+    if [[ -z "$layout" ]]; then
+        if [[ -n "$fuzz_cores" ]] && [[ -z "$validate_cores" ]]; then
+            layout="fuzz-only"
+        elif [[ -n "$fuzz_cores" ]] && [[ -n "$validate_cores" ]] && [[ "$fuzz_cores" == "$validate_cores" ]]; then
+            layout="shared"
+        elif [[ -n "$fuzz_cores" ]] && [[ -n "$validate_cores" ]]; then
+            layout="split"
+        else
+            layout="unknown"
+        fi
+    fi
+
+    local pin_mode="taskset"
+    if $NO_PIN; then
+        pin_mode="unbound"
+    elif $USE_CGROUP_V2_CPUSET; then
+        pin_mode="cpuset"
+    elif $USE_CSET; then
+        pin_mode="cset"
+    fi
+
+    local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz${CFG_SUFFIX}.cfg"
+    local validate_cfg="$EXP_DIR/$slug/exp-validate${CFG_SUFFIX}.cfg"
+    [[ -f "$fuzz_cfg" ]] || fuzz_cfg="$EXP_DIR/$slug/fuzz${CFG_SUFFIX}.cfg"
+    [[ -f "$validate_cfg" ]] || validate_cfg="$EXP_DIR/$slug/validate${CFG_SUFFIX}.cfg"
+
+    mkdir -p "$STATE_DIR"
+    python3 - "$slug" "$STATE_DIR/$slug.meta" "$fuzz_cfg" "$validate_cfg" \
+        "$fuzz_cores" "$validate_cores" "$layout" "$pin_mode" "$CORES_PER_MODULE" <<'PYEOF'
+import json, os, sys
+
+slug, meta_path, fuzz_cfg, validate_cfg, fuzz_cores, validate_cores, layout, pin_mode, cores_per_module = sys.argv[1:10]
+
+def load_cfg(path):
+    if path and os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def dig(obj, *keys, default=""):
+    cur = obj
+    for key in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+        if cur is None:
+            return default
+    return cur
+
+fuzz = load_cfg(fuzz_cfg)
+validate = load_cfg(validate_cfg)
+
+data = {
+    "layout": layout,
+    "pin_mode": pin_mode,
+    "cores_per_module": cores_per_module,
+    "fuzz_cores": fuzz_cores,
+    "validate_cores": validate_cores,
+    "fuzz_vm_count": str(dig(fuzz, "vm", "count", default="")),
+    "validate_vm_count": str(dig(validate, "vm", "count", default="")),
+    "fuzz_vm_cpu": str(dig(fuzz, "vm", "cpu", default="")),
+    "validate_vm_cpu": str(dig(validate, "vm", "cpu", default="")),
+    "fuzz_procs": str(dig(fuzz, "procs", default="")),
+    "validate_procs": str(dig(validate, "procs", default="")),
+    "validate_max_concurrent": str(dig(validate, "experimental", "uaf_validate", "max_concurrent", default="")),
+}
+
+with open(meta_path, "w") as f:
+    for key, value in data.items():
+        f.write(f"{key}={value}\n")
+PYEOF
+}
+
+format_runtime_profile() {
+    load_runtime_meta "$1"
+
+    local vms="${META_FUZZ_VM_COUNT:-?}/${META_VALIDATE_VM_COUNT:--}"
+    local vconc="${META_VALIDATE_MAX_CONCURRENT:--}"
+    local layout="${META_LAYOUT:-unknown}"
+    local coreset="—"
+
+    case "$layout" in
+        shared)
+            coreset="${META_FUZZ_CORES:-${META_VALIDATE_CORES:-—}}"
+            ;;
+        split)
+            coreset="${META_FUZZ_CORES:-—}|${META_VALIDATE_CORES:-—}"
+            ;;
+        fuzz-only)
+            coreset="${META_FUZZ_CORES:-—}"
+            ;;
+        *)
+            if [[ -n "${META_FUZZ_CORES:-}" ]] && [[ -n "${META_VALIDATE_CORES:-}" ]]; then
+                coreset="${META_FUZZ_CORES}|${META_VALIDATE_CORES}"
+            elif [[ -n "${META_FUZZ_CORES:-}" ]]; then
+                coreset="${META_FUZZ_CORES}"
+            elif [[ -n "${META_VALIDATE_CORES:-}" ]]; then
+                coreset="${META_VALIDATE_CORES}"
+            fi
+            ;;
+    esac
+
+    echo "layout=${layout}, vm=${vms}, vconc=${vconc}, pin=${META_PIN_MODE:-unknown}, cores=${coreset}"
+}
+
+load_profile_from_configs() {
+    CFG_FUZZ_VM_COUNT=""
+    CFG_VALIDATE_VM_COUNT=""
+    CFG_VALIDATE_MAX_CONCURRENT=""
+
+    local slug=$1
+    local fuzz_cfg="$EXP_DIR/$slug/exp-fuzz${CFG_SUFFIX}.cfg"
+    local validate_cfg="$EXP_DIR/$slug/exp-validate${CFG_SUFFIX}.cfg"
+    [[ -f "$fuzz_cfg" ]] || fuzz_cfg="$EXP_DIR/$slug/fuzz${CFG_SUFFIX}.cfg"
+    [[ -f "$validate_cfg" ]] || validate_cfg="$EXP_DIR/$slug/validate${CFG_SUFFIX}.cfg"
+
+    while IFS='=' read -r key value; do
+        case "$key" in
+            fuzz_vm_count) CFG_FUZZ_VM_COUNT="$value" ;;
+            validate_vm_count) CFG_VALIDATE_VM_COUNT="$value" ;;
+            validate_max_concurrent) CFG_VALIDATE_MAX_CONCURRENT="$value" ;;
+        esac
+    done < <(python3 - "$fuzz_cfg" "$validate_cfg" <<'PYEOF'
+import json, os, sys
+
+def load_cfg(path):
+    if path and os.path.exists(path):
+        with open(path) as f:
+            return json.load(f)
+    return {}
+
+def dig(obj, *keys, default=""):
+    cur = obj
+    for key in keys:
+        if not isinstance(cur, dict):
+            return default
+        cur = cur.get(key)
+        if cur is None:
+            return default
+    return cur
+
+fuzz = load_cfg(sys.argv[1])
+validate = load_cfg(sys.argv[2])
+
+print(f"fuzz_vm_count={dig(fuzz, 'vm', 'count', default='')}")
+print(f"validate_vm_count={dig(validate, 'vm', 'count', default='')}")
+print(f"validate_max_concurrent={dig(validate, 'experimental', 'uaf_validate', 'max_concurrent', default='')}")
+PYEOF
+)
+}
+
+pid_allowed_cores() {
+    local pid=$1
+    [[ -n "$pid" ]] || return 1
+    [[ -r "/proc/$pid/status" ]] || return 1
+    awk '/^Cpus_allowed_list:/ {print $2}' "/proc/$pid/status" 2>/dev/null
+}
+
 purge_stale_states() {
     [[ -d "$STATE_DIR" ]] || return 0
     for f in "$STATE_DIR"/*.state; do
@@ -612,7 +831,21 @@ purge_stale_states() {
         local fp vp
         fp=$(get_exp_fuzz_pid "$s")
         vp=$(get_exp_validate_pid "$s")
-        [[ -z "$fp" ]] && [[ -z "$vp" ]] && rm -f "$f"
+        if [[ -z "$fp" ]] && [[ -z "$vp" ]]; then
+            rm -f "$f" "$STATE_DIR/$s.meta"
+        fi
+    done
+
+    for f in "$STATE_DIR"/*.meta; do
+        [[ -f "$f" ]] || continue
+        local s
+        s=$(basename "$f" .meta)
+        if [[ ! -f "$STATE_DIR/$s.state" ]]; then
+            local fp vp
+            fp=$(get_exp_fuzz_pid "$s")
+            vp=$(get_exp_validate_pid "$s")
+            [[ -z "$fp" ]] && [[ -z "$vp" ]] && rm -f "$f"
+        fi
     done
 }
 
@@ -770,7 +1003,9 @@ do_start() {
     fi
 
     save_state "$slug" "$idx" "-" "$fuzz_pid" "0"
+    write_runtime_meta "$slug" "$ALL_CORES" "" "fuzz-only"
     log_ok "[$slug] fuzz 已启动  PID=$fuzz_pid  cores=$ALL_CORES"
+    log_info "[$slug] 运行画像: $(format_runtime_profile "$slug")"
     if $USE_VANILLA; then
         log_info "[$slug] fuzz 跑够后运行: sudo $0 --vanilla ${NO_PIN:+} $( $NO_PIN && echo '--no-pin' ) validate $slug" >/dev/null 2>&1 || true
     fi
@@ -857,9 +1092,16 @@ do_validate() {
     local fp
     fp=$(get_exp_fuzz_pid "$slug")
     load_state "$slug"
+    load_runtime_meta "$slug"
     local fuzz_idx="${STATE_FUZZ_IDX:--1}"
     save_state "$slug" "$fuzz_idx" "$val_idx" "${fp:-0}" "$val_pid"
+    local layout="split"
+    if [[ "$fuzz_idx" == "$val_idx" ]] || [[ -n "$ALL_CORES" && "${META_FUZZ_CORES:-}" == "$ALL_CORES" ]]; then
+        layout="shared"
+    fi
+    write_runtime_meta "$slug" "${META_FUZZ_CORES:-}" "$ALL_CORES" "$layout"
     log_ok "[$slug] validate 已启动  PID=$val_pid  cores=$ALL_CORES"
+    log_info "[$slug] 运行画像: $(format_runtime_profile "$slug")"
     return 0
 }
 
@@ -901,14 +1143,17 @@ do_stop() {
 # status
 # ---------------------------------------------------------------------------
 do_status() {
+    purge_stale_states
+
     if ! $NO_PIN && (( ${#CPUS_AVAILABLE[@]} == 0 )); then
         detect_available_cores true
     fi
 
-    printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
-        "MODULE" "FUZZ" "F-PID" "VALIDATE" "V-PID" "F-CORES" "V-CORES"
-    printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
-        "------" "----" "-----" "--------" "-----" "-------" "-------"
+    echo "Runtime status (VMs=fuzz/validate, VCONC=validate max_concurrent)"
+    printf "%-14s %-7s %-7s %-8s %-8s %-7s %-7s %-8s %s\n" \
+        "MODULE" "F-STAT" "V-STAT" "F-PID" "V-PID" "VMs" "VCONC" "LAYOUT" "CORESET"
+    printf "%-14s %-7s %-7s %-8s %-8s %-7s %-7s %-8s %s\n" \
+        "------" "------" "------" "-----" "-----" "-----" "-----" "------" "-------"
 
     for d in "$EXP_DIR"/*/; do
         local slug
@@ -922,7 +1167,19 @@ do_status() {
         vs="stopped"; [[ -n "$vp" ]] && vs="running"
 
         load_state "$slug"
-        if [[ -n "${STATE_FUZZ_IDX:-}" ]]; then
+        load_runtime_meta "$slug"
+        load_profile_from_configs "$slug"
+
+        local actual_fuzz_cores=""
+        local actual_val_cores=""
+        actual_fuzz_cores=$(pid_allowed_cores "${fp:-}" || true)
+        actual_val_cores=$(pid_allowed_cores "${vp:-}" || true)
+
+        if [[ -n "$actual_fuzz_cores" ]]; then
+            fuzz_cores="$actual_fuzz_cores"
+        elif [[ -n "${META_FUZZ_CORES:-}" ]]; then
+            fuzz_cores="$META_FUZZ_CORES"
+        elif [[ -n "${STATE_FUZZ_IDX:-}" ]]; then
             if [[ "$STATE_FUZZ_IDX" == "-1" ]]; then
                 fuzz_cores="unbound"
             elif [[ -n "$STATE_FUZZ_IDX" ]]; then
@@ -934,7 +1191,12 @@ do_status() {
                 fi
             fi
         fi
-        if [[ -n "${STATE_VAL_IDX:-}" ]]; then
+
+        if [[ -n "$actual_val_cores" ]]; then
+            val_cores="$actual_val_cores"
+        elif [[ -n "${META_VALIDATE_CORES:-}" ]]; then
+            val_cores="$META_VALIDATE_CORES"
+        elif [[ -n "${STATE_VAL_IDX:-}" ]]; then
             if [[ "$STATE_VAL_IDX" == "-1" ]]; then
                 val_cores="unbound"
             elif [[ -n "$STATE_VAL_IDX" ]]; then
@@ -947,8 +1209,46 @@ do_status() {
             fi
         fi
 
-        printf "%-14s %-9s %-8s %-9s %-8s %-12s %-12s\n" \
-            "$slug" "$fs" "${fp:-—}" "$vs" "${vp:-—}" "$fuzz_cores" "$val_cores"
+        local layout="${META_LAYOUT:-unknown}"
+        if [[ "$layout" == "unknown" || -z "$layout" ]]; then
+            if [[ "$fuzz_cores" != "—" ]] && [[ "$val_cores" != "—" ]] && [[ "$fuzz_cores" == "$val_cores" ]]; then
+                layout="shared"
+            elif [[ "$fuzz_cores" != "—" ]] && [[ "$val_cores" != "—" ]]; then
+                layout="split"
+            elif [[ "$fuzz_cores" != "—" ]]; then
+                layout="fuzz-only"
+            fi
+        fi
+
+        local coreset="—"
+        case "$layout" in
+            shared)
+                coreset="$fuzz_cores"
+                ;;
+            split)
+                coreset="${fuzz_cores}|${val_cores}"
+                ;;
+            fuzz-only)
+                coreset="$fuzz_cores"
+                ;;
+            *)
+                if [[ "$fuzz_cores" != "—" ]] || [[ "$val_cores" != "—" ]]; then
+                    coreset="${fuzz_cores}|${val_cores}"
+                fi
+                ;;
+        esac
+        if [[ "$fs" == "stopped" ]] && [[ "$vs" == "stopped" ]] && [[ "$coreset" == "—" ]]; then
+            layout="—"
+        fi
+
+        local fuzz_vm_count="${META_FUZZ_VM_COUNT:-$CFG_FUZZ_VM_COUNT}"
+        local validate_vm_count="${META_VALIDATE_VM_COUNT:-$CFG_VALIDATE_VM_COUNT}"
+        local validate_max_concurrent="${META_VALIDATE_MAX_CONCURRENT:-$CFG_VALIDATE_MAX_CONCURRENT}"
+        local vms="${fuzz_vm_count:-?}/${validate_vm_count:--}"
+        local vconc="${validate_max_concurrent:--}"
+
+        printf "%-14s %-7s %-7s %-8s %-8s %-7s %-7s %-8s %s\n" \
+            "$slug" "$fs" "$vs" "${fp:-—}" "${vp:-—}" "$vms" "$vconc" "$layout" "$coreset"
     done
 }
 
@@ -1098,6 +1398,36 @@ do_log() {
     tail -f "$latest"
 }
 
+populate_running_targets() {
+    TARGETS=()
+    for d in "$EXP_DIR"/*/; do
+        [[ -d "$d" ]] || continue
+        local slug
+        slug=$(basename "$d")
+        local fp vp
+        fp=$(get_exp_fuzz_pid "$slug")
+        vp=$(get_exp_validate_pid "$slug")
+        if [[ -n "$fp" ]] || [[ -n "$vp" ]]; then
+            TARGETS+=("$slug")
+        fi
+    done
+}
+
+run_cpu_observer() {
+    local mode=$1
+    shift || true
+
+    local cmd=(python3 "$SCRIPT_DIR/module_cpu_monitor.py" --project-home "$PROJECT_HOME" "$mode" --window "$CPU_SAMPLE_WINDOW")
+    if [[ "$mode" == "monitor" ]]; then
+        cmd+=(--interval "$CPU_MONITOR_INTERVAL" --duration "$CPU_MONITOR_DURATION")
+        [[ -n "$CPU_MONITOR_OUTPUT" ]] && cmd+=(--output-dir "$CPU_MONITOR_OUTPUT")
+    fi
+    if [[ ${#TARGETS[@]} -gt 0 ]]; then
+        cmd+=("${TARGETS[@]}")
+    fi
+    "${cmd[@]}"
+}
+
 # ---------------------------------------------------------------------------
 # 主逻辑
 # ---------------------------------------------------------------------------
@@ -1199,6 +1529,20 @@ case "$ACTION" in
     status)
         do_status
         ;;
+    cpu-status)
+        if [[ ${#TARGETS[@]} -eq 0 ]]; then
+            populate_running_targets
+        fi
+        [[ ${#TARGETS[@]} -gt 0 ]] || die "无运行中的模块可供查看"
+        run_cpu_observer snapshot
+        ;;
+    cpu-monitor)
+        if [[ ${#TARGETS[@]} -eq 0 ]]; then
+            populate_running_targets
+        fi
+        [[ ${#TARGETS[@]} -gt 0 ]] || die "无运行中的模块可供监视"
+        run_cpu_observer monitor
+        ;;
     clean)
         [[ ${#TARGETS[@]} -gt 0 ]] || die "请指定模块或使用 --all"
         for t in "${TARGETS[@]}"; do
@@ -1254,6 +1598,6 @@ case "$ACTION" in
         fi
         ;;
     *)
-        die "未知命令: $ACTION (start|validate|stop|status|clean|clean-log|clean-validate|log|list|help)"
+        die "未知命令: $ACTION (start|validate|stop|status|cpu-status|cpu-monitor|clean|clean-log|clean-validate|log|list|help)"
         ;;
 esac
