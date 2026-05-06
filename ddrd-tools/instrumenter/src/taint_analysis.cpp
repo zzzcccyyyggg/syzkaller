@@ -1,4 +1,232 @@
 #include "taint_analysis.hpp"
+#include "llvm/IR/InstrTypes.h"
+#include "llvm/IR/Operator.h"
+#include <deque>
+
+namespace {
+
+struct TaintState {
+    std::set<Value *> pointer_values;
+    std::set<const Value *> pointer_memory;
+};
+
+static const Value *stripCastsForKey(const Value *value)
+{
+    if (!value)
+        return nullptr;
+
+    const Value *stripped = value->stripPointerCasts();
+    if (auto *gep = dyn_cast<GEPOperator>(stripped))
+        return stripCastsForKey(gep->getPointerOperand());
+    return stripped;
+}
+
+static bool isGlobalDerivedPointer(Value *value);
+static bool isGlobalDerivedPointer(Value *value, std::set<const Function *> &function_seen,
+                                   std::set<const Value *> &value_seen);
+static bool functionMayReturnGlobalPointer(Function *func, std::set<const Function *> &function_seen,
+                                           std::set<const Value *> &value_seen);
+
+static bool isGlobalDerivedPointer(Value *value)
+{
+    std::set<const Function *> function_seen;
+    std::set<const Value *> value_seen;
+    return isGlobalDerivedPointer(value, function_seen, value_seen);
+}
+
+static bool isGlobalDerivedPointer(Value *value, std::set<const Function *> &function_seen,
+                                   std::set<const Value *> &value_seen)
+{
+    if (!value)
+        return false;
+
+    value = value->stripPointerCasts();
+    if (!value_seen.insert(value).second)
+        return false;
+
+    if (isa<GlobalVariable>(value))
+        return true;
+
+    if (auto *gep = dyn_cast<GEPOperator>(value))
+        return isGlobalDerivedPointer(gep->getPointerOperand(), function_seen, value_seen);
+
+    if (auto *phi = dyn_cast<PHINode>(value)) {
+        for (Value *incoming : phi->incoming_values()) {
+            if (isGlobalDerivedPointer(incoming, function_seen, value_seen))
+                return true;
+        }
+        return false;
+    }
+
+    if (auto *select = dyn_cast<SelectInst>(value))
+        return isGlobalDerivedPointer(select->getTrueValue(), function_seen, value_seen) ||
+               isGlobalDerivedPointer(select->getFalseValue(), function_seen, value_seen);
+
+    if (auto *call = dyn_cast<CallBase>(value))
+        return functionMayReturnGlobalPointer(call->getCalledFunction(), function_seen, value_seen);
+
+    return false;
+}
+
+static bool functionMayReturnGlobalPointer(Function *func, std::set<const Function *> &function_seen,
+                                           std::set<const Value *> &value_seen)
+{
+    if (!func || !func->getReturnType()->isPointerTy())
+        return false;
+    if (!function_seen.insert(func).second)
+        return false;
+
+    for (BasicBlock &bb : *func) {
+        if (auto *ret = dyn_cast<ReturnInst>(bb.getTerminator())) {
+            if (isGlobalDerivedPointer(ret->getReturnValue(), function_seen, value_seen))
+                return true;
+        }
+    }
+    return false;
+}
+
+static bool isPointerValueTainted(Value *value, const TaintState &state,
+                                  std::set<Value *> &seen)
+{
+    if (!value || !value->getType()->isPointerTy())
+        return false;
+
+    value = value->stripPointerCasts();
+    if (!seen.insert(value).second)
+        return false;
+
+    if (state.pointer_values.count(value))
+        return true;
+
+    if (isGlobalDerivedPointer(value))
+        return true;
+
+    if (auto *gep = dyn_cast<GEPOperator>(value))
+        return isPointerValueTainted(gep->getPointerOperand(), state, seen);
+
+    if (auto *phi = dyn_cast<PHINode>(value)) {
+        for (Value *incoming : phi->incoming_values()) {
+            if (isPointerValueTainted(incoming, state, seen))
+                return true;
+        }
+        return false;
+    }
+
+    if (auto *select = dyn_cast<SelectInst>(value)) {
+        return isPointerValueTainted(select->getTrueValue(), state, seen) ||
+               isPointerValueTainted(select->getFalseValue(), state, seen);
+    }
+
+    return false;
+}
+
+static bool isPointerValueTainted(Value *value, const TaintState &state)
+{
+    std::set<Value *> seen;
+    return isPointerValueTainted(value, state, seen);
+}
+
+static bool hasTaintedPointerOperand(Instruction &inst, const TaintState &state)
+{
+    for (Use &use : inst.operands()) {
+        Value *operand = use.get();
+        if (operand && operand->getType()->isPointerTy() &&
+            isPointerValueTainted(operand, state))
+            return true;
+    }
+    return false;
+}
+
+static bool taintPointerValue(Value *value, TaintState &state)
+{
+    if (!value || !value->getType()->isPointerTy())
+        return false;
+
+    Value *stripped = value->stripPointerCasts();
+    return state.pointer_values.insert(stripped).second;
+}
+
+static bool taintPointerMemory(Value *ptr, TaintState &state)
+{
+    const Value *key = stripCastsForKey(ptr);
+    if (!key)
+        return false;
+    return state.pointer_memory.insert(key).second;
+}
+
+static bool pointerMemoryIsTainted(Value *ptr, const TaintState &state)
+{
+    const Value *key = stripCastsForKey(ptr);
+    return key && state.pointer_memory.count(key);
+}
+
+static bool mergeInto(TaintState &dst, const TaintState &src)
+{
+    bool changed = false;
+    for (Value *value : src.pointer_values)
+        changed |= dst.pointer_values.insert(value).second;
+    for (const Value *value : src.pointer_memory)
+        changed |= dst.pointer_memory.insert(value).second;
+    return changed;
+}
+
+static void seedInitialState(Function &func, TaintState &state)
+{
+    for (Argument &arg : func.args()) {
+        if (arg.getType()->isPointerTy())
+            taintPointerValue(&arg, state);
+    }
+
+    Module *mod = func.getParent();
+    if (!mod)
+        return;
+
+    for (GlobalVariable &global : mod->globals())
+        taintPointerValue(&global, state);
+}
+
+static void transferInstruction(Instruction &inst, TaintState &state,
+                                std::set<Instruction *> &accessSet)
+{
+    if (auto *load = dyn_cast<LoadInst>(&inst)) {
+        Value *ptr = load->getPointerOperand();
+        bool address_tainted = isPointerValueTainted(ptr, state);
+        if (address_tainted)
+            accessSet.insert(&inst);
+
+        if (load->getType()->isPointerTy() &&
+            (address_tainted || pointerMemoryIsTainted(ptr, state)))
+            taintPointerValue(load, state);
+        return;
+    }
+
+    if (auto *store = dyn_cast<StoreInst>(&inst)) {
+        Value *ptr = store->getPointerOperand();
+        if (isPointerValueTainted(ptr, state))
+            accessSet.insert(&inst);
+
+        Value *value = store->getValueOperand();
+        if (value->getType()->isPointerTy() && isPointerValueTainted(value, state))
+            taintPointerMemory(ptr, state);
+        return;
+    }
+
+    if (auto *call = dyn_cast<CallBase>(&inst)) {
+        if (call->getType()->isPointerTy()) {
+            std::set<const Function *> function_seen;
+            std::set<const Value *> value_seen;
+            if (functionMayReturnGlobalPointer(call->getCalledFunction(), function_seen, value_seen) ||
+                hasTaintedPointerOperand(inst, state))
+                taintPointerValue(call, state);
+        }
+        return;
+    }
+
+    if (inst.getType()->isPointerTy() && hasTaintedPointerOperand(inst, state))
+        taintPointerValue(&inst, state);
+}
+
+} // namespace
 
 std::size_t TaintAnalysis::hashSet(const std::set<Value *> &var_set) {
     std::size_t hashValue = 0;
@@ -89,30 +317,45 @@ void TaintAnalysis::analyzeFunctionFlowSensitive(Function &F)
 {
     var_set.clear();
     accessSet.clear();
+    bb_2_var_set_hash.clear();
+    currentPath.clear();
+    visitedBlocks.clear();
     if (F.empty())
         return; // 确保函数非空
 
-    // Step 1: 收集函数参数
-    for (auto &arg : F.args())
-    {
-        var_set.insert(&arg);
-    }
+    std::map<BasicBlock *, TaintState> in_states;
+    std::map<BasicBlock *, TaintState> out_states;
+    std::deque<BasicBlock *> worklist;
+    std::set<BasicBlock *> queued;
 
-    // Step 2: 收集全局变量
-    Module *M = F.getParent();
-    if (!M)
-        return; // 确保模块非空
-    for (auto &global : M->globals())
-    {
-        var_set.insert(&global);
-    }
-
-    // 获取入口基本块
     BasicBlock *entryBB = &F.getEntryBlock();
-    if (!entryBB)
-        return; // 确保入口基本块非空
+    seedInitialState(F, in_states[entryBB]);
+    worklist.push_back(entryBB);
+    queued.insert(entryBB);
 
-    traversePath(entryBB, var_set);
+    while (!worklist.empty()) {
+        BasicBlock *bb = worklist.front();
+        worklist.pop_front();
+        queued.erase(bb);
+
+        TaintState state = in_states[bb];
+        for (Instruction &inst : *bb)
+            transferInstruction(inst, state, accessSet);
+
+        TaintState &old_out = out_states[bb];
+        bool out_changed = old_out.pointer_values != state.pointer_values ||
+                           old_out.pointer_memory != state.pointer_memory;
+        if (!out_changed)
+            continue;
+
+        old_out = state;
+        for (BasicBlock *succ : successors(bb)) {
+            if (mergeInto(in_states[succ], state) && !queued.count(succ)) {
+                worklist.push_back(succ);
+                queued.insert(succ);
+            }
+        }
+    }
 }
 
 void TaintAnalysis::analyzeFunction(Function &F)

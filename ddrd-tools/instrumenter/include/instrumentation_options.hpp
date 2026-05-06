@@ -10,6 +10,7 @@ struct InstrumentationOptions {
     bool instrument_basic_blocks = false;   // 基本块插桩
     bool instrument_locks = false;          // 锁操作插桩
     bool instrument_free_funcs = false; // Free函数插桩
+    bool datarace_only = false;             // datarace-only模式：变量+可选锁，默认禁用函数/BB/free
     std::string lock_file = "";            // 锁配置文件
     std::string trylock_file = "";         // try锁配置文件
     std::string instrumentation_func_name = ""; // 自定义插桩函数名

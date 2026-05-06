@@ -4,7 +4,7 @@
 #include <map>
 #include <string>
 
-#define INSERT_INFO_PATH "/home/zzzccc/BASS/DDRD/instrumenter/insert_info.txt"
+#define INSERT_INFO_PATH "/home/zzzccc/BASS/DDRD-syzkaller/ddrd-tools/instrumenter/insert_info.txt"
 
 // 默认插桩函数名称，可以通过配置修改
 #ifndef INSTRUMENTATION_FUNC_NAME

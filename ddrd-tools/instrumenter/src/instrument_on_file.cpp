@@ -8,6 +8,9 @@
 // 新的函数实现，接受选项结构
 void InstrumentOnFile(llvm::Module *mod, const InstrumentationOptions& options) {
     std::cout << "Starting instrumentation with selected options...\n";
+    if (options.datarace_only) {
+        std::cout << "- Datarace-only mode: function/basic-block/free hooks disabled by default\n";
+    }
     
     // 设置自定义函数名（如果指定了的话）
     if (!options.instrumentation_func_name.empty()) {
@@ -47,7 +50,7 @@ void InstrumentOnFile(llvm::Module *mod, const InstrumentationOptions& options) 
     
     if (options.instrument_variables) {
         std::cout << "- Instrumenting shared variable access...\n";
-        RecordSharedVariableAccess(mod);
+        RecordSharedVariableAccess(mod, options.datarace_only);
     }
     
     if (options.instrument_basic_blocks) {

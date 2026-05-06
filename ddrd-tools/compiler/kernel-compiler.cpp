@@ -43,7 +43,7 @@ struct BuildTarget {
 };
 
 // 执行命令的封装函数
-void execute_command(const vector<const char*>& args) {
+int execute_command(const vector<const char*>& args) {
     pid_t pid = fork();
     if (pid == 0) {
         // 转换为 execvp 需要的格式
@@ -55,9 +55,23 @@ void execute_command(const vector<const char*>& args) {
 
         execvp(exec_args[0], exec_args.data());
         cerr << "Failed to execute: " << exec_args[0] << endl;
-        exit(EXIT_FAILURE);
+        _exit(127);
     }
-    waitpid(pid, nullptr, 0);
+    if (pid < 0) {
+        cerr << "Failed to fork" << endl;
+        return 1;
+    }
+
+    int status = 0;
+    if (waitpid(pid, &status, 0) < 0) {
+        cerr << "Failed to wait for child process" << endl;
+        return 1;
+    }
+    if (WIFEXITED(status))
+        return WEXITSTATUS(status);
+    if (WIFSIGNALED(status))
+        return 128 + WTERMSIG(status);
+    return 1;
 }
 
 // The first stage emits LLVM IR for DDRD's own instrumenter. Keep frontend
@@ -108,7 +122,7 @@ bool handle_assembly_file(int argc, char** argv) {
         }
         args.push_back(argv[i]);
     }
-    execute_command(args);
+    exit(execute_command(args));
     return true;
 }
 
@@ -169,7 +183,7 @@ BuildTarget parse_build_target(int argc, char** argv) {
 }
 
 // 生成LLVM IR
-void generate_llvm_ir(int argc, char** argv, const BuildTarget& target) {
+int generate_llvm_ir(int argc, char** argv, const BuildTarget& target) {
     std::cout << "Generating LLVM IR for: " << target.source << endl;
     vector<const char*> args = {
         CLANG_PATH,
@@ -201,15 +215,15 @@ void generate_llvm_ir(int argc, char** argv, const BuildTarget& target) {
         args.push_back(argv[i]);
     }
 
-    execute_command(args);
+    return execute_command(args);
 }
 
 // 运行插桩工具
-void run_instrumenter(const BuildTarget& target) {
+int run_instrumenter(const BuildTarget& target) {
     string instrumenter = get_instrumenter_path();
     string lockfile = get_lock_file();
     string trylockfile = get_trylock_file();
-    execute_command({
+    return execute_command({
         instrumenter.c_str(),
         target.ll_file.c_str(),
         "-f",
@@ -223,7 +237,7 @@ void run_instrumenter(const BuildTarget& target) {
 }
 
 // 编译插桩后的代码
-void compile_instrumented_code(int argc, char** argv, const BuildTarget& target) {
+int compile_instrumented_code(int argc, char** argv, const BuildTarget& target) {
     vector<const char*> args = {CLANG_PATH, "-Og"};  // 添加-Og选项
 
     args.insert(args.end(), {
@@ -263,7 +277,7 @@ void compile_instrumented_code(int argc, char** argv, const BuildTarget& target)
         args.push_back(argv[i]);
     }
 
-    execute_command(args);
+    return execute_command(args);
 }
 
 int main(int argc, char** argv) {
@@ -288,13 +302,18 @@ int main(int argc, char** argv) {
             }
             args.push_back(argv[i]);
         }
-        execute_command(args);
-        return 0;
+        return execute_command(args);
     }
 
-    generate_llvm_ir(argc, argv, target);
-    run_instrumenter(target);
-    compile_instrumented_code(argc, argv, target);
+    int status = generate_llvm_ir(argc, argv, target);
+    if (status != 0)
+        return status;
+    status = run_instrumenter(target);
+    if (status != 0)
+        return status;
+    status = compile_instrumented_code(argc, argv, target);
+    if (status != 0)
+        return status;
 
     return 0;
 }

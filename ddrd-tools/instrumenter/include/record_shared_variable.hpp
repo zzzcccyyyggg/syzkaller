@@ -20,7 +20,7 @@
 #include <map>
 
 /* -------- Extern Interface --------*/
-void RecordSharedVariableAccess(llvm::Module *mod);
+void RecordSharedVariableAccess(llvm::Module *mod, bool access_first = false);
 
 // 设置插桩函数名称
 void SetInstrumentationFuncName(const std::string& func_name);

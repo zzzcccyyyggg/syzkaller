@@ -12,6 +12,7 @@ void printUsage(const char* program_name) {
               << "  -b, --basic-blocks  Enable basic block instrumentation\n"
               << "  -l, --locks <file>  Enable lock instrumentation with lock config file\n"
               << "  -t, --trylock <file> Specify trylock config file\n"
+              << "  --datarace-only     Enable datarace-only mode (memory accesses + optional locks)\n"
               << "  --free              Enable memory free function instrumentation\n"
               << "  --enter-name <name> Set custom function enter function name\n"
               << "                      (default: kccwf_rec_func_enter)\n"
@@ -28,6 +29,7 @@ void printUsage(const char* program_name) {
               << "\nExamples:\n"
               << "  " << program_name << " input.ll -f -v\n"
               << "  " << program_name << " input.ll -l locks.txt -t trylocks.txt\n"
+              << "  " << program_name << " input.ll --datarace-only -l locks.txt\n"
               << "  " << program_name << " input.ll --free\n"
               << "  " << program_name << " input.ll -v --func-name __ddrace_rec_mem_access\n"
               << "  " << program_name << " input.ll -f --enter-name my_func_enter --exit-name my_func_exit\n"
@@ -81,6 +83,13 @@ InstrumentationOptions parseCommandLineOptions(int argc, char** argv) {
                 std::cerr << "Error: Trylock option requires a file argument\n";
                 exit(1);
             }
+        }
+        else if (arg == "--datarace-only") {
+            options.datarace_only = true;
+            options.instrument_variables = true;
+            options.instrument_functions = false;
+            options.instrument_basic_blocks = false;
+            options.instrument_free_funcs = false;
         }
         else if (arg == "--free") {
             options.instrument_free_funcs = true;
@@ -157,6 +166,13 @@ InstrumentationOptions parseCommandLineOptions(int argc, char** argv) {
     if (options.instrument_locks && options.lock_file.empty()) {
         std::cerr << "Warning: Lock instrumentation enabled but no lock file specified\n";
         options.instrument_locks = false;
+    }
+
+    if (options.datarace_only) {
+        options.instrument_variables = true;
+        options.instrument_functions = false;
+        options.instrument_basic_blocks = false;
+        options.instrument_free_funcs = false;
     }
     
     // 如果没有启用任何插桩，默认启用所有（为了向后兼容）
