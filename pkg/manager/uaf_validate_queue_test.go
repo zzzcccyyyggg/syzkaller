@@ -151,7 +151,7 @@ func TestUAFValidateQueueStoreDeduplicatesByPairID(t *testing.T) {
 	}
 }
 
-func TestUAFValidateQueueStorePrefersEntryWithReplayHistory(t *testing.T) {
+func TestUAFValidateQueueStorePrefersEntryWithShorterReplayHistory(t *testing.T) {
 	target, err := prog.GetTarget("test", "64")
 	if err != nil {
 		t.Fatalf("failed to get target: %v", err)
@@ -167,24 +167,24 @@ func TestUAFValidateQueueStorePrefersEntryWithReplayHistory(t *testing.T) {
 		}
 	})
 
-	withoutHistory := testQueueEntry(0x50, 0x60, 0x70, 0x80, time.Unix(0, 1))
-	withHistory := testQueueEntry(0x50, 0x60, 0x70, 0x80, time.Unix(0, 2))
-	withHistory.ReplayHistory = []*fuzzer.BarrierExecutionRecord{
+	shortHistory := testQueueEntry(0x50, 0x60, 0x70, 0x80, time.Unix(0, 1))
+	longHistory := testQueueEntry(0x50, 0x60, 0x70, 0x80, time.Unix(0, 2))
+	longHistory.ReplayHistory = []*fuzzer.BarrierExecutionRecord{
 		{Timestamp: time.Unix(0, 3), GroupID: 1},
 		{Timestamp: time.Unix(0, 4), GroupID: 2},
 	}
 
-	recordWithout := observeQueueEntry(t, store, withoutHistory, "record-without")
-	recordWith := observeQueueEntry(t, store, withHistory, "record-with")
+	recordShort := observeQueueEntry(t, store, shortHistory, "record-short")
+	recordLong := observeQueueEntry(t, store, longHistory, "record-long")
 
-	if _, _, _, err := store.EnqueueRecord(recordWithout); err != nil {
-		t.Fatalf("enqueue withoutHistory failed: %v", err)
+	if _, _, _, err := store.EnqueueRecord(recordLong); err != nil {
+		t.Fatalf("enqueue longHistory failed: %v", err)
 	}
-	if _, _, _, err := store.EnqueueRecord(recordWith); err != nil {
-		t.Fatalf("enqueue withHistory failed: %v", err)
+	if _, _, _, err := store.EnqueueRecord(recordShort); err != nil {
+		t.Fatalf("enqueue shortHistory failed: %v", err)
 	}
-	if _, _, _, err := store.EnqueueRecord(recordWithout); err != nil {
-		t.Fatalf("re-enqueue withoutHistory failed: %v", err)
+	if _, _, _, err := store.EnqueueRecord(recordLong); err != nil {
+		t.Fatalf("re-enqueue longHistory failed: %v", err)
 	}
 
 	items, _, err := store.EntriesSince(0)
@@ -194,15 +194,15 @@ func TestUAFValidateQueueStorePrefersEntryWithReplayHistory(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 queue item after replay-history replacement, got %d", len(items))
 	}
-	if got := items[0].HistoryCount; got != 2 {
-		t.Fatalf("expected queue item to keep richer replay-history reference, got %d records", got)
+	if got := items[0].HistoryCount; got != 0 {
+		t.Fatalf("expected queue item to keep shorter replay-history reference, got %d records", got)
 	}
-	if items[0].CorpusRecordID != "record-with" {
-		t.Fatalf("expected queue item to point at richer corpus record, got %q", items[0].CorpusRecordID)
+	if items[0].CorpusRecordID != "record-short" {
+		t.Fatalf("expected queue item to point at shorter corpus record, got %q", items[0].CorpusRecordID)
 	}
 }
 
-func TestUAFValidateQueueStoreReloadKeepsLatestReplacementAndAck(t *testing.T) {
+func TestUAFValidateQueueStoreReloadKeepsShorterReplacementAndAck(t *testing.T) {
 	target, err := prog.GetTarget("test", "64")
 	if err != nil {
 		t.Fatalf("failed to get target: %v", err)
@@ -236,28 +236,28 @@ func TestUAFValidateQueueStoreReloadKeepsLatestReplacementAndAck(t *testing.T) {
 		{Timestamp: time.Unix(0, 4), GroupID: 2},
 	}
 
-	shortRecord := observeQueueEntry(t, producer, short, "record-short")
-	key, shortSeq, enqueued, err := producer.EnqueueRecord(shortRecord)
-	if err != nil {
-		t.Fatalf("enqueue short record failed: %v", err)
-	}
-	if !enqueued {
-		t.Fatalf("short record should enqueue")
-	}
-
-	longRecord := observeQueueEntry(t, consumer, long, "record-long")
-	longKey, longSeq, enqueued, err := consumer.EnqueueRecord(longRecord)
+	longRecord := observeQueueEntry(t, producer, long, "record-long")
+	key, longSeq, enqueued, err := producer.EnqueueRecord(longRecord)
 	if err != nil {
 		t.Fatalf("enqueue long record failed: %v", err)
 	}
 	if !enqueued {
-		t.Fatalf("long record should replace queued reference")
+		t.Fatalf("long record should enqueue")
 	}
-	if longKey != key {
-		t.Fatalf("queue key changed across replacement: got %q want %q", longKey, key)
+
+	shortRecord := observeQueueEntry(t, consumer, short, "record-short")
+	shortKey, shortSeq, enqueued, err := consumer.EnqueueRecord(shortRecord)
+	if err != nil {
+		t.Fatalf("enqueue short record failed: %v", err)
 	}
-	if longSeq <= shortSeq {
-		t.Fatalf("replacement seq should advance: short=%d long=%d", shortSeq, longSeq)
+	if !enqueued {
+		t.Fatalf("short record should replace queued reference")
+	}
+	if shortKey != key {
+		t.Fatalf("queue key changed across replacement: got %q want %q", shortKey, key)
+	}
+	if shortSeq <= longSeq {
+		t.Fatalf("replacement seq should advance: long=%d short=%d", longSeq, shortSeq)
 	}
 
 	restartedStore, err := NewUAFValidateQueueStore(workdir, target)
@@ -277,11 +277,11 @@ func TestUAFValidateQueueStoreReloadKeepsLatestReplacementAndAck(t *testing.T) {
 	if len(items) != 1 {
 		t.Fatalf("expected 1 queue item after restart, got %d", len(items))
 	}
-	if items[0].CorpusRecordID != "record-long" {
+	if items[0].CorpusRecordID != "record-short" {
 		t.Fatalf("expected replacement corpus ref after restart, got %q", items[0].CorpusRecordID)
 	}
-	if items[0].HistoryCount != len(long.ReplayHistory) {
-		t.Fatalf("expected replacement history count %d, got %d", len(long.ReplayHistory), items[0].HistoryCount)
+	if items[0].HistoryCount != len(short.ReplayHistory) {
+		t.Fatalf("expected replacement history count %d, got %d", len(short.ReplayHistory), items[0].HistoryCount)
 	}
 
 	if err := consumer.Ack(key); err != nil {
@@ -314,7 +314,7 @@ func TestUAFValidateQueueStoreReloadKeepsLatestReplacementAndAck(t *testing.T) {
 	}
 }
 
-func TestUAFValidateQueueStoreConcurrentEnqueuePreservesRicherReference(t *testing.T) {
+func TestUAFValidateQueueStoreConcurrentEnqueuePreservesShorterReference(t *testing.T) {
 	target, err := prog.GetTarget("test", "64")
 	if err != nil {
 		t.Fatalf("failed to get target: %v", err)
@@ -398,11 +398,11 @@ func TestUAFValidateQueueStoreConcurrentEnqueuePreservesRicherReference(t *testi
 	if len(items) != 1 {
 		t.Fatalf("expected 1 queue item after concurrent enqueues, got %d", len(items))
 	}
-	if items[0].CorpusRecordID != "record-long" {
-		t.Fatalf("expected richer corpus ref to survive, got %q", items[0].CorpusRecordID)
+	if items[0].CorpusRecordID != "record-short" {
+		t.Fatalf("expected shorter corpus ref to survive, got %q", items[0].CorpusRecordID)
 	}
-	if items[0].HistoryCount != len(long.ReplayHistory) {
-		t.Fatalf("expected richer history count %d, got %d", len(long.ReplayHistory), items[0].HistoryCount)
+	if items[0].HistoryCount != len(short.ReplayHistory) {
+		t.Fatalf("expected shorter history count %d, got %d", len(short.ReplayHistory), items[0].HistoryCount)
 	}
 
 	if err := restarted.Ack(items[0].Key); err != nil {
@@ -425,6 +425,64 @@ func TestUAFValidateQueueStoreConcurrentEnqueuePreservesRicherReference(t *testi
 	}
 	if len(finalItems) != 0 {
 		t.Fatalf("expected queue to be empty after final ack, got %d items", len(finalItems))
+	}
+}
+
+func TestUAFValidateQueueStoreGroupsEntriesByCorpusRecord(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+
+	store, err := NewUAFValidateQueueStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create queue store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close queue store: %v", cerr)
+		}
+	})
+
+	pairA := &ddrd.MayUAFPair{Signal: 1, FreeAccessName: 0x10, UseAccessName: 0x20, FreeCallStack: 0x30, UseCallStack: 0x40}
+	pairB := &ddrd.MayUAFPair{Signal: 2, FreeAccessName: 0x11, UseAccessName: 0x21, FreeCallStack: 0x31, UseCallStack: 0x41}
+	entry := &fuzzer.UAFCorpusEntry{
+		PairBasicInfo: *pairA,
+		Pairs:         []*ddrd.MayUAFPair{pairA, pairB},
+		ReplayHistory: []*fuzzer.BarrierExecutionRecord{{Timestamp: time.Unix(0, 1), GroupID: 1}},
+		Timestamp:     time.Unix(0, 1),
+	}
+
+	records, err := store.pairIndex.ObserveEntry(entry, "record-shared")
+	if err != nil {
+		t.Fatalf("ObserveEntry failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("ObserveEntry returned %d records, want 2", len(records))
+	}
+	for _, record := range records {
+		if _, _, _, err := store.EnqueueRecord(record); err != nil {
+			t.Fatalf("EnqueueRecord failed for %s: %v", record.PairKey, err)
+		}
+	}
+
+	groups, _, err := store.EntriesSinceGroupedByCorpus(0)
+	if err != nil {
+		t.Fatalf("EntriesSinceGroupedByCorpus failed: %v", err)
+	}
+	if len(groups) != 1 {
+		t.Fatalf("expected 1 grouped corpus entry, got %d", len(groups))
+	}
+	group := groups[0]
+	if group.CorpusRecordID != "record-shared" {
+		t.Fatalf("unexpected corpus record id %q", group.CorpusRecordID)
+	}
+	if len(group.PairKeys) != 2 || len(group.QueueKeys) != 2 || len(group.Pairs) != 2 {
+		t.Fatalf("unexpected grouped payload: pair_keys=%d queue_keys=%d pairs=%d",
+			len(group.PairKeys), len(group.QueueKeys), len(group.Pairs))
+	}
+	if group.HistoryCount != len(entry.ReplayHistory) {
+		t.Fatalf("unexpected grouped history count %d", group.HistoryCount)
 	}
 }
 

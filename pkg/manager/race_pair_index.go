@@ -211,7 +211,8 @@ func (store *RacePairIndexStore) ObserveEntry(entry *fuzzer.UAFCorpusEntry, corp
 					rec.CorpusRecordIDs = append(rec.CorpusRecordIDs, corpusRecordID)
 					recordChanged = true
 				}
-				if rec.PreferredCorpusRecordID == "" || len(entry.ReplayHistory) > rec.PreferredHistoryRecords {
+				if shouldPreferCorpusRecord(rec.PreferredCorpusRecordID, rec.PreferredHistoryRecords,
+					corpusRecordID, len(entry.ReplayHistory)) {
 					rec.PreferredCorpusRecordID = corpusRecordID
 					rec.PreferredHistoryRecords = len(entry.ReplayHistory)
 					if rec.Status == RacePairProcessed {
@@ -443,6 +444,19 @@ func containsString(values []string, value string) bool {
 		}
 	}
 	return false
+}
+
+func shouldPreferCorpusRecord(currentID string, currentHistory int, candidateID string, candidateHistory int) bool {
+	if candidateID == "" {
+		return false
+	}
+	if currentID == "" {
+		return true
+	}
+	if candidateID == currentID {
+		return false
+	}
+	return candidateHistory < currentHistory
 }
 
 func racePairRecordQueueable(record *RacePairRecord) bool {

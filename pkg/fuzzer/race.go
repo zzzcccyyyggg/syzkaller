@@ -130,10 +130,12 @@ type UAFCorpusEntry struct {
 
 	// ValidateQueueKey/Seq are runtime-only metadata populated when an entry is
 	// loaded from the validate queue. They are not persisted in uaf-corpus.db.
-	ValidateQueueKey string
-	ValidateQueueSeq uint64
-	ValidatePairKey  string
-	CorpusRecordID   string
+	ValidateQueueKey  string
+	ValidateQueueSeq  uint64
+	ValidatePairKey   string
+	ValidateQueueKeys []string
+	ValidatePairKeys  []string
+	CorpusRecordID    string
 }
 
 // BarrierSnapshot records the barrier configuration used when discovering a UAF pair.
@@ -1225,6 +1227,12 @@ func (entry *UAFCorpusEntry) clone() *UAFCorpusEntry {
 	clone.Signals = cloneSignal(entry.Signals)
 	clone.Barrier = entry.Barrier.clone()
 	clone.ReplayPlan = entry.ReplayPlan.clone()
+	if len(entry.ValidateQueueKeys) != 0 {
+		clone.ValidateQueueKeys = append([]string(nil), entry.ValidateQueueKeys...)
+	}
+	if len(entry.ValidatePairKeys) != 0 {
+		clone.ValidatePairKeys = append([]string(nil), entry.ValidatePairKeys...)
+	}
 	// Clone replay history
 	if len(entry.ReplayHistory) != 0 {
 		clone.ReplayHistory = make([]*BarrierExecutionRecord, len(entry.ReplayHistory))

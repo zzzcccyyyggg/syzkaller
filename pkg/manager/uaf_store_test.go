@@ -106,11 +106,25 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 			t.Fatalf("delay[%d]=%d want %d", i, got.ReplayPlan.DelaysMicros[i], delay)
 		}
 	}
-	if len(got.Pairs) != 0 {
-		t.Fatalf("heavy corpus records must not carry pair details, got %d pairs", len(got.Pairs))
+	if len(got.Pairs) != len(entry.Pairs) {
+		t.Fatalf("pair count mismatch: got %d want %d", len(got.Pairs), len(entry.Pairs))
 	}
-	if !got.Profile.IsZero() {
-		t.Fatalf("heavy corpus records must not carry pair profile: %+v", got.Profile)
+	for i, pair := range got.Pairs {
+		if pair == nil || *pair != *entry.Pairs[i] {
+			t.Fatalf("pair %d mismatch: got=%+v want=%+v", i, pair, entry.Pairs[i])
+		}
+	}
+	wantProfile := fuzzer.UAFPairProfile{
+		FreeAccessName: primary.FreeAccessName,
+		UseAccessName:  primary.UseAccessName,
+		FreeCallStack:  primary.FreeCallStack,
+		UseCallStack:   primary.UseCallStack,
+	}
+	if got.Profile != wantProfile {
+		t.Fatalf("profile mismatch: got=%+v want=%+v", got.Profile, wantProfile)
+	}
+	if len(got.Signals) != len(entry.Signals) {
+		t.Fatalf("signal size mismatch: got %d want %d", len(got.Signals), len(entry.Signals))
 	}
 	reader := NewStreamingUAFCorpusReader(store.path, target)
 	materialized, _, err := reader.LoadEntryByKey(refs[0].ID, primary)

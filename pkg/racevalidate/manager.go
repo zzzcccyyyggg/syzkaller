@@ -404,14 +404,22 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 	if task.entry == nil {
 		return
 	}
+	sm.logReplayAvailability(task)
+	sm.handleTaskRepeats(ctx, task)
+}
 
-	// Log replay availability (actual replay happens in collection/verification phases)
+func (sm *StageManager) logReplayAvailability(task *validationTask) {
+	if task == nil || task.entry == nil {
+		return
+	}
 	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
 		log.Logf(0, "[history] validate: replay enabled for key=%s, history_count=%d", task.key, len(task.entry.ReplayHistory))
 	} else if sm.cfg.EnableReplay {
 		log.Logf(0, "[history] validate: no replay history available for key=%s", task.key)
 	}
+}
 
+func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationTask) {
 	for task.repeats < sm.cfg.RepeatCount {
 		if ctx.Err() != nil {
 			sm.complete(task)
@@ -511,6 +519,43 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 		}
 	}
 	sm.complete(task)
+}
+
+func (sm *StageManager) newHistoryMinimizer(task *validationTask, targetPair *ddrd.MayUAFPair,
+	delays []int64) *HistoryMinimizer {
+	runner := func(ctx context.Context, entry *fuzzer.UAFCorpusEntry) (*ExecutionResult, error) {
+		exec, err := sm.factory(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer func() {
+			if closer, ok := exec.(interface{ Close() error }); ok {
+				if cerr := closer.Close(); cerr != nil {
+					log.Logf(0, "uafvalidate: minimizer executor close error key=%s err=%v", task.key, cerr)
+				}
+			}
+		}()
+
+		tempTask := &validationTask{
+			entry: entry,
+			key:   task.key,
+		}
+		var pairCopy *ddrd.MayUAFPair
+		if targetPair != nil {
+			copyVal := *targetPair
+			pairCopy = &copyVal
+		}
+		verifyReq := &ExecutionRequest{
+			Entry:         entry,
+			Delays:        append([]int64(nil), delays...),
+			TargetPair:    pairCopy,
+			RepeatTimes:   1,
+			DisableDdrd:   true,
+			StopOnSuccess: true,
+		}
+		return sm.runBatchReplayAndSingleVerify(ctx, exec, tempTask, verifyReq)
+	}
+	return NewHistoryMinimizer(runner, sm.cfg, task.entry)
 }
 
 func retryReason(res *ValidationResult) string {
@@ -667,6 +712,9 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 	}
 
 	key := entryKey
+	if clone.CorpusRecordID != "" && (len(clone.ValidateQueueKeys) != 0 || clone.ValidateQueueKey != "") {
+		key = "corpus-" + clone.CorpusRecordID
+	}
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.closed {
@@ -833,6 +881,12 @@ func (task *validationTask) lightResultEntry() *fuzzer.UAFCorpusEntry {
 		entry.ValidateQueueKey = task.entry.ValidateQueueKey
 		entry.ValidateQueueSeq = task.entry.ValidateQueueSeq
 		entry.ValidatePairKey = task.entry.ValidatePairKey
+		if len(task.entry.ValidateQueueKeys) != 0 {
+			entry.ValidateQueueKeys = append([]string(nil), task.entry.ValidateQueueKeys...)
+		}
+		if len(task.entry.ValidatePairKeys) != 0 {
+			entry.ValidatePairKeys = append([]string(nil), task.entry.ValidatePairKeys...)
+		}
 		entry.CorpusRecordID = task.entry.CorpusRecordID
 	}
 	return entry
@@ -1181,31 +1235,38 @@ func (sm *StageManager) runReplayOnExecutor(ctx context.Context, exec Executor, 
 	return nil
 }
 
+func (sm *StageManager) buildReplayRequests(task *validationTask) []*ExecutionRequest {
+	var reqs []*ExecutionRequest
+	if task == nil || task.entry == nil {
+		return nil
+	}
+	if !sm.cfg.EnableReplay || len(task.entry.ReplayHistory) == 0 {
+		return nil
+	}
+	for _, record := range task.entry.ReplayHistory {
+		if record == nil || len(record.Programs) == 0 {
+			continue
+		}
+		replayEntry := &fuzzer.UAFCorpusEntry{
+			Programs: record.Programs,
+			Barrier: fuzzer.BarrierSnapshot{
+				GroupSize: len(record.Programs),
+				GroupID:   record.GroupID,
+			},
+		}
+		reqs = append(reqs, &ExecutionRequest{
+			Entry:       replayEntry,
+			DisableDdrd: !sm.cfg.ReplayCollectPairs,
+		})
+	}
+	return reqs
+}
+
 // runBatchReplayAndCollect combines replay history + main collection into a single batch execution.
 // This uses RunBatch to execute all requests in a single RPC session, avoiding SSH reconnection issues.
 // Returns the result of the main (last) request.
 func (sm *StageManager) runBatchReplayAndCollect(ctx context.Context, exec Executor, task *validationTask, delays []int64) (*ExecutionResult, error) {
-	var reqs []*ExecutionRequest
-
-	// Build replay requests first
-	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
-		for _, record := range task.entry.ReplayHistory {
-			if record == nil || len(record.Programs) == 0 {
-				continue
-			}
-			replayEntry := &fuzzer.UAFCorpusEntry{
-				Programs: record.Programs,
-				Barrier: fuzzer.BarrierSnapshot{
-					GroupSize: len(record.Programs),
-					GroupID:   record.GroupID,
-				},
-			}
-			reqs = append(reqs, &ExecutionRequest{
-				Entry:       replayEntry,
-				DisableDdrd: !sm.cfg.ReplayCollectPairs,
-			})
-		}
-	}
+	reqs := sm.buildReplayRequests(task)
 
 	// Add main collection request as the last request
 	mainReq := &ExecutionRequest{
@@ -1237,29 +1298,8 @@ func (sm *StageManager) runBatchReplayAndCollect(ctx context.Context, exec Execu
 // If VerifyDelaySweep is enabled, generates multiple verify requests with different delays.
 // Returns the aggregated result of the verification request(s).
 func (sm *StageManager) runBatchReplayAndVerify(ctx context.Context, exec Executor, task *validationTask, verifyReq *ExecutionRequest) (*ExecutionResult, error) {
-	var reqs []*ExecutionRequest
-	replayCount := 0
-
-	// Build replay requests first
-	if sm.cfg.EnableReplay && len(task.entry.ReplayHistory) > 0 {
-		for _, record := range task.entry.ReplayHistory {
-			if record == nil || len(record.Programs) == 0 {
-				continue
-			}
-			replayEntry := &fuzzer.UAFCorpusEntry{
-				Programs: record.Programs,
-				Barrier: fuzzer.BarrierSnapshot{
-					GroupSize: len(record.Programs),
-					GroupID:   record.GroupID,
-				},
-			}
-			reqs = append(reqs, &ExecutionRequest{
-				Entry:       replayEntry,
-				DisableDdrd: !sm.cfg.ReplayCollectPairs,
-			})
-			replayCount++
-		}
-	}
+	reqs := sm.buildReplayRequests(task)
+	replayCount := len(reqs)
 
 	// Build verify requests - with delay sweep if enabled
 	verifyCount := 1
@@ -1314,6 +1354,26 @@ func (sm *StageManager) runBatchReplayAndVerify(ctx context.Context, exec Execut
 
 	// Aggregate verify results
 	return sm.aggregateVerifyResults(verifyResults, duration), nil
+}
+
+func (sm *StageManager) runBatchReplayAndSingleVerify(ctx context.Context, exec Executor,
+	task *validationTask, verifyReq *ExecutionRequest) (*ExecutionResult, error) {
+	reqs := sm.buildReplayRequests(task)
+	replayCount := len(reqs)
+	reqs = append(reqs, verifyReq)
+	log.Logf(0, "[batch] minimize-verify: executing key=%s replay=%d verify=1 total=%d",
+		task.key, replayCount, len(reqs))
+	startTime := time.Now()
+	results, err := exec.RunBatch(ctx, reqs)
+	if err != nil {
+		return nil, err
+	}
+	duration := time.Since(startTime)
+	log.Logf(0, "[batch] minimize-verify: completed key=%s results=%d duration=%s", task.key, len(results), duration)
+	if len(results) <= replayCount {
+		return nil, fmt.Errorf("minimize verification produced no verify result (got %d, need >%d)", len(results), replayCount)
+	}
+	return results[replayCount], nil
 }
 
 // aggregateVerifyResults combines multiple verify results into a single result.
@@ -1785,7 +1845,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
 			if sm.cfg.EnableHistoryMinimization && len(task.entry.ReplayHistory) > 1 {
 				log.Logf(0, "uafvalidate: starting history minimization for key=%s", task.key)
-				minimizer := NewHistoryMinimizer(exec, sm.cfg, task.entry, &pairCopy, req.Delays)
+				minimizer := sm.newHistoryMinimizer(task, &pairCopy, req.Delays)
 				minResult := minimizer.Minimize(ctx)
 				if minResult.Success && minResult.MinimalHistory != nil {
 					minimizedHistory = minResult.MinimalHistory
@@ -2013,7 +2073,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
 			if sm.cfg.EnableHistoryMinimization && len(task.entry.ReplayHistory) > 1 {
 				log.Logf(0, "uafvalidate: starting history minimization for key=%s", task.key)
-				minimizer := NewHistoryMinimizer(exec, sm.cfg, task.entry, &pair, req.Delays)
+				minimizer := sm.newHistoryMinimizer(task, &pair, req.Delays)
 				minResult := minimizer.Minimize(ctx)
 				if minResult.Success && minResult.MinimalHistory != nil {
 					minimizedHistory = minResult.MinimalHistory

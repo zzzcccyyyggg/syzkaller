@@ -225,14 +225,18 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 				if res.Success {
 					atomic.AddInt32(&validatorSuccess, 1)
 				}
-				if res.Entry != nil && res.Entry.ValidateQueueKey != "" {
-					if mgr.uafPairIndex != nil && res.Entry.ValidatePairKey != "" {
-						if err := mgr.uafPairIndex.MarkProcessed(res.Entry.ValidatePairKey); err != nil {
-							log.Errorf("uaf validation queue: failed to mark processed %s: %v", res.Entry.ValidatePairKey, err)
+				if res.Entry != nil {
+					if mgr.uafPairIndex != nil {
+						for _, pairKey := range validationPairKeys(res.Entry) {
+							if err := mgr.uafPairIndex.MarkProcessed(pairKey); err != nil {
+								log.Errorf("uaf validation queue: failed to mark processed %s: %v", pairKey, err)
+							}
 						}
 					}
-					if err := mgr.uafValidateQueue.Ack(res.Entry.ValidateQueueKey); err != nil {
-						log.Errorf("uaf validation queue: failed to ack %s: %v", res.Entry.ValidateQueueKey, err)
+					for _, queueKey := range validationQueueKeys(res.Entry) {
+						if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
+							log.Errorf("uaf validation queue: failed to ack %s: %v", queueKey, err)
+						}
 					}
 				}
 			}
@@ -334,7 +338,7 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 		}
 	}
 
-	items, maxSeq, err := mgr.uafValidateQueue.EntriesSince(sinceSeq)
+	groups, maxSeq, err := mgr.uafValidateQueue.EntriesSinceGroupedByCorpus(sinceSeq)
 	if err != nil {
 		return sinceSeq, 0, 0, err
 	}
@@ -344,33 +348,40 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 	malformed := 0
 	skipped := 0
 	maxHistory := 0
-	for _, item := range items {
-		if item == nil || item.PairKey == "" || item.CorpusRecordID == "" {
+	groupedPairs := 0
+	for _, group := range groups {
+		if group == nil || group.CorpusRecordID == "" || len(group.Items) == 0 {
 			malformed++
-			if item != nil && item.Key != "" {
-				if err := mgr.uafValidateQueue.Ack(item.Key); err != nil {
-					log.Errorf("uaf validation queue: failed to ack empty item %s: %v", item.Key, err)
+			continue
+		}
+		groupedPairs += len(group.PairKeys)
+		if group.HistoryCount > maxHistory {
+			maxHistory = group.HistoryCount
+		}
+		entry, materializeErr := mgr.materializeValidationGroup(group)
+		if materializeErr != nil {
+			return sinceSeq, accepted, acked, materializeErr
+		}
+		if entry == nil {
+			malformed++
+			for _, queueKey := range group.QueueKeys {
+				if queueKey == "" {
+					continue
+				}
+				if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
+					log.Errorf("uaf validation queue: failed to ack malformed item %s: %v", queueKey, err)
 				} else {
 					acked++
 				}
 			}
 			continue
 		}
-		if item.HistoryCount > maxHistory {
-			maxHistory = item.HistoryCount
-		}
-		ref := &uafvalidate.ValidationEntryRef{
-			QueueKey:       item.Key,
-			QueueSeq:       item.Seq,
-			PairKey:        item.PairKey,
-			CorpusRecordID: item.CorpusRecordID,
-			Pair:           item.Pair,
-			HistoryCount:   item.HistoryCount,
-		}
-		if stage.EnqueueRef(ref) {
+		if stage.Enqueue(entry) {
 			if mgr.uafPairIndex != nil {
-				if err := mgr.uafPairIndex.MarkProcessing(item.PairKey); err != nil {
-					log.Errorf("uaf validation queue: failed to mark processing %s: %v", item.PairKey, err)
+				for _, pairKey := range group.PairKeys {
+					if err := mgr.uafPairIndex.MarkProcessing(pairKey); err != nil {
+						log.Errorf("uaf validation queue: failed to mark processing %s: %v", pairKey, err)
+					}
 				}
 			}
 			accepted++
@@ -378,22 +389,144 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 		}
 		skipped++
 		if mgr.uafPairIndex != nil {
-			if err := mgr.uafPairIndex.MarkProcessed(item.PairKey); err != nil {
-				log.Errorf("uaf validation queue: failed to mark skipped pair %s processed: %v", item.PairKey, err)
+			for _, pairKey := range group.PairKeys {
+				if err := mgr.uafPairIndex.MarkProcessed(pairKey); err != nil {
+					log.Errorf("uaf validation queue: failed to mark skipped pair %s processed: %v", pairKey, err)
+				}
 			}
 		}
-		if err := mgr.uafValidateQueue.Ack(item.Key); err != nil {
-			log.Errorf("uaf validation queue: failed to ack skipped item %s: %v", item.Key, err)
-		} else {
-			acked++
+		for _, queueKey := range group.QueueKeys {
+			if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
+				log.Errorf("uaf validation queue: failed to ack skipped item %s: %v", queueKey, err)
+			} else {
+				acked++
+			}
 		}
 	}
-	if len(items) != 0 {
-		log.Logf(1, "uaf validation queue: loaded refs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
-			len(items), accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
+	if len(groups) != 0 {
+		log.Logf(1, "uaf validation queue: loaded groups=%d grouped_pairs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
+			len(groups), groupedPairs, accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
 	}
 
 	return maxSeq, accepted, acked, nil
+}
+
+func (mgr *Manager) materializeValidationGroup(group *manager.QueuedUAFCorpusGroup) (*fuzzer.UAFCorpusEntry, error) {
+	if mgr == nil || group == nil || group.CorpusRecordID == "" {
+		return nil, nil
+	}
+	reader := manager.NewStreamingUAFCorpusReader(filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db"), mgr.target)
+	entry, _, err := reader.LoadEntryByKey(group.CorpusRecordID, nil)
+	if err != nil {
+		return nil, err
+	}
+	if entry == nil {
+		return nil, nil
+	}
+	filterValidationGroupPairs(entry, group)
+	entry.ValidateQueueKey = firstString(group.QueueKeys)
+	entry.ValidateQueueSeq = group.FirstSeq
+	entry.ValidatePairKey = firstString(group.PairKeys)
+	entry.ValidateQueueKeys = append([]string(nil), group.QueueKeys...)
+	entry.ValidatePairKeys = append([]string(nil), group.PairKeys...)
+	entry.CorpusRecordID = group.CorpusRecordID
+	return entry, nil
+}
+
+func filterValidationGroupPairs(entry *fuzzer.UAFCorpusEntry, group *manager.QueuedUAFCorpusGroup) {
+	if entry == nil || group == nil {
+		return
+	}
+	targetPairs := make(map[string]ddrd.MayUAFPair, len(group.Pairs))
+	for _, pair := range group.Pairs {
+		if pair.UAFPairID() == 0 {
+			continue
+		}
+		targetPairs[ddrd.RacePairKeyString(&pair)] = pair
+	}
+	filtered := make([]*ddrd.MayUAFPair, 0, len(targetPairs))
+	for _, pair := range entry.Pairs {
+		if pair == nil {
+			continue
+		}
+		key := ddrd.RacePairKeyString(pair)
+		if _, ok := targetPairs[key]; !ok {
+			continue
+		}
+		copyPair := *pair
+		filtered = append(filtered, &copyPair)
+		delete(targetPairs, key)
+	}
+	for _, pair := range targetPairs {
+		copyPair := pair
+		filtered = append(filtered, &copyPair)
+	}
+	if len(filtered) == 0 {
+		return
+	}
+	entry.Pairs = filtered
+	entry.PairBasicInfo = *filtered[0]
+	entry.Signals = ddrd.FromUAFPairs(entry.Pairs, ddrd.UAFSignalPrioHigh)
+	entry.Profile = fuzzer.UAFPairProfile{
+		FreeAccessName: filtered[0].FreeAccessName,
+		UseAccessName:  filtered[0].UseAccessName,
+		FreeCallStack:  filtered[0].FreeCallStack,
+		UseCallStack:   filtered[0].UseCallStack,
+	}
+}
+
+func validationPairKeys(entry *fuzzer.UAFCorpusEntry) []string {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.ValidatePairKeys) != 0 {
+		return dedupeStrings(entry.ValidatePairKeys)
+	}
+	if entry.ValidatePairKey == "" {
+		return nil
+	}
+	return []string{entry.ValidatePairKey}
+}
+
+func validationQueueKeys(entry *fuzzer.UAFCorpusEntry) []string {
+	if entry == nil {
+		return nil
+	}
+	if len(entry.ValidateQueueKeys) != 0 {
+		return dedupeStrings(entry.ValidateQueueKeys)
+	}
+	if entry.ValidateQueueKey == "" {
+		return nil
+	}
+	return []string{entry.ValidateQueueKey}
+}
+
+func dedupeStrings(values []string) []string {
+	if len(values) == 0 {
+		return nil
+	}
+	seen := make(map[string]struct{}, len(values))
+	result := make([]string, 0, len(values))
+	for _, value := range values {
+		if value == "" {
+			continue
+		}
+		if _, ok := seen[value]; ok {
+			continue
+		}
+		seen[value] = struct{}{}
+		result = append(result, value)
+	}
+	return result
+}
+
+func firstString(values []string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 func (mgr *Manager) bootstrapValidationQueueFromCorpus(stage *uafvalidate.StageManager) (int, error) {
@@ -653,7 +786,6 @@ func (pool *snapshotVMPool) createNewVMWithSnapshot(ctx context.Context, index i
 			ExecutorAdapter: uafvalidate.NewExecutorAdapter(execInst, pool.cfg),
 			pool:            pool,
 			index:           index,
-			vmInst:          vmInst,
 		}, nil
 	}
 
@@ -677,7 +809,6 @@ func (pool *snapshotVMPool) createNewVMWithSnapshot(ctx context.Context, index i
 		ExecutorAdapter: uafvalidate.NewExecutorAdapter(execInst, pool.cfg),
 		pool:            pool,
 		index:           index,
-		vmInst:          vmInst,
 	}, nil
 }
 
@@ -735,7 +866,6 @@ func (pool *snapshotVMPool) restoreFromSnapshot(ctx context.Context, index int, 
 		ExecutorAdapter: uafvalidate.NewExecutorAdapter(execInst, pool.cfg),
 		pool:            pool,
 		index:           index,
-		vmInst:          vmInst,
 	}, nil
 }
 
@@ -826,7 +956,6 @@ type snapshotExecutorAdapter struct {
 	*uafvalidate.ExecutorAdapter
 	pool   *snapshotVMPool
 	index  int
-	vmInst *vm.Instance
 	closed bool
 }
 

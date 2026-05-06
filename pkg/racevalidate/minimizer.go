@@ -15,12 +15,12 @@ import (
 
 // HistoryMinimizer attempts to find the minimum subset of replay history
 // records required to reproduce a race condition.
+type HistoryMinimizerRunner func(ctx context.Context, entry *fuzzer.UAFCorpusEntry) (*ExecutionResult, error)
+
 type HistoryMinimizer struct {
-	executor   Executor
+	runAttempt HistoryMinimizerRunner
 	cfg        Config
 	entry      *fuzzer.UAFCorpusEntry
-	targetPair *ddrd.MayUAFPair
-	delays     []int64
 
 	// Statistics
 	totalAttempts   int
@@ -50,13 +50,11 @@ type MinimizationResult struct {
 }
 
 // NewHistoryMinimizer creates a new minimizer.
-func NewHistoryMinimizer(executor Executor, cfg Config, entry *fuzzer.UAFCorpusEntry, targetPair *ddrd.MayUAFPair, delays []int64) *HistoryMinimizer {
+func NewHistoryMinimizer(runAttempt HistoryMinimizerRunner, cfg Config, entry *fuzzer.UAFCorpusEntry) *HistoryMinimizer {
 	return &HistoryMinimizer{
-		executor:   executor,
+		runAttempt: runAttempt,
 		cfg:        cfg,
 		entry:      entry,
-		targetPair: targetPair,
-		delays:     delays,
 	}
 }
 
@@ -220,6 +218,11 @@ func (m *HistoryMinimizer) hybridMinimize(ctx context.Context) ([]*fuzzer.Barrie
 // canTrigger tests if the race can be triggered with the given history subset.
 // It makes multiple attempts to account for race non-determinism.
 func (m *HistoryMinimizer) canTrigger(ctx context.Context, history []*fuzzer.BarrierExecutionRecord) bool {
+	if m.runAttempt == nil {
+		log.Logf(0, "minimize: no attempt runner configured")
+		return false
+	}
+
 	for attempt := 0; attempt < m.cfg.MinimizationMaxAttempts; attempt++ {
 		select {
 		case <-ctx.Done():
@@ -232,16 +235,8 @@ func (m *HistoryMinimizer) canTrigger(ctx context.Context, history []*fuzzer.Bar
 		// Create a modified entry with the subset of history
 		testEntry := m.cloneEntryWithHistory(history)
 
-		req := &ExecutionRequest{
-			Entry:         testEntry,
-			Delays:        m.delays,
-			TargetPair:    m.targetPair,
-			RepeatTimes:   1,
-			StopOnSuccess: true,
-		}
-
 		execCtx, cancel := context.WithTimeout(ctx, m.cfg.ExecutionTimeout)
-		result, err := m.executor.Run(execCtx, req)
+		result, err := m.runAttempt(execCtx, testEntry)
 		cancel()
 
 		if err != nil {

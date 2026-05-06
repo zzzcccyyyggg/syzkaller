@@ -24,6 +24,19 @@ type QueuedUAFCorpusEntry struct {
 	HistoryCount   int
 }
 
+// QueuedUAFCorpusGroup groups queue items that share the same heavy corpus record.
+// Pair-level status remains in race-pair-index.db, but validate can materialize the
+// shared corpus record once and test all queued pairs from that state together.
+type QueuedUAFCorpusGroup struct {
+	CorpusRecordID string
+	QueueKeys      []string
+	PairKeys       []string
+	Pairs          []ddrd.MayUAFPair
+	HistoryCount   int
+	FirstSeq       uint64
+	Items          []*QueuedUAFCorpusEntry
+}
+
 // UAFValidateQueueStore is a small append-only queue used to hand validation
 // work from the fuzzer process to the validate process without rescanning the
 // full uaf-corpus.db file on every poll.
@@ -208,11 +221,12 @@ func (store *UAFValidateQueueStore) EnqueueRecord(record *RacePairRecord) (strin
 		if existingRec, exists := store.db.Records[key]; exists {
 			if len(existingRec.Val) != 0 {
 				var existing storedValidateQueueItem
-				if err := json.Unmarshal(existingRec.Val, &existing); err == nil &&
-					existing.HistoryCount >= item.HistoryCount {
-					seq = existingRec.Seq
-					enqueued = false
-					return nil
+				if err := json.Unmarshal(existingRec.Val, &existing); err == nil {
+					if existing.HistoryCount <= item.HistoryCount {
+						seq = existingRec.Seq
+						enqueued = false
+						return nil
+					}
 				}
 			}
 		}
@@ -308,6 +322,71 @@ func (store *UAFValidateQueueStore) EntriesSince(sinceSeq uint64) ([]*QueuedUAFC
 		})
 	}
 	return items, maxSeq, nil
+}
+
+func (store *UAFValidateQueueStore) EntriesSinceGroupedByCorpus(sinceSeq uint64) ([]*QueuedUAFCorpusGroup, uint64, error) {
+	items, maxSeq, err := store.EntriesSince(sinceSeq)
+	if err != nil {
+		return nil, maxSeq, err
+	}
+	if len(items) == 0 {
+		return nil, maxSeq, nil
+	}
+
+	groupsByCorpus := make(map[string]*QueuedUAFCorpusGroup)
+	order := make([]string, 0, len(items))
+	for _, item := range items {
+		corpusID := ""
+		if item != nil {
+			corpusID = item.CorpusRecordID
+		}
+		if corpusID == "" {
+			var key string
+			var seq uint64
+			if item != nil {
+				key = item.Key
+				seq = item.Seq
+			}
+			corpusID = fmt.Sprintf("__malformed__:%s:%d", key, seq)
+		}
+		group, ok := groupsByCorpus[corpusID]
+		if !ok {
+			group = &QueuedUAFCorpusGroup{
+				CorpusRecordID: corpusID,
+			}
+			if item != nil {
+				group.FirstSeq = item.Seq
+				group.HistoryCount = item.HistoryCount
+			}
+			groupsByCorpus[corpusID] = group
+			order = append(order, corpusID)
+		}
+		if item == nil {
+			continue
+		}
+		group.Items = append(group.Items, item)
+		group.QueueKeys = append(group.QueueKeys, item.Key)
+		group.PairKeys = append(group.PairKeys, item.PairKey)
+		if item.Pair.UAFPairID() != 0 {
+			group.Pairs = append(group.Pairs, item.Pair)
+		}
+		if item.HistoryCount > group.HistoryCount {
+			group.HistoryCount = item.HistoryCount
+		}
+		if group.FirstSeq == 0 || item.Seq < group.FirstSeq {
+			group.FirstSeq = item.Seq
+		}
+	}
+
+	groups := make([]*QueuedUAFCorpusGroup, 0, len(order))
+	for _, corpusID := range order {
+		group := groupsByCorpus[corpusID]
+		if group == nil {
+			continue
+		}
+		groups = append(groups, group)
+	}
+	return groups, maxSeq, nil
 }
 
 func (store *UAFValidateQueueStore) Ack(key string) error {

@@ -108,17 +108,17 @@ func TestRacePairIndexStoreReloadPreventsStateRegression(t *testing.T) {
 		FreeCallStack:  0x70,
 		UseCallStack:   0x80,
 	}
-	shortHistory := []*fuzzer.BarrierExecutionRecord{
-		{Timestamp: time.Unix(0, 10), GroupID: 1},
-	}
 	longHistory := []*fuzzer.BarrierExecutionRecord{
 		{Timestamp: time.Unix(0, 10), GroupID: 1},
 		{Timestamp: time.Unix(0, 11), GroupID: 2},
 	}
+	shortHistory := []*fuzzer.BarrierExecutionRecord{
+		{Timestamp: time.Unix(0, 10), GroupID: 1},
+	}
 	entry := &fuzzer.UAFCorpusEntry{
 		PairBasicInfo: *pair,
 		Pairs:         []*ddrd.MayUAFPair{pair},
-		ReplayHistory: shortHistory,
+		ReplayHistory: longHistory,
 		Timestamp:     time.Unix(0, 1),
 	}
 
@@ -156,27 +156,27 @@ func TestRacePairIndexStoreReloadPreventsStateRegression(t *testing.T) {
 		t.Fatalf("MarkProcessed failed: %v", err)
 	}
 
-	richerEntry := &fuzzer.UAFCorpusEntry{
+	cheaperEntry := &fuzzer.UAFCorpusEntry{
 		PairBasicInfo: *pair,
 		Pairs:         []*ddrd.MayUAFPair{pair},
-		ReplayHistory: longHistory,
+		ReplayHistory: shortHistory,
 		Timestamp:     time.Unix(0, 2),
 	}
-	reopened, err := fuzzStore.ObserveEntry(richerEntry, "corpus-b")
+	reopened, err := fuzzStore.ObserveEntry(cheaperEntry, "corpus-b")
 	if err != nil {
-		t.Fatalf("ObserveEntry with richer history failed: %v", err)
+		t.Fatalf("ObserveEntry with cheaper history failed: %v", err)
 	}
 	if len(reopened) != 1 {
-		t.Fatalf("ObserveEntry with richer history returned %d records, want 1", len(reopened))
+		t.Fatalf("ObserveEntry with cheaper history returned %d records, want 1", len(reopened))
 	}
 	if reopened[0].Status != RacePairDiscovered {
-		t.Fatalf("processed pair should reopen on richer history: got %q want %q", reopened[0].Status, RacePairDiscovered)
+		t.Fatalf("processed pair should reopen on cheaper history: got %q want %q", reopened[0].Status, RacePairDiscovered)
 	}
 	if reopened[0].PreferredCorpusRecordID != "corpus-b" {
 		t.Fatalf("preferred corpus mismatch: got %q want %q", reopened[0].PreferredCorpusRecordID, "corpus-b")
 	}
-	if reopened[0].PreferredHistoryRecords != len(longHistory) {
-		t.Fatalf("preferred history mismatch: got %d want %d", reopened[0].PreferredHistoryRecords, len(longHistory))
+	if reopened[0].PreferredHistoryRecords != len(shortHistory) {
+		t.Fatalf("preferred history mismatch: got %d want %d", reopened[0].PreferredHistoryRecords, len(shortHistory))
 	}
 	if !fuzzStore.ShouldQueue(reopened[0]) {
 		t.Fatalf("reopened pair should be queueable")
@@ -243,14 +243,6 @@ func TestRacePairIndexStoreConcurrentWritersPreservePreferredRecord(t *testing.T
 		FreeCallStack:  0x170,
 		UseCallStack:   0x180,
 	}
-	shortEntry := &fuzzer.UAFCorpusEntry{
-		PairBasicInfo: *pair,
-		Pairs:         []*ddrd.MayUAFPair{pair},
-		ReplayHistory: []*fuzzer.BarrierExecutionRecord{
-			{Timestamp: time.Unix(0, 10), GroupID: 1},
-		},
-		Timestamp: time.Unix(0, 1),
-	}
 	longEntry := &fuzzer.UAFCorpusEntry{
 		PairBasicInfo: *pair,
 		Pairs:         []*ddrd.MayUAFPair{pair},
@@ -258,10 +250,18 @@ func TestRacePairIndexStoreConcurrentWritersPreservePreferredRecord(t *testing.T
 			{Timestamp: time.Unix(0, 10), GroupID: 1},
 			{Timestamp: time.Unix(0, 11), GroupID: 2},
 		},
+		Timestamp: time.Unix(0, 1),
+	}
+	shortEntry := &fuzzer.UAFCorpusEntry{
+		PairBasicInfo: *pair,
+		Pairs:         []*ddrd.MayUAFPair{pair},
+		ReplayHistory: []*fuzzer.BarrierExecutionRecord{
+			{Timestamp: time.Unix(0, 10), GroupID: 1},
+		},
 		Timestamp: time.Unix(0, 2),
 	}
 
-	records, err := writerA.ObserveEntry(shortEntry, "corpus-a")
+	records, err := writerA.ObserveEntry(longEntry, "corpus-a")
 	if err != nil {
 		t.Fatalf("failed to seed pair index: %v", err)
 	}
@@ -283,8 +283,8 @@ func TestRacePairIndexStoreConcurrentWritersPreservePreferredRecord(t *testing.T
 				return
 			}
 			if i == 20 {
-				if _, err := writerA.ObserveEntry(longEntry, "corpus-b"); err != nil {
-					t.Errorf("writerA ObserveEntry(long) failed: %v", err)
+				if _, err := writerA.ObserveEntry(shortEntry, "corpus-b"); err != nil {
+					t.Errorf("writerA ObserveEntry(short) failed: %v", err)
 					return
 				}
 			}
@@ -329,8 +329,8 @@ func TestRacePairIndexStoreConcurrentWritersPreservePreferredRecord(t *testing.T
 	if record.PreferredCorpusRecordID != "corpus-b" {
 		t.Fatalf("preferred corpus mismatch: got %q want %q", record.PreferredCorpusRecordID, "corpus-b")
 	}
-	if record.PreferredHistoryRecords != len(longEntry.ReplayHistory) {
-		t.Fatalf("preferred history mismatch: got %d want %d", record.PreferredHistoryRecords, len(longEntry.ReplayHistory))
+	if record.PreferredHistoryRecords != len(shortEntry.ReplayHistory) {
+		t.Fatalf("preferred history mismatch: got %d want %d", record.PreferredHistoryRecords, len(shortEntry.ReplayHistory))
 	}
 	if len(record.CorpusRecordIDs) != 2 {
 		t.Fatalf("expected both corpus refs to persist, got %d", len(record.CorpusRecordIDs))

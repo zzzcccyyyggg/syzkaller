@@ -243,6 +243,7 @@ func (store *UAFCorpusStore) AddWithRefs(entries []*fuzzer.UAFCorpusEntry) ([]Ra
 func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	stored := storedUAFCorpusEntry{
 		CallIdx:        entry.CallIdx,
+		Pair:           entry.PairBasicInfo,
 		Barrier:        entry.Barrier,
 		Timestamp:      entry.Timestamp,
 		Source:         int(entry.Source),
@@ -254,6 +255,29 @@ func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	}
 	if len(entry.Programs) != 0 {
 		stored.Programs = serializeProgramGroup(entry.Programs)
+	}
+	if len(entry.Pairs) != 0 {
+		stored.Pairs = make([]ddrd.MayUAFPair, 0, len(entry.Pairs))
+		for _, pair := range entry.Pairs {
+			if pair == nil {
+				continue
+			}
+			stored.Pairs = append(stored.Pairs, *pair)
+		}
+		if len(stored.Pairs) != 0 {
+			stored.Pair = stored.Pairs[0]
+		}
+	}
+	if len(entry.Signals) != 0 {
+		stored.Signals = entry.SignalsSlice()
+	}
+	if !entry.Profile.IsZero() {
+		stored.Profile = &storedPairProfile{
+			FreeAccessName: entry.Profile.FreeAccessName,
+			UseAccessName:  entry.Profile.UseAccessName,
+			FreeCallStack:  entry.Profile.FreeCallStack,
+			UseCallStack:   entry.Profile.UseCallStack,
+		}
 	}
 	if !entry.ReplayPlan.IsZero() {
 		stored.ReplayPlan = &storedReplayPlan{
