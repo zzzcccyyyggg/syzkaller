@@ -524,6 +524,7 @@ if mode == "validate":
         uv["continuous_mode"] = True
         uv["streaming_load"] = True
         uv["continue_after_hb"] = True
+        uv.setdefault("max_batch_timeout_seconds", 600)
         exp["uaf_validate"] = uv
 with open(dst, "w") as f:
     json.dump(cfg, f, indent=4)

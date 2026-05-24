@@ -486,8 +486,9 @@ and boost the bandit scores for exploration.
 
 ## A/B Testing: Random Baseline Mode
 
-> **Note**: With M1'/M2 removed, `random_baseline_mode` now only affects Affinity Table recording
-> and a few minor code paths. The core selection is already random by default.
+> **Note**: With M1'/M2 removed, `random_baseline_mode` now acts as a baseline marker
+> and forces timing exploration off. The core selection is already random by default,
+> and affinity/object mechanisms stay enabled unless they are disabled explicitly.
 
 ### Configuration
 
@@ -505,8 +506,9 @@ and boost the bandit scores for exploration.
 |-----------|-------------|---------------------|
 | Corpus Selection | Random | Random (same) |
 | Partner Selection | Random | Random (same) |
-| Affinity Table | Learning from interactions | Disabled |
-| Object Linking | Enabled | Enabled (preserved) |
+| Timing Exploration | Configurable | Disabled |
+| Affinity Table | Learning from interactions | Enabled (same unless separately disabled) |
+| Object Linking | Configurable | Preserved unless separately disabled |
 
 ## Future Improvements
 

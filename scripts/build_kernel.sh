@@ -8,6 +8,7 @@
 # 示例:
 #   ./scripts/build_kernel.sh xfs btrfs           # shared 模式构建 xfs 和 btrfs
 #   ./scripts/build_kernel.sh --mode=isolated xfs  # isolated 模式构建 xfs
+#   ./scripts/build_kernel.sh --output-dir kernels/output-versions/20260522-snrange xfs
 #   ./scripts/build_kernel.sh                      # 构建所有模块
 #   ./scripts/build_kernel.sh --plain-only         # 仅构建 plain 内核
 #   ./scripts/build_kernel.sh --list               # 列出可用模块
@@ -18,7 +19,8 @@
 #   --mode=isolated 每个模块独立 out-of-tree build 目录
 #                   优点: 简单, 改内核后重编快  缺点: 首次编译慢, 耗磁盘
 #
-# 输出: kernels/output/<slug>/vmlinux, bzImage
+# 默认输出: kernels/output/<slug>/vmlinux, bzImage
+# 指定 --output-dir DIR 时: DIR/<slug>/vmlinux, bzImage
 # ============================================================================
 set -euo pipefail
 
@@ -35,6 +37,7 @@ WITH_KCSAN=false
 NO_CLEAN=false
 LIST_ONLY=false
 BUILD_MODE="shared"    # shared | isolated
+OUTPUT_DIR_OVERRIDE=""
 REQUESTED_MODULES=()
 
 # --------------- 参数解析 ---------------
@@ -50,12 +53,14 @@ usage() {
   --plain-only      仅构建无插桩的 plain 内核
   --with-kcsan      同时为每个模块构建 KCSAN 版本
   --no-clean        跳过首次 plain build 的 make clean
+  --output-dir DIR   将 vmlinux/bzImage 输出到 DIR/<module>/, 避免覆盖默认 kernels/output
   --list            列出可用模块
   --jobs, -j N      并行编译任务数 (默认: nproc)
   --arch NAME       内核 ARCH (默认: x86)
   -h, --help        帮助
 
-输出: kernels/output/<slug>/vmlinux, bzImage
+默认输出: kernels/output/<slug>/vmlinux, bzImage
+使用 --output-dir 时输出: DIR/<slug>/vmlinux, bzImage
 EOF
     echo ""
     echo "可用模块:"
@@ -70,6 +75,8 @@ while [[ $# -gt 0 ]]; do
         --plain-only)    PLAIN_ONLY=true; shift ;;
         --with-kcsan)    WITH_KCSAN=true; shift ;;
         --no-clean)      NO_CLEAN=true; shift ;;
+        --output-dir=*)  OUTPUT_DIR_OVERRIDE="${1#--output-dir=}"; shift ;;
+        --output-dir)    OUTPUT_DIR_OVERRIDE="$2"; shift 2 ;;
         --list)          LIST_ONLY=true; shift ;;
         --jobs|-j)       JOBS="$2"; shift 2 ;;
         --arch)          ARCH="$2"; BZIMAGE_REL="arch/$ARCH/boot/bzImage"; shift 2 ;;
@@ -86,6 +93,15 @@ fi
 
 [[ "$BUILD_MODE" == "shared" || "$BUILD_MODE" == "isolated" ]] \
     || die "无效的 --mode: $BUILD_MODE (可选: shared, isolated)"
+
+if [[ -n "$OUTPUT_DIR_OVERRIDE" ]]; then
+    if [[ "$OUTPUT_DIR_OVERRIDE" = /* ]]; then
+        KERNEL_OUTPUT_DIR="$OUTPUT_DIR_OVERRIDE"
+    else
+        KERNEL_OUTPUT_DIR="$PROJECT_HOME/$OUTPUT_DIR_OVERRIDE"
+    fi
+    mkdir -p "$KERNEL_OUTPUT_DIR"
+fi
 
 # --------------- 校验 ---------------
 [[ -d "$DDRD_KERNEL_SRC" ]] || die "内核源码不存在: $DDRD_KERNEL_SRC"

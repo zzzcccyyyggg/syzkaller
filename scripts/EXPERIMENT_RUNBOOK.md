@@ -325,7 +325,7 @@ sudo scripts/run_experiment.sh --separate-validate-slot validate floppy dsp
 | Full DDRD | (默认) | 所有功能开启 |
 | No Timing | `-no-timing` | 关闭 timing exploration |
 | No ObjLink | `-no-objlink` | 关闭 ObjectLinker V2 |
-| Random | `-random` | 纯随机基线 |
+| Random | `-random` | baseline 口径；关闭 timing exploration |
 
 **运行**: 每变体 × 每模块 12h fuzz, 3 次独立重复 (预算紧张时先做 2 次)。
 
@@ -771,7 +771,7 @@ sudo scripts/run_experiment.sh start --all
 | `barrier_mode` | experimental | true | 启用 barrier 同步执行 |
 | `enable_timing_exploration` | experimental | true | pair-guided 时序探索 |
 | `enable_object_linking` | experimental | true (null=true) | 资源感知对象链接 |
-| `random_baseline_mode` | experimental | false | 纯随机基线 |
+| `random_baseline_mode` | experimental | false | baseline 标记，并强制关闭 timing exploration |
 
 ### Validate 侧
 | 开关 | 位置 | 默认 | 作用 |
@@ -793,3 +793,141 @@ sudo scripts/run_experiment.sh start --all
 - 与已有 threshold sensitivity 数据一致
 - 3 变体 × 4 模块 × 3 重复 × 12h = 已经需要 432h fuzz 算力
 - 全部 8 模块会使敏感度实验算力翻倍, 但不增加统计说服力
+
+### 9.1 `static-no-objlink` 的执行口径
+
+`static-no-objlink` 不能只靠：
+
+```json
+"enable_object_linking": false
+```
+
+因为 `kccwf` 文件系统描述长期使用固定对象名（如 `testfile#` / `hardlink#` / `testdir`），
+单纯关闭 ObjectLinker 仍然可能让两个程序“偶然访问同一个文件”，把 no-object baseline 污染掉。
+
+当前仓库的可执行口径是：
+
+- `enable_object_linking=false`
+- `random_baseline_mode=false`
+- `enable_timing_exploration=true`
+- `no_object_kccwf_namespace=true`
+
+其中 `no_object_kccwf_namespace=true` 会在构造 barrier program group 时，
+对 partner program 的 `kccwf` 路径做 per-program 命名空间改写：
+
+- `/mnt/kccwf/testfile#` -> `/mnt/kccwf/testfile_ddrdpN`
+- `testfile#` -> `testfile_ddrdpN`
+- `/mnt/kccwf/hardlink#` -> `/mnt/kccwf/hardlink_ddrdpN`
+- `/mnt/kccwf/symlink#` -> `/mnt/kccwf/symlink_ddrdpN`
+- `/mnt/kccwf/testdir` -> `/mnt/kccwf/testdir_ddrdpN`
+
+这样能同时满足两点：
+
+- 同一个 program 内，对同一对象的多次引用仍然一致
+- 不同 program 之间不会因为固定对象池而继续共享同一文件对象
+
+静态实验脚本里对应的默认策略是：
+
+```bash
+STATIC_NOOBJ_POLICY=runtime-randobj
+```
+
+因此 `static-no-objlink` 现在可以直接作为正式 ablation 运行，不再需要手工放开保护开关。
+
+### 9.2 FS repaired corpus 的实验口径
+
+`kccwf` 文件系统 syscall 描述把本应较大的文件名/目录名对象空间压缩成少量固定字符串，
+导致 prepared corpus 中大量程序集中访问 `testfile#` / `testfile` / `testdir`。
+这会同时带来两个偏差：
+
+- no-object baseline 会因为固定对象池而“偶然共享对象”
+- ObjectLinker 缺少真实 FS fuzz 中应有的跨对象选择空间
+
+因此 `static-fsobj-tuned-*` 使用 `tools/syz-kccwf-fs-corpus-tune -mode=repair`
+对 prepared corpus 做统一预处理。该修复不是给 ObjectLinker 预埋答案，而是恢复
+原生 syzkaller 文件名生成本应具备的对象空间随机性：
+
+- 对 full / no-objlink 使用同一个 repaired corpus
+- 确定性地把旧 corpus 中坍缩的对象名分散到 `testfile1..9` 等合法 kccwf 对象
+- 保留同一 program 内对同一对象的多次引用一致性
+- 不使用运行时 coverage、UAF、DDRD 反馈来选择输入
+- 限额保留重复低语义形态，并补齐 fd-effect / path-effect / link-rename 等 FS 操作族
+
+因此论文中应把这部分表述为 **KCCWF corpus semantic repair / object-space de-biasing**，
+而不是额外的 oracle 或针对 full 变体的输入增强。
+
+---
+
+## 10. LLM-helper 模型对比实验口径
+
+后续 LLM-helper 模型对比统一参考 f2fs repaired-corpus 成功轮次的配置。
+更详细的 provider 命令和字段说明见 `docs/codex_llm_helper.md`。
+
+### 10.1 Fuzz 侧固定配置
+
+- 输入: repaired corpus，关闭内部 kccwf path randomization
+- 资源: `4 VM`
+- 时长: `10h`
+- 对照: random 与各 LLM 变体使用同一 fuzz 配置；random 只移除 `llm_input_seed_*`
+- 固定关闭:
+  - `enable_object_linking=false`
+  - `object_link_attempt_ratio=0`
+  - `enable_timing_exploration=false`
+  - `timing_exploration_ratio=0`
+  - `enable_coverage_triage=false`
+  - `enable_affinity_table=false`
+- 固定打开:
+  - `static_input_exploration=true`
+  - `static_input_skip_builtin_seeds=true`
+  - `random_baseline_mode=true`
+
+LLM producer 固定预算:
+
+- `entries_per_round=8`
+- `variants_per_entry=2`
+- `parallel_calls=4`
+- `max_calls=8`
+- `poll_sec=30`
+- `timeout_sec=600`
+
+模型矩阵:
+
+| 变体 | provider | model | thinking | reasoning |
+| ---- | -------- | ----- | -------- | --------- |
+| random | none | none | none | none |
+| DeepSeek V4 Pro | `deepseek` | `deepseek-v4-pro` | disabled | thinking 关闭时不发送 |
+| GPT-4 | `codex` | 实际 `codex exec` 可用的 GPT-4 model id | n/a | high |
+| Kimi 2.6 | `kimi` | `kimi-k2.6` | disabled | thinking 关闭时不发送 |
+
+如果某 provider 的 reasoning-effort 与 thinking 独立存在，则统一设为 `high`。
+如果 API 只允许 thinking enabled 时发送 reasoning-effort，则保持 thinking disabled，不发送该字段。
+
+### 10.2 Validate 侧固定配置
+
+- 资源: `8 VM`
+- 时长: `12h`
+- `target_match_mode=sn-fallback`
+- `sn_fallback_range=2`
+- `enable_replay=true`
+- `enable_varname_scheduling=true`
+- `priority_low_history=true`
+- `disable_collection_delay=true`
+- `disable_verify_delay=true`
+- `disable_access_delay=false`
+- `require_origin_match=false`
+- `origin_match_mode=varname`
+- `max_stable_pairs_per_origin=1`
+- `max_stable_pairs_per_entry=16`
+- `enable_history_minimization=false`
+- `verify_repeat_times=1`
+- `repeat_count=1`
+
+统计时同时报告:
+
+- processed entries
+- no-stable entries
+- handled / executed / skipped verify pairs
+- confirmed DATARACE crashes
+- unique DATARACE VarName pairs
+- strict-SN / SN-range / stack-only 成功分布
+- time-to-first confirmed race

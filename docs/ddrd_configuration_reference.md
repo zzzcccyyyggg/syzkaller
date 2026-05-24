@@ -276,11 +276,11 @@ PairCooldown 机制已被移除。此字段被忽略。
 | **默认值** | `false` |
 | **JSON key** | `"random_baseline_mode"` |
 
-A/B 测试模式：禁用剩余 race-guided 组件（如 Affinity Table 记录），使系统完全无引导。
+A/B 测试标记：强制关闭 timing exploration，便于按 baseline 口径运行。
 
-> **注意**：M1'/M2 已被移除，选择策略本身已固定为随机。此模式现在主要影响 Affinity Table 的数据记录。
+> **注意**：M1'/M2 已被移除，选择策略本身已固定为随机。此模式不再关闭 Affinity Table、Object Linking 或 Solo Filter；这些机制是否启用，取决于它们各自的配置开关。
 
-**禁用的组件**：
+**相关组件行为**：
 
 | 组件 | 正常模式 | Baseline 模式 |
 |------|---------|--------------|
@@ -289,12 +289,28 @@ A/B 测试模式：禁用剩余 race-guided 组件（如 Affinity Table 记录�
 | ~~M2 Bandit 选择~~ | ~~已移除~~ | ~~已移除~~ |
 | ~~M1' Partner 选择~~ | ~~已移除~~ | ~~已移除~~ |
 | ~~Pair Cooldown~~ | ~~已移除~~ | ~~已移除~~ |
-| Affinity Table | 学习交互信息 | 禁用（不创建） |
-| Object Linking | 启用 | **仍然启用** |
+| Affinity Table | 学习交互信息 | 保持启用，除非单独关闭 |
+| Object Linking | 由 `enable_object_linking` 控制 | 保持原配置 |
 | Solo Filter | 启用 | **仍然启用** |
-| Timing Exploration | 由 `enable_timing_exploration` 控制 | **不受影响** |
+| Timing Exploration | 由 `enable_timing_exploration` 控制 | **强制关闭** |
 
 **用途**：运行两组对比实验（Guided vs Random），比较 VarName pair 发现速度。
+
+### `object_link_attempt_ratio`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `float64` |
+| **默认值** | `1.0` |
+| **JSON key** | `"object_link_attempt_ratio"` |
+
+控制在 `enable_object_linking=true` 时，barrier partner 生成阶段有多大比例会实际尝试 ObjectLinker V2。
+
+- `1.0` 表示每次都尝试。
+- `0.1` 表示只有约 10% 的 partner 会做 object-link 扫描，其余直接复用原 partner 程序。
+- 取值范围是 `(0, 1]`；超出范围或未设置时按 `1.0` 处理。
+
+这个字段适合用于某些模块上 object-link 命中率很低、但扫描成本持续存在的场景。
 
 ---
 
