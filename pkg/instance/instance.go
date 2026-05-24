@@ -483,8 +483,9 @@ func ExecprogCmd(execprog, executor, OS, arch, vmType string, opts csource.Optio
 			opts.FaultCall, opts.FaultNth)
 	}
 	if ukcPair != nil {
-		optionalArg += fmt.Sprintf(" -ukc_use_name=%d -ukc_use_stack=%d -ukc_use_sn=%d -ukc_free_name=%d -ukc_free_stack=%d -ukc_free_sn=%d -ukc_use_access_delay_time=%d",
-			ukcPair.UseAccessName, ukcPair.UseCallStack, ukcPair.UseSN, ukcPair.FreeAccessName, ukcPair.FreeCallStack, ukcPair.FreeSN, ukcPair.TimeDiff)
+		optionalArg += fmt.Sprintf(" -ukc_use_name=%d -ukc_use_stack=%d -ukc_use_sn=%d -ukc_use_sn_min=%d -ukc_use_sn_max=%d -ukc_free_name=%d -ukc_free_stack=%d -ukc_free_sn=%d -ukc_free_sn_min=%d -ukc_free_sn_max=%d -ukc_use_access_delay_time=%d",
+			ukcPair.UseAccessName, ukcPair.UseCallStack, ukcPair.UseSN, ukcPair.UseSNMin, ukcPair.UseSNMax,
+			ukcPair.FreeAccessName, ukcPair.FreeCallStack, ukcPair.FreeSN, ukcPair.FreeSNMin, ukcPair.FreeSNMax, ukcPair.TimeDiff)
 	}
 	if optionalFlags {
 		optionalArg += " " + tool.OptionalFlags([]tool.Flag{

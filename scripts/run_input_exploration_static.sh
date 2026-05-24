@@ -8,26 +8,35 @@
 #   - 用单独脚本管理 start / stop / status / archive，避免主实验脚本继续膨胀
 #
 # 默认实验设计:
-#   - 模块: xfs btrfs f2fs ptmx floppy dsp
+#   - 模块: xfs btrfs f2fs jfs ptmx floppy dsp bt-stack
 #   - 变体:
-#       static-full
+#       static-clean-full
 #       static-no-timing
 #       static-no-objlink
 #       static-random
+#       static-fsobj-full
+#       static-fsobj-no-objlink
+#       static-fsobj-full-no-timing
+#       static-fsobj-no-objlink-no-timing
+#       static-fsobj-tuned-full
+#       static-fsobj-tuned-no-objlink
+#       static-fsobj-tuned-full-no-timing
+#       static-fsobj-tuned-no-objlink-no-timing
+#       static-fsobj-tuned-random-no-timing
 #   - 注意:
-#       static-no-objlink 对文件系统模块存在额外设计约束。当前 kccwf syscall
-#       描述本身使用固定对象池（testfile#/testdir/hardlink# 等），即使关闭
-#       ObjectLinker，也会给 no-object baseline 带来“偶然落到同一对象”的偏置。
-#       因此脚本默认阻止直接启动 static-no-objlink，直到我们明确指定对象空间
-#       策略（runtime-randobj / sysdesc-randobj / allow-fixed-kccwf）。
+#       新实验默认关闭 coverage triage / affinity table dead feedback。
+#       static-fsobj-* 会隔离 kccwf partner object 名字，避免固定 corpus
+#       对象名让 no-object baseline 继续撞到同一个文件对象。
 #   - 静态 normal threshold: 10000us
 #   - widened threshold: 20000us
-#   - 物理资源: 每模块 2 cores
+#   - 物理资源: 每模块 4 cores
 #   - 支持多模块并行，且同一模块的不同 variant 可并行
-#   - VM 配置: 2 VMs, each 2 vCPU, 4GB, procs=2
+#   - VM 配置: 4 VMs, each 2 vCPU, 4GB, procs=2
 #
 # 用法:
 #   ./scripts/run_input_exploration_static.sh prepare [--sudo]
+#   ./scripts/run_input_exploration_static.sh prepare-effective <module...> [--sudo]
+#   ./scripts/run_input_exploration_static.sh prepare-prepared <module...> [--sudo]
 #   ./scripts/run_input_exploration_static.sh start [variant] <module...> [--sudo] [--noobj-policy <mode>]
 #   ./scripts/run_input_exploration_static.sh stop [variant] [module...] [--sudo]
 #   ./scripts/run_input_exploration_static.sh status [--sudo]
@@ -47,25 +56,25 @@ ACTION="${1:-help}"
 [[ $# -gt 0 ]] && shift || true
 
 CORPUS_SRC="${CORPUS_SRC:-/home/zzzccc/BASS/DDRD-Corpus}"
-STATIC_MODULES=(xfs btrfs f2fs ptmx floppy dsp)
-STATIC_VARIANTS=(static-full static-no-timing static-no-objlink static-random)
+STATIC_MODULES=(xfs btrfs f2fs jfs ptmx floppy dsp bt-stack)
+STATIC_VARIANTS=(static-clean-full static-no-timing static-no-objlink static-random static-full static-full-no-dead-feedback static-fsobj-full static-fsobj-no-objlink static-fsobj-full-no-timing static-fsobj-no-objlink-no-timing static-fsobj-tuned-full static-fsobj-tuned-no-objlink static-fsobj-tuned-full-no-timing static-fsobj-tuned-no-objlink-no-timing static-fsobj-tuned-random-no-timing)
 
 STATIC_THRESHOLD_US="${STATIC_THRESHOLD_US:-10000}"
 STATIC_WIDENED_THRESHOLD_US="${STATIC_WIDENED_THRESHOLD_US:-20000}"
 STATIC_SYSTEM_RESERVED_CORES="${STATIC_SYSTEM_RESERVED_CORES:-8}"
-STATIC_CORES_PER_MODULE="${STATIC_CORES_PER_MODULE:-2}"
-STATIC_FUZZ_VM_COUNT="${STATIC_FUZZ_VM_COUNT:-2}"
+STATIC_CORES_PER_MODULE="${STATIC_CORES_PER_MODULE:-4}"
+STATIC_FUZZ_VM_COUNT="${STATIC_FUZZ_VM_COUNT:-4}"
 STATIC_VM_CPU="${STATIC_VM_CPU:-2}"
 STATIC_VM_MEM="${STATIC_VM_MEM:-4096}"
 STATIC_PROCS="${STATIC_PROCS:-2}"
 STATIC_RESULTS_DIRNAME="${STATIC_RESULTS_DIRNAME:-input-exploration-static}"
 STATIC_NAMESPACE="${STATIC_NAMESPACE:-paper-static-input}"
 STATIC_HTTP_BASE="${STATIC_HTTP_BASE:-63000}"
-# block-fixed-kccwf: refuse to run static-no-objlink until the bias is addressed
-# runtime-randobj: planned preferred mode; runtime path randomization in fuzzer
+# block-fixed-kccwf: refuse to run static-no-objlink
+# runtime-randobj: preferred mode; runtime path randomization in fuzzer
 # sysdesc-randobj: alternative mode; separate syzlang/syscall-description build
 # allow-fixed-kccwf: debugging only, not for paper numbers
-STATIC_NOOBJ_POLICY="${STATIC_NOOBJ_POLICY:-block-fixed-kccwf}"
+STATIC_NOOBJ_POLICY="${STATIC_NOOBJ_POLICY:-runtime-randobj}"
 
 RUNNER_PREFIX=()
 POSITIONAL_ARGS=()
@@ -79,10 +88,21 @@ join_by_space() {
 
 normalize_variant() {
     case "${1:-static-full}" in
+        clean|clean-full|static-clean-full) echo "static-clean-full" ;;
         full|static-full) echo "static-full" ;;
+        full-no-dead-feedback|no-dead-feedback|static-full-no-dead-feedback) echo "static-full-no-dead-feedback" ;;
         no-timing|static-no-timing) echo "static-no-timing" ;;
         no-objlink|static-no-objlink) echo "static-no-objlink" ;;
         random|static-random) echo "static-random" ;;
+        fsobj|fsobj-full|static-fsobj-full) echo "static-fsobj-full" ;;
+        fsobj-no-objlink|no-fsobj|static-fsobj-no-objlink) echo "static-fsobj-no-objlink" ;;
+        fsobj-no-timing|fsobj-full-no-timing|static-fsobj-full-no-timing) echo "static-fsobj-full-no-timing" ;;
+        fsobj-no-objlink-no-timing|no-fsobj-no-timing|static-fsobj-no-objlink-no-timing) echo "static-fsobj-no-objlink-no-timing" ;;
+        fsobj-tuned-full|fsobj-tuned-timing|static-fsobj-tuned-full) echo "static-fsobj-tuned-full" ;;
+        fsobj-tuned-no-objlink-timing|static-fsobj-tuned-no-objlink) echo "static-fsobj-tuned-no-objlink" ;;
+        fsobj-tuned|fsobj-tuned-full-no-timing|static-fsobj-tuned-full-no-timing) echo "static-fsobj-tuned-full-no-timing" ;;
+        fsobj-tuned-no-objlink|fsobj-tuned-no-objlink-no-timing|static-fsobj-tuned-no-objlink-no-timing) echo "static-fsobj-tuned-no-objlink-no-timing" ;;
+        fsobj-tuned-random|fsobj-tuned-random-no-timing|static-fsobj-tuned-random-no-timing) echo "static-fsobj-tuned-random-no-timing" ;;
         *)
             die "未知变体: $1 (可选: $(join_by_space "${STATIC_VARIANTS[@]}"))"
             ;;
@@ -164,12 +184,12 @@ generate_static_variant_cfg() {
 
     [[ -f "$src" ]] || die "缺少基础配置: $src，请先执行 prepare"
 
-    python3 - "$src" "$dst" "$variant" "$slug" "$(static_workdir_root)" "$STATIC_THRESHOLD_US" "$STATIC_WIDENED_THRESHOLD_US" "$http_port" <<'PYEOF'
+    python3 - "$src" "$dst" "$variant" "$slug" "$(static_workdir_root)" "$STATIC_THRESHOLD_US" "$STATIC_WIDENED_THRESHOLD_US" "$http_port" "$STATIC_NOOBJ_POLICY" <<'PYEOF'
 import json
 import os
 import sys
 
-src, dst, variant, slug, workdir_root, threshold_us, widened_us, http_port = sys.argv[1:9]
+src, dst, variant, slug, workdir_root, threshold_us, widened_us, http_port, noobj_policy = sys.argv[1:10]
 threshold_us = int(threshold_us)
 widened_us = int(widened_us)
 http_port = int(http_port)
@@ -194,16 +214,75 @@ exp["uaf_mode"] = True
 exp["random_baseline_mode"] = False
 exp["enable_timing_exploration"] = True
 exp["enable_object_linking"] = True
+exp["object_link_attempt_ratio"] = 1.0
+exp["static_input_exploration"] = True
+exp["static_input_seed"] = 1592594996
+exp["static_input_skip_builtin_seeds"] = True
+exp["no_object_kccwf_namespace"] = False
+exp["isolate_kccwf_partner_objects"] = False
+exp["enable_coverage_triage"] = False
+exp["enable_affinity_table"] = False
 
-if variant == "static-no-timing":
+if variant == "static-clean-full":
+    exp["object_link_attempt_ratio"] = 0.1
+elif variant == "static-full":
+    # Historical compatibility variant. Prefer static-clean-full for new runs.
+    exp["object_link_attempt_ratio"] = 0.1
+    exp["enable_coverage_triage"] = True
+    exp["enable_affinity_table"] = True
+elif variant == "static-full-no-dead-feedback":
+    # Backward-compatible alias for the clean-full mechanism audit.
+    exp["object_link_attempt_ratio"] = 0.1
+elif variant == "static-no-timing":
     exp["enable_timing_exploration"] = False
+    exp["object_link_attempt_ratio"] = 0.1
 elif variant == "static-no-objlink":
     exp["enable_object_linking"] = False
+    if noobj_policy == "runtime-randobj":
+        exp["no_object_kccwf_namespace"] = True
 elif variant == "static-random":
     exp["random_baseline_mode"] = True
     exp["enable_timing_exploration"] = False
     exp["enable_object_linking"] = False
-elif variant != "static-full":
+    exp["no_object_kccwf_namespace"] = True
+elif variant == "static-fsobj-full":
+    exp["object_link_attempt_ratio"] = 0.1
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-no-objlink":
+    exp["enable_object_linking"] = False
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-full-no-timing":
+    exp["enable_timing_exploration"] = False
+    exp["object_link_attempt_ratio"] = 0.1
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-no-objlink-no-timing":
+    exp["enable_timing_exploration"] = False
+    exp["enable_object_linking"] = False
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-tuned-full":
+    exp["object_link_attempt_ratio"] = 0.1
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-tuned-no-objlink":
+    exp["enable_object_linking"] = False
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-tuned-full-no-timing":
+    exp["enable_timing_exploration"] = False
+    exp["object_link_attempt_ratio"] = 0.1
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-tuned-no-objlink-no-timing":
+    exp["enable_timing_exploration"] = False
+    exp["enable_object_linking"] = False
+    exp["isolate_kccwf_partner_objects"] = True
+elif variant == "static-fsobj-tuned-random-no-timing":
+    exp["random_baseline_mode"] = True
+    exp["enable_timing_exploration"] = False
+    exp["enable_object_linking"] = False
+    exp["isolate_kccwf_partner_objects"] = True
+    # Keep the same repaired corpus but perturb the frozen-pool sampling stream.
+    # This makes the variant a random/no-object replicate rather than a duplicate
+    # of static-fsobj-tuned-no-objlink-no-timing.
+    exp["static_input_seed"] = 1592594997
+else:
     raise SystemExit(f"unknown static variant: {variant}")
 
 with open(dst, "w") as f:
@@ -248,27 +327,54 @@ generate_static_variant_set() {
 }
 
 sync_static_corpus() {
-    local slug=$1
-    local variant=$2
-    local base_corpus="$EXP_DIR/$slug/workdir/corpus.db"
-    local workdir
-    workdir="$(static_workdir_root)/$slug/$variant/workdir"
-    mkdir -p "$workdir"
+	local slug=$1
+	local variant=$2
+	local tuned_corpus="$EXP_DIR/$slug/workdir/tuned-prepared-corpus.db"
+	local prepared_corpus="$EXP_DIR/$slug/workdir/prepared-corpus.db"
+	local effective_corpus="$EXP_DIR/$slug/workdir/effective-corpus.db"
+	local base_corpus="$EXP_DIR/$slug/workdir/corpus.db"
+	local workdir
+	workdir="$(static_workdir_root)/$slug/$variant/workdir"
+	if [[ "$variant" == static-fsobj-tuned-* ]]; then
+		[[ -f "$tuned_corpus" ]] || die "[$slug/$variant] 缺少 tuned corpus: $tuned_corpus，请先生成"
+		base_corpus="$tuned_corpus"
+		log_info "[$slug/$variant] 使用 tuned prepared corpus: $tuned_corpus"
+	elif [[ -f "$prepared_corpus" ]]; then
+		base_corpus="$prepared_corpus"
+		log_info "[$slug/$variant] 使用共享 prepared corpus: $prepared_corpus"
+	elif [[ -f "$effective_corpus" ]]; then
+		base_corpus="$effective_corpus"
+		log_info "[$slug/$variant] 使用共享有效 corpus: $effective_corpus"
+	else
+		log_warn "[$slug/$variant] 未找到共享有效 corpus，回退到基础 corpus: $base_corpus"
+    fi
     [[ -f "$base_corpus" ]] || die "缺少基础 corpus: $base_corpus，请先执行 prepare"
+    if [[ -d "$workdir" ]]; then
+        find "$workdir" -mindepth 1 -maxdepth 1 -exec rm -rf -- {} +
+    else
+        mkdir -p "$workdir"
+    fi
     cp "$base_corpus" "$workdir/corpus.db"
+    go run "$PROJECT_HOME/tools/syz-kccwf-corpus-fix" -os=linux -arch=amd64 -db="$workdir/corpus.db"
 }
 
 assert_variant_policy() {
     local variant
     variant=$(normalize_variant "$1")
-    [[ "$variant" == "static-no-objlink" ]] || return 0
+    case "$variant" in
+        static-no-objlink|static-fsobj-no-objlink|static-fsobj-no-objlink-no-timing|static-fsobj-tuned-no-objlink|static-fsobj-tuned-no-objlink-no-timing)
+            ;;
+        *)
+            return 0
+            ;;
+    esac
 
     case "$STATIC_NOOBJ_POLICY" in
         runtime-randobj|sysdesc-randobj|allow-fixed-kccwf)
             return 0
             ;;
         block-fixed-kccwf|planned-randobj|"")
-            die "static-no-objlink 默认禁止直接启动：当前 kccwf 固定对象池会给 no-object baseline 引入额外同对象偏置。请先选定策略：STATIC_NOOBJ_POLICY=runtime-randobj（推荐，后续代码实现）或 STATIC_NOOBJ_POLICY=sysdesc-randobj（单独构建 profile）；仅调试时才用 STATIC_NOOBJ_POLICY=allow-fixed-kccwf。"
+            die "static-no-objlink 当前被策略禁止。请设置 STATIC_NOOBJ_POLICY=runtime-randobj（推荐）或 STATIC_NOOBJ_POLICY=sysdesc-randobj；仅调试时才用 STATIC_NOOBJ_POLICY=allow-fixed-kccwf。"
             ;;
         *)
             die "未知 STATIC_NOOBJ_POLICY: $STATIC_NOOBJ_POLICY (可选: runtime-randobj, sysdesc-randobj, allow-fixed-kccwf, block-fixed-kccwf)"
@@ -378,7 +484,7 @@ start_one_variant() {
     slice=$(next_core_slice)
     [[ "$slice" != "unbound" ]] && START_RESERVED_SLICES+=("$slice")
 
-    local q_mgr q_cfg q_log q_slice cmd pid
+    local q_mgr q_cfg q_log q_slice cmd pid pid_output
     printf -v q_mgr '%q' "$SYZ_MANAGER"
     printf -v q_cfg '%q' "$cfg"
     printf -v q_log '%q' "$log_file"
@@ -393,11 +499,15 @@ start_one_variant() {
     fi
 
     if [[ ${#RUNNER_PREFIX[@]} -gt 0 ]]; then
-        pid=$("${RUNNER_PREFIX[@]}" bash -lc "$cmd")
+        pid_output=$("${RUNNER_PREFIX[@]}" setsid -f bash -lc "$cmd")
     else
-        pid=$(bash -lc "$cmd")
+        pid_output=$(setsid -f bash -lc "$cmd")
     fi
-    pid=$(xargs <<<"$pid")
+    pid=$(xargs <<<"$pid_output")
+    if [[ -z "$pid" ]]; then
+        sleep 1
+        pid=$(get_variant_pid "$slug" "$variant")
+    fi
 
     sleep 2
     if [[ -z "$pid" ]] || ! pid_is_alive "$pid"; then
@@ -451,11 +561,125 @@ do_prepare() {
     log_ok "静态阈值对比实验准备完成"
 }
 
+prepare_effective_one() {
+    local slug=$1
+    local src="$EXP_DIR/$slug/fuzz.cfg"
+    local cfg="$EXP_DIR/$slug/exp-fuzz-static-prefilter.cfg"
+    local base_workdir="$EXP_DIR/$slug/workdir"
+    local workdir="$EXP_DIR/$slug/static-prefilter-workdir"
+    local log_dir="$EXP_DIR/$slug/logs"
+    local log_file="$log_dir/static-corpus-prefilter-$(date +%Y%m%d-%H%M%S).log"
+    [[ -f "$src" ]] || die "缺少基础配置: $src，请先执行 prepare"
+    [[ -f "$base_workdir/corpus.db" ]] || die "缺少基础 corpus: $base_workdir/corpus.db，请先执行 prepare"
+    mkdir -p "$log_dir"
+    rm -rf "$workdir"
+    mkdir -p "$workdir"
+    cp "$base_workdir/corpus.db" "$workdir/corpus.db"
+    go run "$PROJECT_HOME/tools/syz-kccwf-corpus-fix" -os=linux -arch=amd64 -db="$workdir/corpus.db"
+
+    python3 - "$src" "$cfg" "$workdir" <<'PYEOF'
+import json
+import sys
+
+src, dst, workdir = sys.argv[1:4]
+with open(src) as f:
+    cfg = json.load(f)
+cfg["workdir"] = workdir
+exp = cfg.setdefault("experimental", {})
+exp["uaf_mode"] = False
+exp["static_input_exploration"] = False
+exp["static_input_skip_builtin_seeds"] = True
+exp["enable_timing_exploration"] = False
+exp["enable_object_linking"] = False
+exp["enable_coverage_triage"] = False
+exp["enable_affinity_table"] = False
+with open(dst, "w") as f:
+    json.dump(cfg, f, indent=4)
+PYEOF
+
+    log_info "[$slug] 生成共享有效 corpus: $workdir/effective-corpus.db"
+    local cmd=("$SYZ_MANAGER" -mode=static-corpus-prefilter -config "$cfg")
+    if [[ ${#RUNNER_PREFIX[@]} -gt 0 ]]; then
+        "${RUNNER_PREFIX[@]}" "${cmd[@]}" > "$log_file" 2>&1
+    else
+        "${cmd[@]}" > "$log_file" 2>&1
+    fi
+    [[ -f "$workdir/effective-corpus.db" ]] || die "[$slug] 未生成 effective-corpus.db，日志: $log_file"
+    cp "$workdir/effective-corpus.db" "$base_workdir/effective-corpus.db"
+    log_ok "[$slug] 有效 corpus 已生成 → $base_workdir/effective-corpus.db"
+}
+
+do_prepare_effective() {
+	[[ $# -gt 0 ]] || die "缺少模块名"
+	show_profile
+	local slug
+	for slug in "$@"; do
+		prepare_effective_one "$(normalize_module "$slug")"
+	done
+}
+
+prepare_prepared_one() {
+	local slug=$1
+	local src="$EXP_DIR/$slug/fuzz.cfg"
+	local cfg="$EXP_DIR/$slug/exp-fuzz-static-prepare.cfg"
+	local base_workdir="$EXP_DIR/$slug/workdir"
+	local workdir="$EXP_DIR/$slug/static-prepare-workdir"
+	local log_dir="$EXP_DIR/$slug/logs"
+	local log_file="$log_dir/static-corpus-prepare-$(date +%Y%m%d-%H%M%S).log"
+	[[ -f "$src" ]] || die "缺少基础配置: $src，请先执行 prepare"
+	[[ -f "$base_workdir/corpus.db" ]] || die "缺少基础 corpus: $base_workdir/corpus.db，请先执行 prepare"
+	mkdir -p "$log_dir"
+	rm -rf "$workdir"
+	mkdir -p "$workdir"
+	cp "$base_workdir/corpus.db" "$workdir/corpus.db"
+	go run "$PROJECT_HOME/tools/syz-kccwf-corpus-fix" -os=linux -arch=amd64 -db="$workdir/corpus.db"
+
+	python3 - "$src" "$cfg" "$workdir" <<'PYEOF'
+import json
+import sys
+
+src, dst, workdir = sys.argv[1:4]
+with open(src) as f:
+    cfg = json.load(f)
+cfg["workdir"] = workdir
+exp = cfg.setdefault("experimental", {})
+exp["uaf_mode"] = True
+exp["static_input_exploration"] = False
+exp["static_input_skip_builtin_seeds"] = True
+exp["enable_timing_exploration"] = False
+exp["enable_object_linking"] = False
+exp["enable_coverage_triage"] = False
+exp["enable_affinity_table"] = False
+with open(dst, "w") as f:
+    json.dump(cfg, f, indent=4)
+PYEOF
+
+	log_info "[$slug] 生成共享 prepared corpus: $workdir/prepared-corpus.db"
+	local cmd=("$SYZ_MANAGER" -mode=static-corpus-prepare -config "$cfg")
+	if [[ ${#RUNNER_PREFIX[@]} -gt 0 ]]; then
+		"${RUNNER_PREFIX[@]}" "${cmd[@]}" > "$log_file" 2>&1
+	else
+		"${cmd[@]}" > "$log_file" 2>&1
+	fi
+	[[ -f "$workdir/prepared-corpus.db" ]] || die "[$slug] 未生成 prepared-corpus.db，日志: $log_file"
+	cp "$workdir/prepared-corpus.db" "$base_workdir/prepared-corpus.db"
+	log_ok "[$slug] prepared corpus 已生成 → $base_workdir/prepared-corpus.db"
+}
+
+do_prepare_prepared() {
+	[[ $# -gt 0 ]] || die "缺少模块名"
+	show_profile
+	local slug
+	for slug in "$@"; do
+		prepare_prepared_one "$(normalize_module "$slug")"
+	done
+}
+
 do_start() {
     local variant="static-full"
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            full|static-full|no-timing|static-no-timing|no-objlink|static-no-objlink|random|static-random)
+            clean|clean-full|static-clean-full|full|static-full|full-no-dead-feedback|no-dead-feedback|static-full-no-dead-feedback|no-timing|static-no-timing|no-objlink|static-no-objlink|random|static-random|fsobj|fsobj-full|static-fsobj-full|fsobj-no-objlink|no-fsobj|static-fsobj-no-objlink|fsobj-no-timing|fsobj-full-no-timing|static-fsobj-full-no-timing|fsobj-no-objlink-no-timing|no-fsobj-no-timing|static-fsobj-no-objlink-no-timing|fsobj-tuned-full|fsobj-tuned-timing|static-fsobj-tuned-full|fsobj-tuned-no-objlink-timing|static-fsobj-tuned-no-objlink|fsobj-tuned|fsobj-tuned-full-no-timing|static-fsobj-tuned-full-no-timing|fsobj-tuned-no-objlink|fsobj-tuned-no-objlink-no-timing|static-fsobj-tuned-no-objlink-no-timing|fsobj-tuned-random|fsobj-tuned-random-no-timing|static-fsobj-tuned-random-no-timing)
                 variant=$(normalize_variant "$1")
                 shift
                 ;;
@@ -480,7 +704,7 @@ do_stop() {
     local variant=""
     if [[ $# -gt 0 ]]; then
         case "$1" in
-            full|static-full|no-timing|static-no-timing|no-objlink|static-no-objlink|random|static-random)
+            clean|clean-full|static-clean-full|full|static-full|full-no-dead-feedback|no-dead-feedback|static-full-no-dead-feedback|no-timing|static-no-timing|no-objlink|static-no-objlink|random|static-random|fsobj|fsobj-full|static-fsobj-full|fsobj-no-objlink|no-fsobj|static-fsobj-no-objlink|fsobj-no-timing|fsobj-full-no-timing|static-fsobj-full-no-timing|fsobj-no-objlink-no-timing|no-fsobj-no-timing|static-fsobj-no-objlink-no-timing|fsobj-tuned-full|fsobj-tuned-timing|static-fsobj-tuned-full|fsobj-tuned-no-objlink-timing|static-fsobj-tuned-no-objlink|fsobj-tuned|fsobj-tuned-full-no-timing|static-fsobj-tuned-full-no-timing|fsobj-tuned-no-objlink|fsobj-tuned-no-objlink-no-timing|static-fsobj-tuned-no-objlink-no-timing|fsobj-tuned-random|fsobj-tuned-random-no-timing|static-fsobj-tuned-random-no-timing)
                 variant=$(normalize_variant "$1")
                 shift
                 ;;
@@ -609,7 +833,7 @@ data = {
     "noobj_policy": None,
 }
 
-if variant == "static-no-objlink":
+if variant in ("static-no-objlink", "static-fsobj-no-objlink", "static-fsobj-no-objlink-no-timing", "static-fsobj-tuned-no-objlink", "static-fsobj-tuned-no-objlink-no-timing"):
     data["noobj_policy"] = noobj_policy
 
 with open(out_path, "w") as f:
@@ -674,6 +898,12 @@ case "$ACTION" in
     prepare)
         do_prepare
         ;;
+	prepare-effective)
+		do_prepare_effective "$@"
+		;;
+	prepare-prepared)
+		do_prepare_prepared "$@"
+		;;
     start)
         do_start "$@"
         ;;
@@ -693,6 +923,6 @@ case "$ACTION" in
         do_help
         ;;
     *)
-        die "未知命令: $ACTION (prepare|start|stop|status|archive|list|help)"
+        die "未知命令: $ACTION (prepare|prepare-effective|prepare-prepared|start|stop|status|archive|list|help)"
         ;;
 esac

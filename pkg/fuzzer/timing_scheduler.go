@@ -5,10 +5,10 @@
 //
 // The TimingScheduler coordinates two queues:
 // 1. Pair Discovery Queue: Random pairing, normal threshold, discovers NEW VarName pairs
-// 2. Timing Exploration Queue: Widened threshold, delay mutation, deduplicates by (VarName+Stack) quadruple
+// 2. Timing Exploration Queue: Widened threshold, temporal resampling, deduplicates by (VarName+Stack) quadruple
 //
 // Flow:
-// Pair Discovery finds new VarName pairs → enqueue to Timing Exploration → apply delays → try to trigger race
+// Pair Discovery finds new VarName pairs → enqueue to Timing Exploration → resample timing → try to trigger race
 
 package fuzzer
 
@@ -17,6 +17,7 @@ import (
 	"sync"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -26,11 +27,12 @@ import (
 
 // TimingExplorationJob represents a job for timing exploration.
 type TimingExplorationJob struct {
-	// The program pair to execute (with syz_delay mutations applied)
+	// The program pair to execute. Some strategies mutate these with syz_delay;
+	// start_delay keeps them unchanged and only shifts barrier participant launch.
 	Prog1 *prog.Prog
 	Prog2 *prog.Prog
 
-	// The original programs before delay mutation (for saving to corpus)
+	// The original programs before timing mutation (for saving to corpus)
 	OriginalProg1 *prog.Prog
 	OriginalProg2 *prog.Prog
 
@@ -43,11 +45,22 @@ type TimingExplorationJob struct {
 	// The delay plan applied
 	DelayPlan DelayPlan
 
+	// StartDelays shifts barrier participant launch times without changing the
+	// program. Non-empty means this is a Phase 2 validation/resampling job.
+	StartDelays []int64
+
 	// Number of attempts so far
 	AttemptNumber int
 
 	// CandidatePairs holds pairs discovered in Phase 1, to be validated in Phase 2
 	CandidatePairs []*ddrd.MayUAFPair
+
+	// ObjectLink records whether the original discovery came from an ObjLinker-aligned barrier.
+	ObjectLink queue.ObjectLinkProvenance
+
+	// LowPriority marks validation jobs that should not starve fresh discovery.
+	LowPriority    bool
+	PriorityReason string
 }
 
 // TimingExplorationResult represents the result of a timing exploration job.
@@ -97,13 +110,18 @@ type TimingScheduler struct {
 
 // TimingSchedulerStats tracks timing exploration statistics.
 type TimingSchedulerStats struct {
-	TotalJobsGenerated      int
-	TotalJobsCompleted      int
-	TotalNewVarNamePairs    int // NEW VarName pairs discovered
-	TotalNewStackQuads      int // New (VarName+Stack) quadruples
-	TotalRacesTriggered     int // Actual races triggered
-	TimingExplorationHits   int // Timing exploration that found new stacks
-	TimingExplorationMisses int
+	TotalJobsGenerated        int
+	TotalJobsCompleted        int
+	TotalNewVarNamePairs      int // NEW VarName pairs discovered
+	TotalNewStackQuads        int // New (VarName+Stack) quadruples
+	TotalRacesTriggered       int // Actual races triggered
+	TimingExplorationHits     int // Timing exploration that found new stacks
+	TimingExplorationMisses   int
+	ObjectLinkedJobsGenerated int
+	NonObjectJobsGenerated    int
+	ObjectLinkedJobsCompleted int
+	NonObjectJobsCompleted    int
+	LowPriorityValidationJobs int
 }
 
 // NewTimingScheduler creates a new timing scheduler.
@@ -156,6 +174,14 @@ func (ts *TimingScheduler) OnNewVarNamePairDiscovered(
 	prog1, prog2 *prog.Prog,
 	pair *ddrd.MayUAFPair,
 ) {
+	ts.OnNewVarNamePairDiscoveredWithProvenance(prog1, prog2, pair, queue.ObjectLinkProvenance{})
+}
+
+func (ts *TimingScheduler) OnNewVarNamePairDiscoveredWithProvenance(
+	prog1, prog2 *prog.Prog,
+	pair *ddrd.MayUAFPair,
+	objectLink queue.ObjectLinkProvenance,
+) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
@@ -165,7 +191,7 @@ func (ts *TimingScheduler) OnNewVarNamePairDiscovered(
 	}
 
 	// Enqueue for timing exploration
-	ts.explorationQueue.EnqueueHighQualityPair(prog1, prog2, pair)
+	ts.explorationQueue.EnqueueHighQualityPairWithProvenance(prog1, prog2, pair, objectLink)
 	ts.stats.TotalNewVarNamePairs++
 }
 
@@ -220,10 +246,24 @@ func (ts *TimingScheduler) GetNextJob() *TimingExplorationJob {
 	}
 
 	// Priority 2: Phase 1 discovery jobs
-	return ts.createDiscoveryJob()
+	if job := ts.createDiscoveryJob(); job != nil {
+		return job
+	}
+
+	// Priority 3: low-priority validation jobs. These can still be useful, but
+	// they should not block fresh discovery work.
+	for {
+		validationJob := ts.explorationQueue.DequeueLowPriorityValidationJob()
+		if validationJob == nil {
+			return nil
+		}
+		if job := ts.createValidationJob(validationJob); job != nil {
+			return job
+		}
+	}
 }
 
-// createValidationJob creates a Phase 2 validation job with delays.
+// createValidationJob creates a Phase 2 validation job.
 // NOTE: Phase 2 (validation) does NOT check ShouldAttemptTiming because
 // Phase 1 already discovered valuable candidates. We want to validate
 // them regardless of the target pair's attempt count.
@@ -237,16 +277,22 @@ func (ts *TimingScheduler) createValidationJob(vj *ValidationJob) *TimingExplora
 	// Phase 2 validation: DO NOT check ShouldAttemptTiming
 	// Phase 1 already found candidates, we must validate them
 
-	// Generate delay plan for validation
-	delayPlan := ts.mutator.GenerateDelayPlan(targetPair, nil, ts.rnd)
-
-	// Apply delay plan to programs (insert syz_delay calls)
-	mutatedProg1, mutatedProg2 := ts.mutator.ApplyDelayPlan(
-		vj.Prog1, vj.Prog2, delayPlan,
-	)
+	mutatedProg1 := vj.Prog1.Clone()
+	mutatedProg2 := vj.Prog2.Clone()
+	var delayPlan DelayPlan
+	var startDelays []int64
+	if isStartDelayTimingStrategy(ts.config.TimingMutationStrategy) {
+		startDelays = ts.generateStartDelayPlan(targetPair)
+	} else {
+		// Generate delay plan for validation and apply it to the programs.
+		delayPlan = ts.mutator.GenerateDelayPlan(targetPair, nil, ts.rnd)
+		mutatedProg1, mutatedProg2 = ts.mutator.ApplyDelayPlan(
+			vj.Prog1, vj.Prog2, delayPlan,
+		)
+	}
 
 	attemptNum := ts.pairRegistry.GetTimingAttemptCount(targetPair)
-	ts.stats.TotalJobsGenerated++
+	ts.recordJobGenerated(vj.ObjectLink, vj.LowPriority)
 
 	return &TimingExplorationJob{
 		Prog1:          mutatedProg1,
@@ -256,9 +302,77 @@ func (ts *TimingScheduler) createValidationJob(vj *ValidationJob) *TimingExplora
 		TargetPair:     targetPair,
 		VarNamePairID:  varNamePairID(targetPair.FreeAccessName, targetPair.UseAccessName),
 		DelayPlan:      delayPlan, // Phase 2 has delays
+		StartDelays:    startDelays,
 		AttemptNumber:  attemptNum + 1,
 		CandidatePairs: vj.CandidatePairs, // Pass candidate pairs from Phase 1
+		ObjectLink:     vj.ObjectLink,
+		LowPriority:    vj.LowPriority,
+		PriorityReason: vj.PriorityReason,
 	}
+}
+
+const maxTimingStartDelayMicros int64 = 20000
+
+func (ts *TimingScheduler) generateStartDelayPlan(pair *ddrd.MayUAFPair) []int64 {
+	delays := []int64{0, 0}
+	if pair == nil {
+		return delays
+	}
+
+	// In MayUAFPair for race pairs, Use* is the earlier access and Free* is
+	// the later access. Shift the earlier participant to sample a closer
+	// interleaving without mutating either syscall program.
+	delayIdx := int(pair.UseProgIdx)
+	if delayIdx < 0 || delayIdx >= len(delays) {
+		delayIdx = ts.rnd.Intn(len(delays))
+	}
+
+	// Keep a small amount of natural resampling in the validation lane.
+	if ts.rnd.Float64() < 0.15 {
+		return delays
+	}
+
+	maxDelay := ts.startDelayMaxMicros()
+	base := int64(pair.TimeDiff) / 1000
+	if base < ts.config.DelayMinMicros {
+		base = ts.config.DelayMinMicros
+	}
+	delay := int64(float64(base) * (0.5 + ts.rnd.Float64()))
+	if delay < ts.config.DelayMinMicros {
+		delay = ts.config.DelayMinMicros
+	}
+	if delay > maxDelay {
+		delay = maxDelay
+	}
+
+	// Rarely perturb the opposite participant. This gives the resampler a small
+	// escape hatch when syscall-level timing does not follow launch ordering.
+	if ts.rnd.Float64() < 0.10 {
+		delayIdx = 1 - delayIdx
+		delay = ts.config.DelayMinMicros + ts.rnd.Int63n(maxDelay-ts.config.DelayMinMicros+1)
+	}
+	delays[delayIdx] = delay
+	return delays
+}
+
+func (ts *TimingScheduler) startDelayMaxMicros() int64 {
+	maxDelay := ts.config.DelayMaxMicros
+	if maxDelay <= 0 {
+		maxDelay = maxTimingStartDelayMicros
+	}
+	if ts.config.WidenedThresholdMicros > 0 {
+		wideCap := ts.config.WidenedThresholdMicros / 4
+		if wideCap > 0 && wideCap < maxDelay {
+			maxDelay = wideCap
+		}
+	}
+	if maxDelay > maxTimingStartDelayMicros {
+		maxDelay = maxTimingStartDelayMicros
+	}
+	if maxDelay < ts.config.DelayMinMicros {
+		maxDelay = ts.config.DelayMinMicros
+	}
+	return maxDelay
 }
 
 // createDiscoveryJob creates a Phase 1 discovery job (no delays, widened threshold).
@@ -289,7 +403,7 @@ func (ts *TimingScheduler) createDiscoveryJob() *TimingExplorationJob {
 	}
 
 	attemptNum := ts.pairRegistry.GetTimingAttemptCount(targetPair)
-	ts.stats.TotalJobsGenerated++
+	ts.recordJobGenerated(hqPair.ObjectLink, false)
 
 	// Phase 1: NO delays - just widened threshold to discover candidates
 	return &TimingExplorationJob{
@@ -301,6 +415,19 @@ func (ts *TimingScheduler) createDiscoveryJob() *TimingExplorationJob {
 		VarNamePairID: hqPair.VarNamePairID,
 		DelayPlan:     nil, // Phase 1: no delays
 		AttemptNumber: attemptNum + 1,
+		ObjectLink:    hqPair.ObjectLink,
+	}
+}
+
+func (ts *TimingScheduler) recordJobGenerated(objectLink queue.ObjectLinkProvenance, lowPriority bool) {
+	ts.stats.TotalJobsGenerated++
+	if objectLink.Linked() {
+		ts.stats.ObjectLinkedJobsGenerated++
+	} else {
+		ts.stats.NonObjectJobsGenerated++
+	}
+	if lowPriority {
+		ts.stats.LowPriorityValidationJobs++
 	}
 }
 
@@ -325,6 +452,11 @@ func (ts *TimingScheduler) OnJobCompleted(result *TimingExplorationResult) {
 	} else {
 		ts.stats.TimingExplorationMisses++
 	}
+	if job.ObjectLink.Linked() {
+		ts.stats.ObjectLinkedJobsCompleted++
+	} else {
+		ts.stats.NonObjectJobsCompleted++
+	}
 }
 
 // EnqueueForValidation enqueues a program pair for Phase 2 validation.
@@ -335,6 +467,17 @@ func (ts *TimingScheduler) EnqueueForValidation(
 	targetPair *ddrd.MayUAFPair,
 	candidatePairs []*ddrd.MayUAFPair,
 ) {
+	ts.EnqueueForValidationWithProvenance(prog1, prog2, targetPair, candidatePairs, queue.ObjectLinkProvenance{}, false, "")
+}
+
+func (ts *TimingScheduler) EnqueueForValidationWithProvenance(
+	prog1, prog2 *prog.Prog,
+	targetPair *ddrd.MayUAFPair,
+	candidatePairs []*ddrd.MayUAFPair,
+	objectLink queue.ObjectLinkProvenance,
+	lowPriority bool,
+	reason string,
+) {
 	ts.mu.Lock()
 	defer ts.mu.Unlock()
 
@@ -342,8 +485,7 @@ func (ts *TimingScheduler) EnqueueForValidation(
 		return
 	}
 
-	// Enqueue as high priority for validation
-	ts.explorationQueue.EnqueueForValidation(prog1, prog2, targetPair, candidatePairs)
+	ts.explorationQueue.EnqueueForValidationWithProvenance(prog1, prog2, targetPair, candidatePairs, objectLink, lowPriority, reason)
 }
 
 // ============================================================================
@@ -388,6 +530,10 @@ func (ts *TimingScheduler) GetQueueStats() (enqueued, explored, pairsFound, curr
 // GetPendingJobCounts returns the current queue depths for discovery and validation.
 func (ts *TimingScheduler) GetPendingJobCounts() (exploration, validation int) {
 	return ts.explorationQueue.PendingCounts()
+}
+
+func (ts *TimingScheduler) GetLowPriorityPendingJobCount() int {
+	return ts.explorationQueue.LowPriorityValidationPending()
 }
 
 // ============================================================================

@@ -5,149 +5,84 @@ package fuzzer
 
 import "strings"
 
-// ============================================================================
-// Object Family & Cross-Syscall Compatibility Table
-// ============================================================================
-// This file defines the object family concept and the compatibility table
-// used by ObjectLinker V2 for resource-aware cross-syscall alignment.
-//
-// An "object family" groups syscalls that operate on the same kind of kernel
-// object (e.g., a mounted test file, a UNIX socket path, a Bluetooth address).
-// Within a family, different syscalls can be aligned: the object identifier
-// (path, address) from the main program is copied to compatible positions
-// in the partner program, even when the syscall names differ.
-//
-// Example: open$kccwf("/mnt/kccwf/testfile#0") and stat$kccwf("/mnt/kccwf/testfile#3")
-// belong to the same family "kccwf_file". The path from open$kccwf in prog1
-// can be used to rewrite stat$kccwf in prog2, making both programs access
-// the same file object.
-// ============================================================================
-
-// objectFamily identifies which kernel object family a syscall belongs to.
-// Syscalls in the same family can have their object identifiers cross-aligned.
 type objectFamily string
 
 const (
 	familyNone objectFamily = ""
 
-	// kccwf file-system families (btrfs, xfs, f2fs, jfs, ...)
-	familyKccwfFile    objectFamily = "kccwf_file"     // /mnt/kccwf/testfile# (absolute path, arg[0])
-	familyKccwfFileRel objectFamily = "kccwf_file_rel" // testfile# (relative path via dirfd, arg[1])
-	familyKccwfDir     objectFamily = "kccwf_dir"      // /mnt/kccwf/testdir, /mnt/kccwf
+	familyKccwfFile    objectFamily = "kccwf_file"
+	familyKccwfFileRel objectFamily = "kccwf_file_rel"
+	familyKccwfDir     objectFamily = "kccwf_dir"
 
-	// Bluetooth address families
-	familyBtSco    objectFamily = "bt_sco"    // sockaddr_sco.addr
-	familyBtL2cap  objectFamily = "bt_l2cap"  // sockaddr_l2
-	familyBtRfcomm objectFamily = "bt_rfcomm" // sockaddr_rc
+	familyBtSco    objectFamily = "bt_sco"
+	familyBtL2cap  objectFamily = "bt_l2cap"
+	familyBtRfcomm objectFamily = "bt_rfcomm"
+	familyUnixSock objectFamily = "unix_sock"
 
-	// UNIX socket path family
-	familyUnixSock objectFamily = "unix_sock" // sockaddr_un path
-
-	// Device families
-	familyFloppy objectFamily = "floppy" // /dev/fd#
+	familyDspPCM0  objectFamily = "dsp_pcm0"
+	familyDspPCM1  objectFamily = "dsp_pcm1"
+	familyDspMixer objectFamily = "dsp_mixer"
 )
 
-// objectFamilyInfo describes how to extract the object identifier from a syscall.
 type objectFamilyInfo struct {
 	Family   objectFamily
-	ArgIndex int // which argument holds the object identifier (0-based)
+	ArgIndex int
 }
 
-// syscallFamilyTable maps full syscall names to their object family info.
-// Only syscalls whose object identifier can be directly rewritten are listed.
-// FD-dependent syscalls (openat$kccwf with dirfd, fstat$kccwf, etc.) are
-// intentionally excluded — they inherit alignment through their fd chain.
 var syscallFamilyTable = buildSyscallFamilyTable()
 
 func buildSyscallFamilyTable() map[string]objectFamilyInfo {
 	table := make(map[string]objectFamilyInfo)
 
-	// --- kccwf file family: path is arg[0] ---
 	for _, name := range []string{
 		"open$kccwf",
 		"chmod$kccwf",
 		"chown$kccwf",
 		"truncate$kccwf",
-		"unlink$kccwf",
 		"setxattr$kccwf",
 		"stat$kccwf",
 		"utimes$kccwf",
-		"rename$kccwf", // arg[0] = old path (testfile#)
-		"link$kccwf",   // arg[0] = source path (testfile#)
 	} {
 		table[name] = objectFamilyInfo{Family: familyKccwfFile, ArgIndex: 0}
 	}
-
-	// --- kccwf directory family: path is arg[0] ---
-	for _, name := range []string{
-		"open$kccwf_dir",
-		"mkdir$kccwf",
-		"rmdir$kccwf",
-	} {
-		table[name] = objectFamilyInfo{Family: familyKccwfDir, ArgIndex: 0}
-	}
-
-	// --- kccwf relative-path family: filename at arg[1], dirfd at arg[0] ---
-	// These use relative paths ("testfile#") with a dirfd context.
-	// They can cross-align with each other but NOT with the absolute-path family.
 	for _, name := range []string{
 		"openat$kccwf",
 		"faccessat$kccwf",
 		"fchmodat$kccwf",
 		"fchownat$kccwf",
 		"fstatat$kccwf",
-		"unlinkat$kccwf",
 	} {
 		table[name] = objectFamilyInfo{Family: familyKccwfFileRel, ArgIndex: 1}
 	}
 
-	// --- Bluetooth SCO: address struct is arg[1] (arg[0] is fd) ---
-	for _, name := range []string{
-		"bind$bt_sco",
-		"connect$bt_sco",
-	} {
+	for _, name := range []string{"bind$bt_sco", "connect$bt_sco"} {
 		table[name] = objectFamilyInfo{Family: familyBtSco, ArgIndex: 1}
 	}
-
-	// --- Bluetooth L2CAP: address struct is arg[1] ---
-	for _, name := range []string{
-		"bind$bt_l2cap",
-		"connect$bt_l2cap",
-	} {
+	for _, name := range []string{"bind$bt_l2cap", "connect$bt_l2cap"} {
 		table[name] = objectFamilyInfo{Family: familyBtL2cap, ArgIndex: 1}
 	}
-
-	// --- Bluetooth RFCOMM: address struct is arg[1] ---
-	for _, name := range []string{
-		"bind$bt_rfcomm",
-		"connect$bt_rfcomm",
-	} {
+	for _, name := range []string{"bind$bt_rfcomm", "connect$bt_rfcomm"} {
 		table[name] = objectFamilyInfo{Family: familyBtRfcomm, ArgIndex: 1}
 	}
-
-	// --- UNIX socket: address struct is arg[1] ---
-	for _, name := range []string{
-		"bind$unix",
-		"connect$unix",
-	} {
+	for _, name := range []string{"bind$unix", "connect$unix"} {
 		table[name] = objectFamilyInfo{Family: familyUnixSock, ArgIndex: 1}
 	}
 
-	// --- Floppy device: device path is arg[0] ---
-	table["syz_open_dev$floppy"] = objectFamilyInfo{Family: familyFloppy, ArgIndex: 0}
+	table["openat$dsp"] = objectFamilyInfo{Family: familyDspPCM0, ArgIndex: 1}
+	table["openat$audio"] = objectFamilyInfo{Family: familyDspPCM0, ArgIndex: 1}
+	table["openat$dsp1"] = objectFamilyInfo{Family: familyDspPCM1, ArgIndex: 1}
+	table["openat$adsp1"] = objectFamilyInfo{Family: familyDspPCM1, ArgIndex: 1}
+	table["openat$audio1"] = objectFamilyInfo{Family: familyDspPCM1, ArgIndex: 1}
+	table["openat$mixer"] = objectFamilyInfo{Family: familyDspMixer, ArgIndex: 1}
 
 	return table
 }
 
-// getSyscallFamily returns the object family for a given syscall name.
-// Returns familyNone if the syscall is not in the compatibility table.
 func getSyscallFamily(syscallName string) (objectFamilyInfo, bool) {
 	info, ok := syscallFamilyTable[syscallName]
 	return info, ok
 }
 
-// isCompatibleSyscall checks if two syscalls belong to the same object family,
-// meaning their object identifiers can be cross-aligned.
 func isCompatibleSyscall(name1, name2 string) bool {
 	info1, ok1 := syscallFamilyTable[name1]
 	info2, ok2 := syscallFamilyTable[name2]
@@ -157,12 +92,11 @@ func isCompatibleSyscall(name1, name2 string) bool {
 	return info1.Family == info2.Family
 }
 
-// isUnsafeAlignment checks if rewriting the object identifier at argIndex
-// in the given syscall is potentially unsafe. This catches cases where
-// the object identity depends on additional context (dirfd, parent fd).
+// isUnsafeAlignment reports syscalls whose object identity depends on context
+// beyond a directly rewritable identifier. The semantic FS adapter handles a
+// small kccwf openat/statat subset separately; this guard remains for tests and
+// for avoiding accidental fallback linking in future adapters.
 func isUnsafeAlignment(syscallName string) bool {
-	// These syscalls have a dirfd parameter that determines the actual path.
-	// Rewriting just the filename without matching the dirfd is misleading.
 	baseName := syscallName
 	if idx := strings.Index(syscallName, "$"); idx > 0 {
 		baseName = syscallName[:idx]
@@ -184,9 +118,6 @@ func isUnsafeAlignment(syscallName string) bool {
 	return unsafe[baseName]
 }
 
-// unsafePathPrefixes lists path prefixes that should not be cross-aligned
-// between programs. These paths are per-process, per-thread, or refer to
-// debug/security interfaces that are semantically context-dependent.
 var unsafePathPrefixes = []string{
 	"/proc/self/",
 	"/proc/thread-self/",
@@ -195,8 +126,6 @@ var unsafePathPrefixes = []string{
 	"/dev/pts/",
 }
 
-// isUnsafePathForAlignment checks whether a path contains a prefix that
-// makes cross-program alignment dangerous or meaningless.
 func isUnsafePathForAlignment(data []byte) bool {
 	s := trimNullBytesRaw(data)
 	for _, prefix := range unsafePathPrefixes {
@@ -207,7 +136,6 @@ func isUnsafePathForAlignment(data []byte) bool {
 	return false
 }
 
-// trimNullBytesRaw trims trailing null bytes, returning a byte slice.
 func trimNullBytesRaw(data []byte) []byte {
 	for i := len(data) - 1; i >= 0; i-- {
 		if data[i] != 0 {

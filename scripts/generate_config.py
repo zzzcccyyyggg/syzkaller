@@ -134,6 +134,7 @@ VALIDATE_EXPERIMENTAL = {
         "max_concurrent": 6,
         "delay_retry_budget": 1,
         "timeout_seconds": 120,
+        "max_batch_timeout_seconds": 600,
         "repeat_count": 1,
         "disable_async_split": True,
         "enable_vm_snapshot": True,
@@ -148,7 +149,10 @@ VALIDATE_EXPERIMENTAL = {
         "enable_replay": True,
         "enable_varname_scheduling": True,
         "priority_low_history": True,
+        "target_match_mode": "sn-fallback",
+        "sn_fallback_range": 2,
         "disable_verify_delay": True,
+        "disable_access_delay": False,
         "disable_collection_delay": True,
         "require_origin_match": False,
         "replay_collect_pairs": False,
@@ -348,7 +352,7 @@ ABLATION_VARIANTS = {
         },
     },
     "fuzz-random": {
-        "description": "Pure random baseline (no race-guided strategies)",
+        "description": "Baseline run with timing exploration disabled",
         "mode": "fuzz",
         "suffix": "-random",
         "overrides": {
@@ -357,6 +361,26 @@ ABLATION_VARIANTS = {
         },
     },
     # --- Validate-side ablations ---
+    "validate-site-only": {
+        "description": "Use site-only target matching without SN/TID constraints",
+        "mode": "validate",
+        "suffix": "-site-only",
+        "overrides": {
+            "uaf_validate": {
+                "target_match_mode": "site-only",
+            },
+        },
+    },
+    "validate-strict-sn": {
+        "description": "Require strict SN/TID target matching without site-only fallback",
+        "mode": "validate",
+        "suffix": "-strict-sn",
+        "overrides": {
+            "uaf_validate": {
+                "target_match_mode": "strict-sn",
+            },
+        },
+    },
     "validate-no-delay": {
         "description": "Disable directed delay scheduling",
         "mode": "validate",
@@ -364,6 +388,7 @@ ABLATION_VARIANTS = {
         "overrides": {
             "uaf_validate": {
                 "disable_verify_delay": True,
+                "disable_access_delay": True,
             },
         },
     },

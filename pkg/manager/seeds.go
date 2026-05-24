@@ -141,6 +141,9 @@ func readInputs(cfg *mgrconfig.Config, db *db.DB, output chan *input) error {
 			Data: rec.Val,
 		}
 	}
+	if cfg.Experimental.StaticInputSkipBuiltinSeeds {
+		return nil
+	}
 	seedPath := filepath.Join("sys", cfg.TargetOS, "test")
 	seedDir := filepath.Join(cfg.Syzkaller, seedPath)
 	if osutil.IsExist(seedDir) {

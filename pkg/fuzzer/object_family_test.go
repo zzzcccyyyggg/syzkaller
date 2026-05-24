@@ -21,24 +21,21 @@ func TestSyscallFamilyTable(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, familyKccwfFile, info.Family)
 
-	// rename$kccwf and link$kccwf should be in kccwf_file family
-	info, ok = getSyscallFamily("rename$kccwf")
-	assert.True(t, ok)
-	assert.Equal(t, familyKccwfFile, info.Family)
-	assert.Equal(t, 0, info.ArgIndex)
+	// Destructive path operations are fuzzed normally but are not ObjectLinker targets.
+	_, ok = getSyscallFamily("rename$kccwf")
+	assert.False(t, ok)
 
-	info, ok = getSyscallFamily("link$kccwf")
-	assert.True(t, ok)
-	assert.Equal(t, familyKccwfFile, info.Family)
+	_, ok = getSyscallFamily("link$kccwf")
+	assert.False(t, ok)
 
-	// kccwf dir family
-	info, ok = getSyscallFamily("mkdir$kccwf")
-	assert.True(t, ok)
-	assert.Equal(t, familyKccwfDir, info.Family)
+	_, ok = getSyscallFamily("unlink$kccwf")
+	assert.False(t, ok)
 
-	info, ok = getSyscallFamily("open$kccwf_dir")
-	assert.True(t, ok)
-	assert.Equal(t, familyKccwfDir, info.Family)
+	_, ok = getSyscallFamily("mkdir$kccwf")
+	assert.False(t, ok)
+
+	_, ok = getSyscallFamily("open$kccwf_dir")
+	assert.False(t, ok)
 
 	// kccwf relative-path family (dirfd-dependent)
 	info, ok = getSyscallFamily("openat$kccwf")
@@ -54,9 +51,8 @@ func TestSyscallFamilyTable(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, familyKccwfFileRel, info.Family)
 
-	info, ok = getSyscallFamily("unlinkat$kccwf")
-	assert.True(t, ok)
-	assert.Equal(t, familyKccwfFileRel, info.Family)
+	_, ok = getSyscallFamily("unlinkat$kccwf")
+	assert.False(t, ok)
 
 	// bluetooth
 	info, ok = getSyscallFamily("bind$bt_sco")
@@ -77,11 +73,29 @@ func TestSyscallFamilyTable(t *testing.T) {
 	assert.True(t, ok)
 	assert.Equal(t, familyUnixSock, info.Family)
 
-	// floppy device
-	info, ok = getSyscallFamily("syz_open_dev$floppy")
+	// dsp device families
+	info, ok = getSyscallFamily("openat$dsp")
 	assert.True(t, ok)
-	assert.Equal(t, familyFloppy, info.Family)
-	assert.Equal(t, 0, info.ArgIndex)
+	assert.Equal(t, familyDspPCM0, info.Family)
+	assert.Equal(t, 1, info.ArgIndex)
+
+	info, ok = getSyscallFamily("openat$audio")
+	assert.True(t, ok)
+	assert.Equal(t, familyDspPCM0, info.Family)
+
+	info, ok = getSyscallFamily("openat$mixer")
+	assert.True(t, ok)
+	assert.Equal(t, familyDspMixer, info.Family)
+
+	// floppy / BSD pty families are intentionally disabled
+	_, ok = getSyscallFamily("syz_open_dev$floppy")
+	assert.False(t, ok)
+
+	_, ok = getSyscallFamily("syz_open_dev$ttys")
+	assert.False(t, ok)
+
+	_, ok = getSyscallFamily("syz_open_dev$ptys")
+	assert.False(t, ok)
 
 	// unknown syscall
 	_, ok = getSyscallFamily("read$kccwf")
@@ -89,23 +103,22 @@ func TestSyscallFamilyTable(t *testing.T) {
 }
 
 func TestIsCompatibleSyscall(t *testing.T) {
-	// Same family: kccwf file (including rename/link)
+	// Same family: kccwf file, excluding destructive path operations.
 	assert.True(t, isCompatibleSyscall("open$kccwf", "stat$kccwf"))
 	assert.True(t, isCompatibleSyscall("open$kccwf", "chmod$kccwf"))
-	assert.True(t, isCompatibleSyscall("stat$kccwf", "unlink$kccwf"))
 	assert.True(t, isCompatibleSyscall("open$kccwf", "truncate$kccwf"))
-	assert.True(t, isCompatibleSyscall("open$kccwf", "rename$kccwf"))
-	assert.True(t, isCompatibleSyscall("stat$kccwf", "link$kccwf"))
+	assert.False(t, isCompatibleSyscall("stat$kccwf", "unlink$kccwf"))
+	assert.False(t, isCompatibleSyscall("open$kccwf", "rename$kccwf"))
+	assert.False(t, isCompatibleSyscall("stat$kccwf", "link$kccwf"))
 
-	// Same family: kccwf dir
-	assert.True(t, isCompatibleSyscall("mkdir$kccwf", "open$kccwf_dir"))
-	assert.True(t, isCompatibleSyscall("mkdir$kccwf", "rmdir$kccwf"))
+	// kccwf dir/lifecycle operations are not linked by the generic table.
+	assert.False(t, isCompatibleSyscall("mkdir$kccwf", "open$kccwf_dir"))
+	assert.False(t, isCompatibleSyscall("mkdir$kccwf", "rmdir$kccwf"))
 
 	// Same family: kccwf relative-path (dirfd-dependent)
 	assert.True(t, isCompatibleSyscall("openat$kccwf", "faccessat$kccwf"))
 	assert.True(t, isCompatibleSyscall("openat$kccwf", "fchmodat$kccwf"))
-	assert.True(t, isCompatibleSyscall("openat$kccwf", "unlinkat$kccwf"))
-	assert.True(t, isCompatibleSyscall("fchmodat$kccwf", "fstatat$kccwf"))
+	assert.False(t, isCompatibleSyscall("openat$kccwf", "unlinkat$kccwf"))
 
 	// Same family: bluetooth
 	assert.True(t, isCompatibleSyscall("bind$bt_sco", "connect$bt_sco"))
@@ -114,15 +127,19 @@ func TestIsCompatibleSyscall(t *testing.T) {
 
 	// Same family: unix socket
 	assert.True(t, isCompatibleSyscall("bind$unix", "connect$unix"))
+	assert.True(t, isCompatibleSyscall("openat$dsp", "openat$audio"))
+	assert.True(t, isCompatibleSyscall("openat$dsp1", "openat$audio1"))
+	assert.False(t, isCompatibleSyscall("syz_open_dev$ttys", "syz_open_dev$ptys"))
 
 	// Cross-family: should NOT be compatible
-	assert.False(t, isCompatibleSyscall("open$kccwf", "mkdir$kccwf"))         // file vs dir
-	assert.False(t, isCompatibleSyscall("open$kccwf", "bind$bt_sco"))         // file vs bt
-	assert.False(t, isCompatibleSyscall("bind$bt_sco", "bind$bt_l2cap"))      // different bt families
-	assert.False(t, isCompatibleSyscall("bind$unix", "bind$bt_sco"))          // unix vs bt
-	assert.False(t, isCompatibleSyscall("open$kccwf", "open$kccwf_dir"))      // file vs dir
-	assert.False(t, isCompatibleSyscall("open$kccwf", "openat$kccwf"))        // absolute vs relative!
-	assert.False(t, isCompatibleSyscall("stat$kccwf", "faccessat$kccwf"))     // absolute vs relative!
+	assert.False(t, isCompatibleSyscall("open$kccwf", "mkdir$kccwf"))     // file vs dir
+	assert.False(t, isCompatibleSyscall("open$kccwf", "bind$bt_sco"))     // file vs bt
+	assert.False(t, isCompatibleSyscall("bind$bt_sco", "bind$bt_l2cap"))  // different bt families
+	assert.False(t, isCompatibleSyscall("bind$unix", "bind$bt_sco"))      // unix vs bt
+	assert.False(t, isCompatibleSyscall("open$kccwf", "open$kccwf_dir"))  // file vs dir
+	assert.False(t, isCompatibleSyscall("open$kccwf", "openat$kccwf"))    // absolute vs relative!
+	assert.False(t, isCompatibleSyscall("stat$kccwf", "faccessat$kccwf")) // absolute vs relative!
+	assert.False(t, isCompatibleSyscall("openat$dsp", "openat$mixer"))    // pcm vs mixer
 
 	// Unknown syscalls
 	assert.False(t, isCompatibleSyscall("read$kccwf", "write$kccwf"))
@@ -161,36 +178,15 @@ func TestIsUnsafePathForAlignment(t *testing.T) {
 	assert.False(t, isUnsafePathForAlignment([]byte("\x00")))
 }
 
-func TestBuildFamilyIndex(t *testing.T) {
-	resources := map[string]SyscallResourceInfo{
-		"open$kccwf": {
-			SyscallName: "open$kccwf",
-			Family:      familyKccwfFile,
-			DataArg:     nil,
-		},
-		"mkdir$kccwf": {
-			SyscallName: "mkdir$kccwf",
-			Family:      familyKccwfDir,
-			DataArg:     nil,
-		},
-		"bind$bt_sco": {
-			SyscallName: "bind$bt_sco",
-			Family:      familyBtSco,
-			DataArg:     nil,
-		},
-		// No-family entry should be excluded from index
-		"rename": {
-			SyscallName: "rename",
-			Family:      familyNone,
-			DataArg:     nil,
-		},
+func TestSemanticRefsByFamilyKeepsAllSources(t *testing.T) {
+	refs := []semanticObjectRef{
+		{Domain: objectDomainFS, Kind: objectKindFSFile, Scope: "/mnt/kccwf", SyscallName: "open$kccwf"},
+		{Domain: objectDomainFS, Kind: objectKindFSFile, Scope: "/mnt/kccwf", SyscallName: "stat$kccwf"},
+		{Domain: objectDomainFS, Kind: objectKindFSFile, Scope: "/mnt/kccwf", SyscallName: "openat$kccwf", Relative: true},
 	}
 
-	index := buildFamilyIndex(resources)
+	index := semanticRefsByFamily(refs)
 
-	assert.Contains(t, index, familyKccwfFile)
-	assert.Contains(t, index, familyKccwfDir)
-	assert.Contains(t, index, familyBtSco)
-	assert.NotContains(t, index, familyNone)
-	assert.Equal(t, "open$kccwf", index[familyKccwfFile].SyscallName)
+	assert.Len(t, index["fs:fs_file:/mnt/kccwf:abs"], 2)
+	assert.Len(t, index["fs:fs_file:/mnt/kccwf:rel"], 1)
 }

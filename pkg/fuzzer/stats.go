@@ -41,6 +41,11 @@ type Stats struct {
 	statCrossProgPairs       *stat.Val
 	statSoloCacheHits        *stat.Val
 	statObjectLinkings       *stat.Val
+	statStateScopeGuides     *stat.Val
+	statStateScopeInstance   *stat.Val
+	statStateScopeRelation   *stat.Val
+	statStateScopeContainer  *stat.Val
+	statStateScopeGlobal     *stat.Val
 	statAffinityUpdates      *stat.Val
 	statCoverageTriageJobs   *stat.Val
 	statCoverageTriageBoosts *stat.Val
@@ -107,6 +112,16 @@ func newStats(target *prog.Target) Stats {
 		statSoloCacheHits: stat.New("solo cache hits", "Solo execution cache hits",
 			stat.Console, stat.Graph("race_group")),
 		statObjectLinkings: stat.New("object linkings", "Successful object-level program linkings",
+			stat.Console, stat.Graph("race_group")),
+		statStateScopeGuides: stat.New("state scope guides", "Program groups selected by state-scope guidance",
+			stat.Console, stat.Graph("race_group")),
+		statStateScopeInstance: stat.New("state scope instance", "State-scope groups using same-instance construction",
+			stat.Console, stat.Graph("race_group")),
+		statStateScopeRelation: stat.New("state scope relation", "State-scope groups using related-instance construction",
+			stat.Console, stat.Graph("race_group")),
+		statStateScopeContainer: stat.New("state scope container", "State-scope groups using same-container construction",
+			stat.Console, stat.Graph("race_group")),
+		statStateScopeGlobal: stat.New("state scope global", "State-scope groups using subsystem/global construction",
 			stat.Console, stat.Graph("race_group")),
 		statAffinityUpdates: stat.New("affinity updates", "Syscall affinity table updates",
 			stat.Console, stat.Graph("race_group")),

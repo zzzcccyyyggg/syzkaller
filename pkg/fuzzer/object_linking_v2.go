@@ -4,47 +4,26 @@
 package fuzzer
 
 import (
+	"sort"
+
 	"github.com/google/syzkaller/pkg/log"
 	"github.com/google/syzkaller/prog"
 )
 
-// ============================================================================
-// Object-Level Program Linking V2 - Resource-Aware Cross-Syscall Alignment
-// ============================================================================
-// Strategy: Unify object identifiers between two programs so they are more
-// likely to access the same kernel object when executed concurrently.
+// LinkProgramsV2 aligns semantic object references between two programs.
 //
-// Alignment proceeds in two tiers:
-//   1. Same-name match: prog2's syscall has the exact same name as prog1's.
-//   2. Cross-syscall compatible match: prog2's syscall belongs to the same
-//      object family (e.g., open$kccwf ↔ stat$kccwf both use kccwf_file).
-//
-// The object family table and compatibility rules are defined in
-// object_family.go. Only syscalls with directly rewritable object
-// identifiers (paths, socket addresses) are eligible; fd-dependent
-// syscalls are intentionally excluded (they inherit via fd chains).
-// ============================================================================
-
-// SyscallResourceInfo stores resource info extracted from a syscall.
-type SyscallResourceInfo struct {
-	SyscallName    string        // Full syscall name (e.g., "open$kccwf")
-	CallIndex      int           // Index in the program
-	ResourceArg    prog.Arg      // The resource argument (e.g., path pointer)
-	ResourceArgIdx int           // Index of the resource arg in Args[]
-	DataArg        *prog.DataArg // The actual DataArg containing the string
-	Family         objectFamily  // Object family this syscall belongs to
-	FamilyArgIndex int           // Arg index within the family definition
+// The target partner is expected to have been namespace-isolated before this
+// pass when running the fsobj experiments. The linker then explicitly rewrites
+// a small number of high-confidence references so object sharing is caused by
+// ObjLinker rather than by fixed corpus names.
+func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
+	linked, _ := ol.LinkProgramsV2WithResult(prog1, prog2)
+	return linked
 }
 
-// LinkProgramsV2 unifies resource arguments between two programs.
-// It performs two-tier alignment:
-//   1. Same-name: for each syscall in prog2 that shares the exact name with
-//      a prog1 syscall, copy the object identifier directly.
-//   2. Cross-syscall: for remaining unmatched syscalls in prog2, check if any
-//      prog1 resource belongs to the same object family and align them.
-func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
+func (ol *ObjectLinker) LinkProgramsV2WithResult(prog1, prog2 *prog.Prog) (*prog.Prog, objectLinkResult) {
 	if prog1 == nil || prog2 == nil {
-		return prog2
+		return prog2, objectLinkResult{}
 	}
 
 	ol.mu.Lock()
@@ -52,112 +31,220 @@ func (ol *ObjectLinker) LinkProgramsV2(prog1, prog2 *prog.Prog) *prog.Prog {
 	attempt := ol.linkAttempts
 	ol.mu.Unlock()
 
-	// 1. Extract resource info from prog1's eligible syscalls
-	prog1Resources := extractSyscallResources(prog1)
-	if len(prog1Resources) == 0 {
-		return prog2.Clone()
+	sourceRefs := extractSemanticObjectRefs(prog1)
+	if len(sourceRefs) == 0 {
+		return prog2.Clone(), objectLinkResult{}
 	}
 
-	// 2. Build family index: family -> []SyscallResourceInfo for cross-matching
-	familyIndex := buildFamilyIndex(prog1Resources)
-
-	// 3. Clone prog2 and apply two-tier unification
 	linked := prog2.Clone()
-	unified := unifyResourcesTwoTier(linked, prog1Resources, familyIndex)
+	targetRefs := extractSemanticObjectRefs(linked)
+	if len(targetRefs) == 0 {
+		return linked, objectLinkResult{}
+	}
 
-	if unified > 0 {
+	result := unifySemanticObjectRefs(sourceRefs, targetRefs)
+	if result.unified > 0 {
 		ol.mu.Lock()
 		ol.linkSuccesses++
-		ol.pathsUnified += unified
+		ol.pathsUnified += result.unified
 		ol.mu.Unlock()
 
-		log.Logf(0, "[OBJLINK-V2] unified %d resources between prog1 and prog2 (attempt=%d)",
-			unified, attempt)
+		log.Logf(0, "[OBJLINK-V2] unified %d semantic fs objects (exact=%d cross_family=%d attempt=%d)",
+			result.unified, result.exact, result.crossFamily, attempt)
 	}
 
-	return linked
+	return linked, result
 }
 
-// extractSyscallResources extracts resource information from eligible syscalls.
-// It uses the object family table for family-registered syscalls, and falls back
-// to the legacy isFileRelatedSyscall check for broader coverage.
-func extractSyscallResources(p *prog.Prog) map[string]SyscallResourceInfo {
-	resources := make(map[string]SyscallResourceInfo)
-
-	for callIdx, call := range p.Calls {
-		if call == nil || call.Meta == nil {
-			continue
-		}
-
-		name := call.Meta.Name
-
-		// Try family table first (covers kccwf, bluetooth, unix socket, etc.)
-		if famInfo, ok := getSyscallFamily(name); ok {
-			if famInfo.ArgIndex < len(call.Args) {
-				dataArg := findDataArg(call.Args[famInfo.ArgIndex])
-				if dataArg != nil && len(dataArg.Data()) > 0 {
-					if _, exists := resources[name]; !exists {
-						resources[name] = SyscallResourceInfo{
-							SyscallName:    name,
-							CallIndex:      callIdx,
-							ResourceArg:    call.Args[famInfo.ArgIndex],
-							ResourceArgIdx: famInfo.ArgIndex,
-							DataArg:        dataArg,
-							Family:         famInfo.Family,
-							FamilyArgIndex: famInfo.ArgIndex,
-						}
-					}
-				}
-			}
-			continue
-		}
-
-		// Fallback: legacy file-related syscall check (first DataArg in args[0..2])
-		if !isFileRelatedSyscall(name) {
-			continue
-		}
-		// Skip dirfd-dependent syscalls in the fallback path
-		if isUnsafeAlignment(name) {
-			continue
-		}
-		for argIdx, arg := range call.Args {
-			if argIdx >= 3 {
-				break
-			}
-			dataArg := findDataArg(arg)
-			if dataArg != nil && len(dataArg.Data()) > 0 {
-				if _, exists := resources[name]; !exists {
-					resources[name] = SyscallResourceInfo{
-						SyscallName:    name,
-						CallIndex:      callIdx,
-						ResourceArg:    arg,
-						ResourceArgIdx: argIdx,
-						DataArg:        dataArg,
-						Family:         familyNone,
-						FamilyArgIndex: argIdx,
-					}
-				}
-				break
-			}
-		}
-	}
-
-	return resources
+type objectLinkResult struct {
+	unified     int
+	exact       int
+	crossFamily int
 }
 
-// buildFamilyIndex groups prog1 resources by object family for cross-matching.
-// Each family maps to the first eligible resource found (to avoid over-rewriting).
-func buildFamilyIndex(resources map[string]SyscallResourceInfo) map[objectFamily]SyscallResourceInfo {
-	index := make(map[objectFamily]SyscallResourceInfo)
-	for _, info := range resources {
-		if info.Family == familyNone {
+type objectLinkTier string
+
+const (
+	objectLinkTierExact       objectLinkTier = "exact"
+	objectLinkTierCrossFamily objectLinkTier = "cross_family"
+)
+
+func unifySemanticObjectRefs(sourceRefs, targetRefs []semanticObjectRef) objectLinkResult {
+	const maxSemanticRewrites = 2
+	result := objectLinkResult{}
+	candidates := buildSemanticLinkCandidates(sourceRefs, targetRefs)
+	usedTargets := make(map[int]bool)
+
+	for _, candidate := range candidates {
+		if result.unified >= maxSemanticRewrites {
+			break
+		}
+		if usedTargets[candidate.targetIdx] {
 			continue
 		}
-		if _, exists := index[info.Family]; !exists {
-			index[info.Family] = info
+		if rewriteSemanticObjectRef(candidate.target, candidate.source) {
+			usedTargets[candidate.targetIdx] = true
+			result.unified++
+			if candidate.tier == objectLinkTierExact {
+				result.exact++
+			} else {
+				result.crossFamily++
+			}
+			logSemanticRewrite(candidate.tier, candidate.target, candidate.source)
 		}
 	}
-	return index
+
+	return result
+}
+
+type semanticLinkCandidate struct {
+	source    semanticObjectRef
+	target    semanticObjectRef
+	targetIdx int
+	sourceIdx int
+	tier      objectLinkTier
+	score     int
+}
+
+func buildSemanticLinkCandidates(sourceRefs, targetRefs []semanticObjectRef) []semanticLinkCandidate {
+	var candidates []semanticLinkCandidate
+	for targetIdx, target := range targetRefs {
+		for sourceIdx, source := range sourceRefs {
+			score := semanticLinkScore(source, target)
+			if score <= 0 {
+				continue
+			}
+			tier := objectLinkTierCrossFamily
+			if source.SyscallName == target.SyscallName {
+				tier = objectLinkTierExact
+			}
+			candidates = append(candidates, semanticLinkCandidate{
+				source:    source,
+				target:    target,
+				targetIdx: targetIdx,
+				sourceIdx: sourceIdx,
+				tier:      tier,
+				score:     score,
+			})
+		}
+	}
+	sort.SliceStable(candidates, func(i, j int) bool {
+		left, right := candidates[i], candidates[j]
+		if left.score != right.score {
+			return left.score > right.score
+		}
+		if left.target.CallIndex != right.target.CallIndex {
+			return left.target.CallIndex < right.target.CallIndex
+		}
+		if left.source.CallIndex != right.source.CallIndex {
+			return left.source.CallIndex < right.source.CallIndex
+		}
+		return left.sourceIdx < right.sourceIdx
+	})
+	return candidates
+}
+
+func semanticLinkScore(source, target semanticObjectRef) int {
+	if !source.Rewritable || !target.Rewritable {
+		return 0
+	}
+	if source.Domain != target.Domain || source.Kind != target.Kind || source.Scope != target.Scope {
+		return 0
+	}
+	if source.Relative != target.Relative {
+		return 0
+	}
+	if source.DataArg == nil || target.DataArg == nil {
+		return 0
+	}
+	if len(source.DataArg.Data()) != len(target.DataArg.Data()) {
+		return 0
+	}
+	if source.Operation == objectOpOpen && target.Operation == objectOpOpen &&
+		source.ContextScore == 0 && target.ContextScore == 0 {
+		return 0
+	}
+	if source.Operation == target.Operation && target.Operation != objectOpOpen {
+		return 0
+	}
+	if target.Operation == objectOpOpen &&
+		(source.Operation != objectOpOpen || source.ContextScore == 0 || target.ContextScore == 0) {
+		return 0
+	}
+	score := source.Confidence + target.Confidence
+	score += semanticTargetOperationPriority(target.Operation)
+	score += target.ContextScore
+	if source.SyscallName == target.SyscallName {
+		score += 20
+	}
+	score += semanticOperationPairBonus(source.Operation, target.Operation)
+	if source.PoolIndex == target.PoolIndex {
+		score += 80
+	}
+	if dataEqual(source.DataArg.Data(), target.DataArg.Data()) {
+		score = 0
+	}
+	return score
+}
+
+func semanticTargetOperationPriority(operation objectOperation) int {
+	switch operation {
+	case objectOpDataMutate:
+		return 120
+	case objectOpMetadataWrite:
+		return 110
+	case objectOpMetadataRead:
+		return 90
+	case objectOpOpen:
+		return 0
+	default:
+		return 0
+	}
+}
+
+func semanticOperationPairBonus(source, target objectOperation) int {
+	if source == target {
+		if target == objectOpOpen {
+			return 0
+		}
+		return 60
+	}
+	if target == objectOpOpen {
+		return 0
+	}
+	return 100
+}
+
+func semanticPartnerSelectionScore(sourceRefs, targetRefs []semanticObjectRef) int {
+	candidates := buildSemanticLinkCandidates(sourceRefs, targetRefs)
+	best := 0
+	for _, candidate := range candidates {
+		score := candidate.score
+		if candidate.tier == objectLinkTierCrossFamily {
+			score += 250
+		}
+		if candidate.target.Operation != objectOpOpen {
+			score += 500
+		} else if candidate.target.ContextScore > 0 {
+			score += 250
+		} else {
+			score -= 500
+		}
+		if candidate.source.Operation != candidate.target.Operation {
+			score += 120
+		}
+		if score > best {
+			best = score
+		}
+	}
+	return best
+}
+
+func logSemanticRewrite(tier objectLinkTier, target, source semanticObjectRef) {
+	log.Logf(0, "[OBJLINK-V2-AUDIT] tier=%s domain=%s kind=%s target=%s[%d] source=%s[%d] op=%s/%s ctx=%d/%d path=%q -> %q",
+		tier, target.Domain, target.Kind, target.SyscallName, target.CallIndex,
+		source.SyscallName, source.CallIndex, target.Operation, source.Operation,
+		target.ContextScore, source.ContextScore, target.Debug, source.Debug)
 }
 
 // findDataArg recursively finds the DataArg within an argument.
@@ -179,103 +266,33 @@ func findDataArg(arg prog.Arg) *prog.DataArg {
 				return result
 			}
 		}
+	case *prog.UnionArg:
+		if a.Option != nil {
+			return findDataArg(a.Option)
+		}
 	}
 	return nil
 }
 
-// unifyResourcesTwoTier applies two-tier alignment to the target program:
-//   Tier 1 (same-name): exact syscall name match — highest confidence.
-//   Tier 2 (cross-family): same object family match — enables e.g. open$kccwf → stat$kccwf alignment.
-//
-// A per-family rewrite counter prevents over-rewriting: at most maxRewritesPerFamily
-// calls per family are rewritten in the partner program.
-func unifyResourcesTwoTier(p *prog.Prog, sourceResources map[string]SyscallResourceInfo, familyIndex map[objectFamily]SyscallResourceInfo) int {
-	const maxRewritesPerFamily = 3
-	unified := 0
-	familyRewriteCount := make(map[objectFamily]int)
-
-	for _, call := range p.Calls {
-		if call == nil || call.Meta == nil {
-			continue
-		}
-		name := call.Meta.Name
-
-		// --- Tier 1: exact same-name match ---
-		if sourceInfo, exists := sourceResources[name]; exists {
-			if n := rewriteObjectIdentifier(call, sourceInfo); n > 0 {
-				unified += n
-				if sourceInfo.Family != familyNone {
-					familyRewriteCount[sourceInfo.Family]++
-				}
-				continue
+func findConstArg(arg prog.Arg) *prog.ConstArg {
+	if arg == nil {
+		return nil
+	}
+	switch a := arg.(type) {
+	case *prog.ConstArg:
+		return a
+	case *prog.GroupArg:
+		for _, inner := range a.Inner {
+			if result := findConstArg(inner); result != nil {
+				return result
 			}
 		}
-
-		// --- Tier 2: cross-syscall family match ---
-		targetFamInfo, ok := getSyscallFamily(name)
-		if !ok || targetFamInfo.Family == familyNone {
-			continue
-		}
-		// Check rewrite budget
-		if familyRewriteCount[targetFamInfo.Family] >= maxRewritesPerFamily {
-			continue
-		}
-		sourceInfo, exists := familyIndex[targetFamInfo.Family]
-		if !exists {
-			continue
-		}
-		// Don't cross-align to itself (already handled in tier 1)
-		if sourceInfo.SyscallName == name {
-			continue
-		}
-		if n := rewriteObjectIdentifierAtArg(call, targetFamInfo.ArgIndex, sourceInfo); n > 0 {
-			unified += n
-			familyRewriteCount[targetFamInfo.Family]++
+	case *prog.UnionArg:
+		if a.Option != nil {
+			return findConstArg(a.Option)
 		}
 	}
-
-	return unified
-}
-
-// rewriteObjectIdentifier rewrites the object identifier in a call using exact
-// same-name matching (source and target share the same arg layout).
-func rewriteObjectIdentifier(call *prog.Call, sourceInfo SyscallResourceInfo) int {
-	return rewriteObjectIdentifierAtArg(call, sourceInfo.FamilyArgIndex, sourceInfo)
-}
-
-// rewriteObjectIdentifierAtArg rewrites the DataArg at the given argument index
-// in the call with the source's object identifier bytes.
-// Returns 0 if the rewrite is skipped (unsafe path, equal data, missing arg).
-func rewriteObjectIdentifierAtArg(call *prog.Call, argIndex int, sourceInfo SyscallResourceInfo) int {
-	if argIndex >= len(call.Args) {
-		return 0
-	}
-	targetDataArg := findDataArg(call.Args[argIndex])
-	if targetDataArg == nil || len(targetDataArg.Data()) == 0 {
-		return 0
-	}
-
-	sourceData := sourceInfo.DataArg.Data()
-	targetData := targetDataArg.Data()
-
-	// Skip if source or target path is in an unsafe prefix (e.g., /proc/self/)
-	if isUnsafePathForAlignment(sourceData) || isUnsafePathForAlignment(targetData) {
-		return 0
-	}
-
-	if dataEqual(sourceData, targetData) {
-		return 0
-	}
-
-	newData := make([]byte, len(sourceData))
-	copy(newData, sourceData)
-	targetDataArg.SetData(newData)
-
-	srcStr := trimNullBytes(sourceData)
-	tgtStr := trimNullBytes(targetData)
-	log.Logf(1, "[OBJLINK-V2] unified %s (from %s): %q -> %q",
-		call.Meta.Name, sourceInfo.SyscallName, tgtStr, srcStr)
-	return 1
+	return nil
 }
 
 // dataEqual checks if two byte slices are equal.

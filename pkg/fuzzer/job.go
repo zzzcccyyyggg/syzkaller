@@ -688,8 +688,8 @@ func (job *soloFilterJob) run(fuzzer *Fuzzer) {
 		}
 
 		// Update Syscall Affinity Table (record interaction success)
-		job.updateAffinityTable(crossProgramPairs)
-		fuzzer.statAffinityUpdates.Add(len(crossProgramPairs))
+		affinityUpdates := job.updateAffinityTable(crossProgramPairs)
+		fuzzer.statAffinityUpdates.Add(affinityUpdates)
 	}
 
 	job.info.Execs.Add(2) // Two solo executions
@@ -798,14 +798,14 @@ func (job *soloFilterJob) getInfo() *JobInfo {
 // - New VarName pair (stack=0): full BaseWeight
 // - Subsequent stacks: BaseWeight / (1 + existingStackCount)
 // This ensures cumulative bonus from 100 stacks approaches BaseWeight.
-func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPair) {
+func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPair) int {
 	if job.fuzzer.raceGroup == nil {
-		return
+		return 0
 	}
 
 	affinityTable := job.fuzzer.raceGroup.GetAffinityTable()
 	if affinityTable == nil {
-		return
+		return 0
 	}
 
 	// Get configured base weight or use default
@@ -814,6 +814,7 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 		baseWeight = float64(DefaultNewVarNamePairAffinityWeight)
 	}
 
+	updates := 0
 	for _, pair := range crossProgramPairs {
 		if pair == nil {
 			continue
@@ -842,5 +843,7 @@ func (job *soloFilterJob) updateAffinityTable(crossProgramPairs []*ddrd.MayUAFPa
 		}
 
 		affinityTable.RecordInteractionWithWeight(sig1, sig2, weight)
+		updates++
 	}
+	return updates
 }

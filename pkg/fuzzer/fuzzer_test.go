@@ -226,6 +226,65 @@ func TestCurrentWidenedTimingThreshold(t *testing.T) {
 	})
 }
 
+func TestNormalizeObjectLinkAttemptRatio(t *testing.T) {
+	assert.Equal(t, 1.0, normalizeObjectLinkAttemptRatio(0))
+	assert.Equal(t, 1.0, normalizeObjectLinkAttemptRatio(-0.5))
+	assert.Equal(t, 1.0, normalizeObjectLinkAttemptRatio(1.5))
+	assert.Equal(t, 0.1, normalizeObjectLinkAttemptRatio(0.1))
+	assert.Equal(t, 1.0, normalizeObjectLinkAttemptRatio(1.0))
+}
+
+func TestStaticInputExplorationSamplesFrozenPool(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := target.SyscallMap["syz_test_fuzzer1"]
+	p0 := &prog.Prog{Target: target, Calls: []*prog.Call{{
+		Meta: call,
+		Args: []prog.Arg{
+			prog.MakeConstArg(call.Args[0].Type, prog.DirIn, 1),
+			prog.MakeConstArg(call.Args[1].Type, prog.DirIn, 2),
+			prog.MakeConstArg(call.Args[2].Type, prog.DirIn, 3),
+		},
+	}}}
+	p1 := &prog.Prog{Target: target, Calls: []*prog.Call{{
+		Meta: call,
+		Args: []prog.Arg{
+			prog.MakeConstArg(call.Args[0].Type, prog.DirIn, 4),
+			prog.MakeConstArg(call.Args[1].Type, prog.DirIn, 5),
+			prog.MakeConstArg(call.Args[2].Type, prog.DirIn, 6),
+		},
+	}}}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fuzzer := NewFuzzer(ctx, &Config{
+		Corpus:                 corpus.NewCorpus(ctx),
+		Coverage:               true,
+		EnabledCalls:           map[*prog.Syscall]bool{call: true},
+		ModeUAF:                true,
+		BarrierMode:            true,
+		BarrierMask:            0x3,
+		StaticInputExploration: true,
+		StaticInputSeed:        7,
+	}, rand.New(rand.NewSource(0)), target)
+	assert.Equal(t, 2, fuzzer.SetStaticInputPool([]Candidate{{Prog: p1}, {Prog: p0}}))
+	assert.True(t, fuzzer.ActivateUAFMode())
+
+	req := fuzzer.genFuzz()
+	if assert.NotNil(t, req) && assert.Len(t, req.BarrierPrograms, 2) {
+		allowed := map[string]bool{
+			string(p0.Serialize()): true,
+			string(p1.Serialize()): true,
+		}
+		assert.True(t, req.Barrier, "static exploration should execute barrier groups")
+		assert.True(t, allowed[string(req.BarrierPrograms[0].Serialize())])
+		assert.True(t, allowed[string(req.BarrierPrograms[1].Serialize())])
+	}
+	assert.Zero(t, fuzzer.Config.Corpus.StatProgs.Val(), "static pool must not be inserted into normal corpus")
+}
+
 func getTestTarget() (*prog.Target, error) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
 	if err == nil {

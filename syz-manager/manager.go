@@ -29,6 +29,7 @@ import (
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/pkg/gce"
+	"github.com/google/syzkaller/pkg/hash"
 	"github.com/google/syzkaller/pkg/ifaceprobe"
 	"github.com/google/syzkaller/pkg/image"
 	"github.com/google/syzkaller/pkg/kfuzztest"
@@ -117,6 +118,9 @@ type Manager struct {
 	uafPairIndex     *manager.RacePairIndexStore
 	uafSharedWorkdir string
 
+	llmSeedMu     sync.Mutex
+	llmSeedLoaded map[string]struct{}
+
 	Stats
 }
 
@@ -177,6 +181,20 @@ var (
 	This is useful mostly for benchmarking with testbed.`,
 		LoadCorpus: true,
 	}
+	ModeStaticCorpusPrefilter = &Mode{
+		Name: "static-corpus-prefilter",
+		Description: `execute loaded corpus once and write runtime-effective programs to effective-corpus.db
+	This is intended for MRPFuzz static input exploration so ablation variants can share
+	the same executable input pool without startup candidate triage drift.`,
+		LoadCorpus: true,
+	}
+	ModeStaticCorpusPrepare = &Mode{
+		Name: "static-corpus-prepare",
+		Description: `triage loaded corpus and write the prepared in-memory corpus to prepared-corpus.db
+	This is intended for MRPFuzz static input exploration so ablation variants can share
+	the same syzkaller-prepared input pool without per-variant startup triage drift.`,
+		LoadCorpus: true,
+	}
 	ModeCorpusRun = &Mode{
 		Name:        "corpus-run",
 		Description: `continuously run the corpus programs`,
@@ -225,6 +243,8 @@ var (
 		ModeFuzzing,
 		ModeSmokeTest,
 		ModeCorpusTriage,
+		ModeStaticCorpusPrefilter,
+		ModeStaticCorpusPrepare,
 		ModeCorpusRun,
 		ModeRunTests,
 		ModeIfaceProbe,
@@ -1338,7 +1358,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 	opts := fuzzer.DefaultExecOpts(mgr.cfg, features, *flagDebug)
 
 	switch mgr.mode {
-	case ModeFuzzing, ModeCorpusTriage:
+	case ModeFuzzing, ModeCorpusTriage, ModeStaticCorpusPrepare:
 		corpusUpdates := make(chan corpus.NewItemEvent, 128)
 		mgr.corpus = corpus.NewFocusedCorpus(context.Background(),
 			corpusUpdates, mgr.coverFilters.Areas)
@@ -1373,7 +1393,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				return !mgr.saturatedCalls[call]
 			},
 			ModeKFuzzTest:                mgr.cfg.Experimental.EnableKFuzzTest,
-			ModeUAF:                      mgr.cfg.Experimental.UAFMode,
+			ModeUAF:                      mgr.cfg.Experimental.UAFMode && mgr.mode != ModeStaticCorpusPrepare,
 			BarrierMode:                  mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:                  mgr.cfg.BarrierMask,
 			ThreadBarrier:                mgr.cfg.Experimental.ThreadBarrier,
@@ -1384,8 +1404,19 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			MaxStacksPerVarNamePair:      mgr.cfg.Experimental.MaxStacksPerVarNamePair,
 			NewVarNamePairAffinityWeight: mgr.cfg.Experimental.NewVarNamePairAffinityWeight,
 			NewStackAffinityWeight:       mgr.cfg.Experimental.NewStackAffinityWeight,
+			StaticInputExploration:       mgr.cfg.Experimental.StaticInputExploration,
+			StaticInputSeed:              mgr.cfg.Experimental.StaticInputSeed,
 			RandomBaselineMode:           mgr.cfg.Experimental.RandomBaselineMode,
 			EnableObjectLinking:          mgr.cfg.Experimental.EnableObjectLinking,
+			ObjectLinkAttemptRatio:       mgr.cfg.Experimental.ObjectLinkAttemptRatio,
+			NoObjectKccwfNamespace:       mgr.cfg.Experimental.NoObjectKccwfNamespace,
+			IsolateKccwfPartnerObjects:   mgr.cfg.Experimental.IsolateKccwfPartnerObjects,
+			EnableStateScopeGuidance:     mgr.cfg.Experimental.EnableStateScopeGuidance,
+			StateScopeGuidanceRatio:      mgr.cfg.Experimental.StateScopeGuidanceRatio,
+			StateScopeSameInstanceRatio:  mgr.cfg.Experimental.StateScopeSameInstanceRatio,
+			StateScopePartnerSamples:     mgr.cfg.Experimental.StateScopePartnerSamples,
+			EnableCoverageTriage:         mgr.cfg.Experimental.EnableCoverageTriage,
+			EnableAffinityTable:          mgr.cfg.Experimental.EnableAffinityTable,
 			// Dual-Queue Timing Exploration Configuration
 			EnableTimingExploration:    mgr.cfg.Experimental.EnableTimingExploration,
 			TimingExplorationQueueSize: mgr.cfg.Experimental.TimingExplorationQueueSize,
@@ -1409,7 +1440,19 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			Workdir:                   mgr.cfg.Workdir,
 		}, rnd, mgr.target)
 		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
-		fuzzerObj.AddCandidates(candidates)
+		if mgr.cfg.Experimental.StaticInputExploration {
+			staticInputs := fuzzerObj.SetStaticInputPool(candidates)
+			if staticInputs == 0 {
+				return nil, fmt.Errorf("static_input_exploration requires a non-empty loaded corpus")
+			}
+			if fuzzerObj.ActivateUAFMode() {
+				log.Logf(0, "uaf: static input exploration enabled; skipping startup candidate triage")
+			}
+			mgr.enqueueLLMInputSeeds(fuzzerObj)
+			mgr.startLLMInputSeedWatcher(fuzzerObj)
+		} else {
+			fuzzerObj.AddCandidates(candidates)
+		}
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
 
@@ -1434,6 +1477,13 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			}), nil
 		}
 		return source, nil
+	case ModeStaticCorpusPrefilter:
+		prefilter, err := newStaticCorpusPrefilter(mgr, candidates)
+		if err != nil {
+			return nil, err
+		}
+		go prefilter.waitAndExit()
+		return queue.DefaultOpts(prefilter, opts), nil
 	case ModeCorpusRun:
 		ctx := &corpusRunner{
 			candidates: candidates,
@@ -1506,6 +1556,186 @@ func (cr *corpusRunner) Next() *queue.Request {
 	}
 }
 
+type staticCorpusPrefilter struct {
+	mgr        *Manager
+	candidates []fuzzer.Candidate
+	out        *db.DB
+
+	mu       sync.Mutex
+	seq      int
+	done     int
+	kept     int
+	noSignal int
+	failed   int
+	seen     map[string]struct{}
+}
+
+func newStaticCorpusPrefilter(mgr *Manager, candidates []fuzzer.Candidate) (*staticCorpusPrefilter, error) {
+	if len(candidates) == 0 {
+		return nil, fmt.Errorf("static corpus prefilter requires a non-empty loaded corpus")
+	}
+	outPath := filepath.Join(mgr.cfg.Workdir, "effective-corpus.db")
+	if err := os.Remove(outPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return nil, fmt.Errorf("failed to reset effective corpus database: %w", err)
+	}
+	out, err := db.Open(outPath, true)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open effective corpus database: %w", err)
+	}
+	pf := &staticCorpusPrefilter{
+		mgr:        mgr,
+		candidates: candidates,
+		out:        out,
+		seen:       make(map[string]struct{}),
+	}
+	log.Logf(0, "[STATIC-PREFILTER] loaded %d candidates; output=%s", len(candidates), outPath)
+	return pf, nil
+}
+
+func (pf *staticCorpusPrefilter) Next() *queue.Request {
+	pf.mu.Lock()
+	if pf.seq >= len(pf.candidates) {
+		pf.mu.Unlock()
+		return nil
+	}
+	candidate := pf.candidates[pf.seq]
+	idx := pf.seq
+	pf.seq++
+	pf.mu.Unlock()
+
+	req := &queue.Request{
+		Prog: candidate.Prog,
+		ExecOpts: flatrpc.ExecOpts{
+			ExecFlags: flatrpc.ExecFlagCollectCover | flatrpc.ExecFlagCollectSignal | flatrpc.ExecFlagDedupCover,
+		},
+		Important: true,
+	}
+	req.OnDone(func(req *queue.Request, res *queue.Result) bool {
+		pf.processResult(idx, req, res)
+		return true
+	})
+	return req
+}
+
+func (pf *staticCorpusPrefilter) processResult(idx int, req *queue.Request, res *queue.Result) {
+	keep := false
+	if res != nil && res.Status == queue.Success && res.Info != nil {
+		keep = progInfoHasSignalOrCover(res.Info)
+	}
+
+	var sig string
+	var data []byte
+	if keep {
+		data = req.Prog.Serialize()
+		sig = hash.String(data)
+	}
+
+	pf.mu.Lock()
+	defer pf.mu.Unlock()
+	pf.done++
+	switch {
+	case keep:
+		if _, ok := pf.seen[sig]; !ok {
+			pf.seen[sig] = struct{}{}
+			pf.out.Save(sig, data, 0)
+			pf.kept++
+		}
+	case res == nil || res.Status != queue.Success || res.Info == nil:
+		pf.failed++
+	default:
+		pf.noSignal++
+	}
+	if pf.done%100 == 0 || pf.done == len(pf.candidates) {
+		log.Logf(0, "[STATIC-PREFILTER] progress done=%d/%d kept=%d failed=%d no_signal=%d",
+			pf.done, len(pf.candidates), pf.kept, pf.failed, pf.noSignal)
+	}
+	if idx >= len(pf.candidates) {
+		log.Errorf("[STATIC-PREFILTER] internal index out of range: %d/%d", idx, len(pf.candidates))
+	}
+}
+
+func progInfoHasSignalOrCover(info *flatrpc.ProgInfo) bool {
+	if info == nil {
+		return false
+	}
+	for _, call := range info.Calls {
+		if call == nil {
+			continue
+		}
+		if len(call.Signal) != 0 || len(call.Cover) != 0 {
+			return true
+		}
+	}
+	return info.Extra != nil && (len(info.Extra.Signal) != 0 || len(info.Extra.Cover) != 0)
+}
+
+func (pf *staticCorpusPrefilter) waitAndExit() {
+	ticker := time.NewTicker(time.Second)
+	defer ticker.Stop()
+	for range ticker.C {
+		pf.mu.Lock()
+		done := pf.done
+		total := len(pf.candidates)
+		kept := pf.kept
+		failed := pf.failed
+		noSignal := pf.noSignal
+		pf.mu.Unlock()
+		if done < total {
+			continue
+		}
+		if err := pf.out.Flush(); err != nil {
+			log.Fatalf("[STATIC-PREFILTER] failed to save effective corpus database: %v", err)
+		}
+		if err := pf.out.BumpVersion(manager.CurrentDBVersion); err != nil {
+			log.Fatalf("[STATIC-PREFILTER] failed to set effective corpus database version: %v", err)
+		}
+		log.Logf(0, "[STATIC-PREFILTER] finished total=%d kept=%d failed=%d no_signal=%d",
+			total, kept, failed, noSignal)
+		pf.mgr.exit("static corpus prefilter")
+		return
+	}
+}
+
+func (mgr *Manager) writePreparedCorpusSnapshot() error {
+	if mgr.corpus == nil {
+		return fmt.Errorf("corpus is not initialized")
+	}
+	items := mgr.getMinimizedCorpus()
+	if len(items) == 0 {
+		return fmt.Errorf("prepared corpus is empty")
+	}
+	records := make([]db.Record, 0, len(items))
+	seen := make(map[string]struct{}, len(items))
+	for _, item := range items {
+		if item == nil || item.Prog == nil {
+			continue
+		}
+		data := item.Prog.Serialize()
+		sig := hash.String(data)
+		if _, ok := seen[sig]; ok {
+			continue
+		}
+		seen[sig] = struct{}{}
+		records = append(records, db.Record{Val: data})
+	}
+	if len(records) == 0 {
+		return fmt.Errorf("prepared corpus has no serializable programs")
+	}
+	outPath := filepath.Join(mgr.cfg.Workdir, "prepared-corpus.db")
+	tmpPath := outPath + ".tmp"
+	if err := os.Remove(tmpPath); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("failed to remove stale temp database: %w", err)
+	}
+	if err := db.Create(tmpPath, manager.CurrentDBVersion, records); err != nil {
+		return fmt.Errorf("failed to create prepared corpus database: %w", err)
+	}
+	if err := os.Rename(tmpPath, outPath); err != nil {
+		return fmt.Errorf("failed to replace prepared corpus database: %w", err)
+	}
+	log.Logf(0, "[STATIC-PREPARE] wrote prepared corpus: programs=%d output=%s", len(records), outPath)
+	return nil
+}
+
 func (mgr *Manager) corpusMinimization() {
 	for range time.NewTicker(time.Minute).C {
 		mgr.mu.Lock()
@@ -1559,8 +1789,14 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 					mgr.pool.RestartAll()
 				}
 			}
-			if mgr.mode == ModeCorpusTriage {
+			switch mgr.mode {
+			case ModeCorpusTriage:
 				mgr.exit("corpus triage")
+			case ModeStaticCorpusPrepare:
+				if err := mgr.writePreparedCorpusSnapshot(); err != nil {
+					log.Fatalf("[STATIC-PREPARE] failed to write prepared corpus: %v", err)
+				}
+				mgr.exit("static corpus prepare")
 			}
 			mgr.mu.Lock()
 			switch mgr.phase {
@@ -1703,6 +1939,124 @@ func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
 		log.Errorf("uaf corpus streaming load failed: %v", err)
 		return
 	}
+}
+
+type llmInputSeedRecord struct {
+	ID    string `json:"id"`
+	ProgA string `json:"prog_a"`
+	ProgB string `json:"prog_b"`
+}
+
+func (mgr *Manager) enqueueLLMInputSeeds(fuzzerObj *fuzzer.Fuzzer) {
+	mgr.enqueueLLMInputSeedsLimited(fuzzerObj, 0)
+}
+
+func (mgr *Manager) enqueueLLMInputSeedsLimited(fuzzerObj *fuzzer.Fuzzer, maxNew int) (int, int) {
+	dir := mgr.cfg.Experimental.LLMInputSeedDir
+	if dir == "" || fuzzerObj == nil {
+		return 0, 0
+	}
+	if acceptedDir := filepath.Join(dir, "accepted"); osutil.IsExist(acceptedDir) {
+		dir = acceptedDir
+	}
+	files, err := os.ReadDir(dir)
+	if err != nil {
+		log.Errorf("llm input seeds: failed to read %s: %v", dir, err)
+		return 0, 0
+	}
+	sort.Slice(files, func(i, j int) bool {
+		return files[i].Name() < files[j].Name()
+	})
+	var groups [][]*prog.Prog
+	var loadedKeys []string
+	for _, file := range files {
+		if file.IsDir() || filepath.Ext(file.Name()) != ".json" {
+			continue
+		}
+		if maxNew > 0 && len(groups) >= maxNew {
+			break
+		}
+		path := filepath.Join(dir, file.Name())
+		data, err := os.ReadFile(path)
+		if err != nil {
+			log.Errorf("llm input seeds: failed to read %s: %v", path, err)
+			continue
+		}
+		var rec llmInputSeedRecord
+		if err := json.Unmarshal(data, &rec); err != nil {
+			log.Errorf("llm input seeds: failed to parse %s: %v", path, err)
+			continue
+		}
+		if rec.ProgA == "" || rec.ProgB == "" {
+			continue
+		}
+		seedKey := rec.ID
+		if seedKey == "" {
+			seedKey = file.Name()
+		}
+		mgr.llmSeedMu.Lock()
+		if mgr.llmSeedLoaded == nil {
+			mgr.llmSeedLoaded = make(map[string]struct{})
+		}
+		_, alreadyLoaded := mgr.llmSeedLoaded[seedKey]
+		mgr.llmSeedMu.Unlock()
+		if alreadyLoaded {
+			continue
+		}
+		progA, err := mgr.target.Deserialize([]byte(rec.ProgA), prog.NonStrict)
+		if err != nil {
+			log.Errorf("llm input seeds: failed to deserialize %s prog_a: %v", path, err)
+			continue
+		}
+		progB, err := mgr.target.Deserialize([]byte(rec.ProgB), prog.NonStrict)
+		if err != nil {
+			log.Errorf("llm input seeds: failed to deserialize %s prog_b: %v", path, err)
+			continue
+		}
+		groups = append(groups, []*prog.Prog{progA, progB})
+		loadedKeys = append(loadedKeys, seedKey)
+	}
+	queued := fuzzerObj.EnqueueBarrierProgramGroups(groups)
+	if len(loadedKeys) != 0 {
+		mgr.llmSeedMu.Lock()
+		if mgr.llmSeedLoaded == nil {
+			mgr.llmSeedLoaded = make(map[string]struct{})
+		}
+		for _, key := range loadedKeys {
+			mgr.llmSeedLoaded[key] = struct{}{}
+		}
+		mgr.llmSeedMu.Unlock()
+	}
+	log.Logf(0, "llm input seeds: loaded=%d queued=%d dir=%s", len(groups), queued, dir)
+	return len(groups), queued
+}
+
+func (mgr *Manager) startLLMInputSeedWatcher(fuzzerObj *fuzzer.Fuzzer) {
+	if mgr.cfg.Experimental.LLMInputSeedDir == "" || mgr.cfg.Experimental.LLMInputSeedPollSec <= 0 || fuzzerObj == nil {
+		return
+	}
+	poll := time.Duration(mgr.cfg.Experimental.LLMInputSeedPollSec) * time.Second
+	if poll < 5*time.Second {
+		poll = 5 * time.Second
+	}
+	maxPerPoll := mgr.cfg.Experimental.LLMInputSeedMaxPerPoll
+	log.Logf(0, "llm input seeds: continuous polling enabled interval=%v max_per_poll=%d dir=%s",
+		poll, maxPerPoll, mgr.cfg.Experimental.LLMInputSeedDir)
+	go func() {
+		ticker := time.NewTicker(poll)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-vm.ShutdownCtx().Done():
+				return
+			case <-ticker.C:
+				loaded, queued := mgr.enqueueLLMInputSeedsLimited(fuzzerObj, maxPerPoll)
+				if loaded != 0 || queued != 0 {
+					log.Logf(0, "llm input seeds: poll loaded=%d queued=%d", loaded, queued)
+				}
+			}
+		}
+	}()
 }
 
 func (mgr *Manager) setPhaseLocked(newPhase int) {

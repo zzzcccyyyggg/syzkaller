@@ -8,13 +8,13 @@ dup$kccwf(oldfd fd) fd
 dup2$kccwf(oldfd fd, newfd fd) fd
 dup3$kccwf(oldfd fd, newfd fd, flags flags[dup_flags]) fd
 
-mknodat$loop$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev proc[1792, 2])
-mknodat$null$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev const[0x103])
-mknodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[mknod_mode], dev int32)
+mknodat$loop$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_files]], mode flags[mknod_mode], dev proc[1792, 2])
+mknodat$null$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_files]], mode flags[mknod_mode], dev const[0x103])
+mknodat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_files]], mode flags[mknod_mode], dev int32)
 
 getdents$kccwf(fd fd_dir, ent buffer[out], count len[ent])
 getdents64$kccwf(fd fd_dir, ent buffer[out], count len[ent])
-name_to_handle_at$kccwf(fd fd_dir, file ptr[in, string["testfile"]], handle ptr[in, file_handle], mnt ptr[out, int32], flags flags[name_to_handle_at_flags])
+name_to_handle_at$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_files]], handle ptr[in, file_handle], mnt ptr[out, int32], flags flags[name_to_handle_at_flags])
 getcwd$kccwf(buf buffer[out], size len[buf])
 fchdir$kccwf(fd fd)
 
@@ -47,11 +47,11 @@ fadvise64$kccwf(fd fd, offset fileoff, len intptr, advice flags[fadvise_flags])
 fchmod$kccwf(fd fd, mode flags[open_mode])
 fchown$kccwf(fd fd, uid uid, gid gid)
 fallocate$kccwf(fd fd, mode flags[fallocate_mode], off intptr, len intptr)
-faccessat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
-futimesat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval])
-utimensat$kccwf(dir fd_dir, file ptr[in, string["testfile"]], times ptr[in, itimerval], flags flags[utimensat_flags])
-statx$kccwf(fd fd_dir, file ptr[in, string["testfile"]], flags flags[statx_flags], mask flags[statx_mask], statxbuf ptr[out, statx])
-fchmodat$kccwf(dirfd fd_dir, file ptr[in, string["testfile"]], mode flags[open_mode])
+faccessat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_files]], mode flags[open_mode])
+futimesat$kccwf(dir fd_dir, file ptr[in, string[kccwf_rel_files]], times ptr[in, itimerval])
+utimensat$kccwf(dir fd_dir, file ptr[in, string[kccwf_rel_files]], times ptr[in, itimerval], flags flags[utimensat_flags])
+statx$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_files]], flags flags[statx_flags], mask flags[statx_mask], statxbuf ptr[out, statx])
+fchmodat$kccwf(dirfd fd_dir, file ptr[in, string[kccwf_rel_files]], mode flags[open_mode])
 
 ftruncate$kccwf(fd fd, len intptr)
 flock$kccwf(fd fd, op flags[flock_op])
@@ -88,35 +88,35 @@ syncfs$kccwf(fd fd)
 sync_file_range$kccwf(fd fd, off intptr, nbytes intptr, flags flags[sync_file_flags])
 
 # 基础文件操作
-open$kccwf(file ptr[in, string["/mnt/kccwf/testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
+open$kccwf(file ptr[in, string[kccwf_abs_files]], flags flags[open_flags], mode flags[open_mode]) fd
 open$kccwf_dir(file ptr[in, string["/mnt/kccwf"]], flags flags[open_flags], mode flags[open_mode]) fd_dir
-openat$kccwf(fd fd_dir, file ptr[in, string["testfile#"]], flags flags[open_flags], mode flags[open_mode]) fd
+openat$kccwf(fd fd_dir, file ptr[in, string[kccwf_rel_files]], flags flags[open_flags], mode flags[open_mode]) fd
 
 # 目录操作
-mkdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]], mode flags[open_mode])
-rmdir$kccwf(path ptr[in, string["/mnt/kccwf/testdir"]])
+mkdir$kccwf(path ptr[in, string[kccwf_abs_dirs]], mode flags[open_mode])
+rmdir$kccwf(path ptr[in, string[kccwf_abs_dirs]])
 
 # 文件元数据
-chmod$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], mode flags[open_mode])
-chown$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], uid int32, gid int32)
-utimes$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], times ptr[in, timeval])
+chmod$kccwf(path ptr[in, string[kccwf_abs_files]], mode flags[open_mode])
+chown$kccwf(path ptr[in, string[kccwf_abs_files]], uid int32, gid int32)
+utimes$kccwf(path ptr[in, string[kccwf_abs_files]], times ptr[in, timeval])
 
 # 高级文件操作
-rename$kccwf(old ptr[in, string["/mnt/kccwf/testfile#"]], new ptr[in, string["/mnt/kccwf/testfile#"]])
-truncate$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], length intptr)
+rename$kccwf(old ptr[in, string[kccwf_abs_files]], new ptr[in, string[kccwf_abs_files]])
+truncate$kccwf(path ptr[in, string[kccwf_abs_files]], length intptr)
 
 # 链接操作
-link$kccwf(oldpath ptr[in, string["/mnt/kccwf/testfile#"]], newpath ptr[in, string["/mnt/kccwf/hardlink#"]])
-unlink$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]])
-symlink$kccwf(target ptr[in, string["/mnt/kccwf/target_%d"]], linkpath ptr[in, string["/mnt/kccwf/symlink#"]])
+link$kccwf(oldpath ptr[in, string[kccwf_abs_files]], newpath ptr[in, string[kccwf_abs_hardlinks]])
+unlink$kccwf(path ptr[in, string[kccwf_abs_files]])
+symlink$kccwf(target ptr[in, string[kccwf_abs_targets]], linkpath ptr[in, string[kccwf_abs_symlinks]])
 
 # 扩展属性 (修正指针参数)
-setxattr$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
+setxattr$kccwf(path ptr[in, string[kccwf_abs_files]], name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
 
 fsetxattr$kccwf(fd fd, name ptr[in, string["user.test"]], value ptr[in, array[int8]], size len[value], flags int32)
 
 # 文件状态获取 (修正指针嵌套)
-stat$kccwf(path ptr[in, string["/mnt/kccwf/testfile#"]], buf ptr[out, stat_buffer])
+stat$kccwf(path ptr[in, string[kccwf_abs_files]], buf ptr[out, stat_buffer])
 
 stat_buffer {
 	st_dev		int64
@@ -130,3 +130,10 @@ stat_buffer {
 	st_blksize	int64
 	st_blocks	int64
 }
+
+kccwf_abs_files = "/mnt/kccwf/testfile#", "/mnt/kccwf/testfile1", "/mnt/kccwf/testfile2", "/mnt/kccwf/testfile3", "/mnt/kccwf/testfile4", "/mnt/kccwf/testfile5", "/mnt/kccwf/testfile6", "/mnt/kccwf/testfile7", "/mnt/kccwf/testfile8", "/mnt/kccwf/testfile9"
+kccwf_rel_files = "testfile", "testfile#", "testfile1", "testfile2", "testfile3", "testfile4", "testfile5", "testfile6", "testfile7", "testfile8", "testfile9"
+kccwf_abs_dirs = "/mnt/kccwf/testdir", "/mnt/kccwf/testdi1", "/mnt/kccwf/testdi2", "/mnt/kccwf/testdi3", "/mnt/kccwf/testdi4", "/mnt/kccwf/testdi5", "/mnt/kccwf/testdi6", "/mnt/kccwf/testdi7", "/mnt/kccwf/testdi8", "/mnt/kccwf/testdi9"
+kccwf_abs_hardlinks = "/mnt/kccwf/hardlink#", "/mnt/kccwf/hardlink1", "/mnt/kccwf/hardlink2", "/mnt/kccwf/hardlink3", "/mnt/kccwf/hardlink4", "/mnt/kccwf/hardlink5", "/mnt/kccwf/hardlink6", "/mnt/kccwf/hardlink7", "/mnt/kccwf/hardlink8", "/mnt/kccwf/hardlink9"
+kccwf_abs_symlinks = "/mnt/kccwf/symlink#", "/mnt/kccwf/symlink1", "/mnt/kccwf/symlink2", "/mnt/kccwf/symlink3", "/mnt/kccwf/symlink4", "/mnt/kccwf/symlink5", "/mnt/kccwf/symlink6", "/mnt/kccwf/symlink7", "/mnt/kccwf/symlink8", "/mnt/kccwf/symlink9"
+kccwf_abs_targets = "/mnt/kccwf/target_%d", "/mnt/kccwf/target1%d", "/mnt/kccwf/target2%d", "/mnt/kccwf/target3%d", "/mnt/kccwf/target4%d", "/mnt/kccwf/target5%d", "/mnt/kccwf/target6%d", "/mnt/kccwf/target7%d", "/mnt/kccwf/target8%d", "/mnt/kccwf/target9%d"

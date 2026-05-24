@@ -32,6 +32,21 @@ const (
 	PhaseValidation
 )
 
+// ObjectLinkProvenance describes whether a barrier request came from an
+// ObjectLinker-aligned program pair. It is diagnostic metadata only; it does
+// not affect executor semantics.
+type ObjectLinkProvenance struct {
+	Attempted   bool
+	Applied     bool
+	Unified     int
+	Exact       int
+	CrossFamily int
+}
+
+func (p ObjectLinkProvenance) Linked() bool {
+	return p.Applied || p.Unified > 0
+}
+
 // TimingExplorationInfo holds metadata about a timing exploration job.
 type TimingExplorationInfo struct {
 	// Phase indicates which phase of timing exploration this is
@@ -42,11 +57,19 @@ type TimingExplorationInfo struct {
 	AttemptNumber int
 	// DelayPlan describes the delay insertions
 	DelayPlan []DelayInsertion
+	// StartDelays carries per-barrier-participant launch delays. Unlike
+	// DelayPlan, this does not mutate the syscall program.
+	StartDelays []int64
 	// OriginalProg1 and OriginalProg2 are the original programs before mutation
 	OriginalProg1 *prog.Prog
 	OriginalProg2 *prog.Prog
 	// CandidatePairs holds pairs discovered in PhaseWidenedDiscovery, to be validated in PhaseValidation
 	CandidatePairs []*ddrd.MayUAFPair
+	// ObjectLink records whether the original discovery pair was ObjLinker-aligned.
+	ObjectLink ObjectLinkProvenance
+	// LowPriority marks validation jobs that were intentionally delayed behind fresh discovery.
+	LowPriority    bool
+	PriorityReason string
 }
 
 // DelayInsertion describes a single syz_delay insertion.
@@ -85,6 +108,12 @@ type Request struct {
 
 	// UkcPair optionally carries May-UAF metadata to preload the UKC controller.
 	UkcPair *ddrd.MayUAFPair
+	// UkcTargetDelaySide controls which target side gets the kernel access delay:
+	// 0=both, 1=use, 2=free, 3=none.
+	UkcTargetDelaySide int32
+	// UkcTargetDelayMode controls how target access delay is applied:
+	// 0=sleep in the matched access, 1=nonblocking watchpoint window.
+	UkcTargetDelayMode int32
 
 	// DisableDdrd prevents automatic DDRD collection even for barrier executions.
 	DisableDdrd bool
@@ -109,6 +138,10 @@ type Request struct {
 	// This is more precise than checking ExecFlagThreaded because default executor
 	// options may also enable threaded execution for ordinary barrier requests.
 	ThreadBarrier bool
+
+	// ObjectLink records whether this barrier request had partner objects aligned
+	// by ObjLinker before execution.
+	ObjectLink ObjectLinkProvenance
 
 	// TimingExplorationInfo holds metadata about the timing exploration job.
 	// Only set when IsTimingExploration is true.

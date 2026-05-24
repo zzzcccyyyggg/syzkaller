@@ -159,7 +159,7 @@ func (job *coverageTriageJob) recordHighYieldInteraction() {
 		return
 	}
 
-	// Skip if affinity table is disabled (e.g., in RandomBaselineMode)
+	// Skip if affinity table is disabled by configuration.
 	if job.fuzzer.raceGroup.affinityTable == nil {
 		return
 	}

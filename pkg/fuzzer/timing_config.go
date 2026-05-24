@@ -15,7 +15,7 @@
 //    - Uses WIDENED threshold to capture more potential pairs
 //    - Explores ALL potential pairs in high-quality program pairs
 //    - Deduplicates by (VarName1, VarName2, Stack1, Stack2) quadruple
-//    - Uses syz_delay() to optimize timing for each unique pair
+//    - Optionally uses syscall-local delays or barrier start-delay resampling
 
 package fuzzer
 
@@ -60,10 +60,11 @@ type TimingExplorationConfig struct {
 
 	// ======== Exploration Strategy ========
 
-	// TimingMutationStrategy: "random", "targeted", "binary_search"
+	// TimingMutationStrategy: "random", "targeted", "binary_search", "timediff", "start_delay"
 	// - random: random delay insertions at any position
 	// - targeted: focus delays around Free/Use syscalls
 	// - binary_search: iteratively refine delays based on previous results
+	// - start_delay: do not mutate programs; shift barrier participant launch time
 	TimingMutationStrategy string
 
 	// MaxAttemptsPerPair is max timing attempts per unique (VarName+Stack) pair
@@ -109,7 +110,7 @@ func DefaultTimingExplorationConfig() TimingExplorationConfig {
 		// Strategy
 		TimingMutationStrategy:   "targeted",
 		MaxAttemptsPerPair:       20,
-		MaxCorpusCountPerVarName: 0, // 0 = no limit (default)
+		MaxCorpusCountPerVarName: 0,   // 0 = no limit (default)
 		SuccessThreshold:         0.1, // 10% trigger rate = success
 
 		// Execution
@@ -150,4 +151,8 @@ func (c *TimingExplorationConfig) Validate() {
 	if c.ExecutionsPerAttempt <= 0 {
 		c.ExecutionsPerAttempt = 5
 	}
+}
+
+func isStartDelayTimingStrategy(strategy string) bool {
+	return strategy == "start_delay" || strategy == "launch_jitter"
 }

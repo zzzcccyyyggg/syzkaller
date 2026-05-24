@@ -488,8 +488,12 @@ func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, pro
 	// DUAL-QUEUE: Enqueue NEW VarName pairs to Timing Exploration
 	// Skip for thread-barrier entries — they already share address space and don't need timing exploration.
 	if !isThreadBarrier && u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
+		objectLink := queue.ObjectLinkProvenance{}
+		if req != nil {
+			objectLink = req.ObjectLink
+		}
 		for _, pair := range timingCandidates {
-			u.fuzzer.timingScheduler.OnNewVarNamePairDiscovered(prog1, prog2, pair)
+			u.fuzzer.timingScheduler.OnNewVarNamePairDiscoveredWithProvenance(prog1, prog2, pair, objectLink)
 		}
 	}
 

@@ -343,6 +343,47 @@ func TestTimingSchedulerOnNewVarNamePairDiscovered(t *testing.T) {
 	}
 }
 
+func TestTimingSchedulerStartDelayValidationJob(t *testing.T) {
+	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64)
+	if err != nil {
+		t.Skipf("test target not available: %v", err)
+	}
+
+	config := DefaultTimingExplorationConfig()
+	config.TimingMutationStrategy = "start_delay"
+	config.WidenedThresholdMicros = 20000
+	registry := NewVarNamePairRegistry(100)
+	rnd := rand.New(rand.NewSource(42))
+	scheduler := NewTimingScheduler(target, config, registry, rnd)
+
+	prog1 := &prog.Prog{Target: target}
+	prog2 := &prog.Prog{Target: target}
+	testPair := &ddrd.MayUAFPair{
+		FreeAccessName: 0x12345678,
+		UseAccessName:  0x87654321,
+		FreeCallStack:  0xAAAAAAAA,
+		UseCallStack:   0xBBBBBBBB,
+		FreeProgIdx:    1,
+		UseProgIdx:     0,
+		TimeDiff:       8_000_000,
+	}
+
+	scheduler.EnqueueForValidation(prog1, prog2, testPair, nil)
+	job := scheduler.GetNextJob()
+	if job == nil {
+		t.Fatal("start_delay validation job should be generated")
+	}
+	if len(job.DelayPlan) != 0 {
+		t.Fatalf("start_delay strategy must not insert syz_delay calls, got %d", len(job.DelayPlan))
+	}
+	if len(job.StartDelays) != 2 {
+		t.Fatalf("start_delay strategy should produce two barrier start delays, got %d", len(job.StartDelays))
+	}
+	if job.Prog1 == nil || job.Prog2 == nil {
+		t.Fatal("validation job should preserve both programs")
+	}
+}
+
 func TestTimingSchedulerIsNewVarNamePair(t *testing.T) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64)
 	if err != nil {

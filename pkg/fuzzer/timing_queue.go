@@ -16,6 +16,7 @@ import (
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
+	"github.com/google/syzkaller/pkg/fuzzer/queue"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -36,6 +37,9 @@ type HighQualityProgramPair struct {
 
 	// Original pair info (Free/Use syscall indices, etc.)
 	OriginalPair *ddrd.MayUAFPair
+
+	// ObjectLink records whether the original pair came from an ObjLinker-aligned barrier.
+	ObjectLink queue.ObjectLinkProvenance
 
 	// Exploration state
 	ExplorationCount int       // How many times this program pair has been explored
@@ -58,8 +62,17 @@ type TimingExplorationQueue struct {
 	// Queue of validation jobs (Phase 2: apply delays, use normal threshold)
 	validationQueue []*ValidationJob
 
+	// Queue of low-priority validation jobs. These are typically large
+	// candidate batches that did not retrigger the target in Phase 1; they are
+	// still useful, but should not starve fresh discovery.
+	lowPriorityValidationQueue []*ValidationJob
+
 	// VarName pairs already in queue (to avoid duplicate entries)
 	inQueue map[uint64]bool
+
+	// preferObjectLinked alternates exploration between ObjLinked and non-linked
+	// entries when both kinds are available.
+	preferObjectLinked bool
 
 	// Configuration
 	config TimingExplorationConfig
@@ -77,6 +90,9 @@ type ValidationJob struct {
 	Prog2          *prog.Prog
 	TargetPair     *ddrd.MayUAFPair
 	CandidatePairs []*ddrd.MayUAFPair
+	ObjectLink     queue.ObjectLinkProvenance
+	LowPriority    bool
+	PriorityReason string
 	EnqueuedAt     time.Time
 }
 
@@ -84,10 +100,11 @@ type ValidationJob struct {
 func NewTimingExplorationQueue(config TimingExplorationConfig) *TimingExplorationQueue {
 	config.Validate()
 	return &TimingExplorationQueue{
-		entries:         make([]*HighQualityProgramPair, 0),
-		validationQueue: make([]*ValidationJob, 0),
-		inQueue:         make(map[uint64]bool),
-		config:          config,
+		entries:                    make([]*HighQualityProgramPair, 0),
+		validationQueue:            make([]*ValidationJob, 0),
+		lowPriorityValidationQueue: make([]*ValidationJob, 0),
+		inQueue:                    make(map[uint64]bool),
+		config:                     config,
 	}
 }
 
@@ -96,6 +113,14 @@ func NewTimingExplorationQueue(config TimingExplorationConfig) *TimingExploratio
 func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 	prog1, prog2 *prog.Prog,
 	discoveredPair *ddrd.MayUAFPair,
+) bool {
+	return q.EnqueueHighQualityPairWithProvenance(prog1, prog2, discoveredPair, queue.ObjectLinkProvenance{})
+}
+
+func (q *TimingExplorationQueue) EnqueueHighQualityPairWithProvenance(
+	prog1, prog2 *prog.Prog,
+	discoveredPair *ddrd.MayUAFPair,
+	objectLink queue.ObjectLinkProvenance,
 ) bool {
 	if discoveredPair == nil || prog1 == nil {
 		return false
@@ -128,6 +153,7 @@ func (q *TimingExplorationQueue) EnqueueHighQualityPair(
 		Prog2:            clonedProg2,
 		VarNamePairID:    varNamePairID,
 		OriginalPair:     discoveredPair,
+		ObjectLink:       objectLink,
 		DiscoveredAt:     time.Now(),
 		ExplorationCount: 0,
 		PendingPairs:     make([]*ddrd.MayUAFPair, 0),
@@ -150,15 +176,28 @@ func (q *TimingExplorationQueue) DequeueForExploration() *HighQualityProgramPair
 		return nil
 	}
 
-	// FIFO: take from front
-	entry := q.entries[0]
-	q.entries = q.entries[1:]
+	idx := q.pickExplorationIndexLocked()
+	entry := q.entries[idx]
+	q.entries = append(q.entries[:idx], q.entries[idx+1:]...)
+	q.preferObjectLinked = !entry.ObjectLink.Linked()
 
 	entry.ExplorationCount++
 	entry.LastExploredAt = time.Now()
 	q.totalExplored++
 
 	return entry
+}
+
+func (q *TimingExplorationQueue) pickExplorationIndexLocked() int {
+	if len(q.entries) <= 1 {
+		return 0
+	}
+	for i, entry := range q.entries {
+		if entry != nil && entry.ObjectLink.Linked() == q.preferObjectLinked {
+			return i
+		}
+	}
+	return 0
 }
 
 // RequeueForMoreExploration puts a program pair back for more exploration.
@@ -253,7 +292,7 @@ func (q *TimingExplorationQueue) GetStats() (enqueued, explored, pairsFound, cur
 func (q *TimingExplorationQueue) PendingCounts() (exploration, validation int) {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
-	return len(q.entries), len(q.validationQueue)
+	return len(q.entries), len(q.validationQueue) + len(q.lowPriorityValidationQueue)
 }
 
 // Clear removes all entries from the queue.
@@ -263,6 +302,7 @@ func (q *TimingExplorationQueue) Clear() {
 
 	q.entries = make([]*HighQualityProgramPair, 0)
 	q.validationQueue = make([]*ValidationJob, 0)
+	q.lowPriorityValidationQueue = make([]*ValidationJob, 0)
 	q.inQueue = make(map[uint64]bool)
 }
 
@@ -272,6 +312,17 @@ func (q *TimingExplorationQueue) EnqueueForValidation(
 	prog1, prog2 *prog.Prog,
 	targetPair *ddrd.MayUAFPair,
 	candidatePairs []*ddrd.MayUAFPair,
+) {
+	q.EnqueueForValidationWithProvenance(prog1, prog2, targetPair, candidatePairs, queue.ObjectLinkProvenance{}, false, "")
+}
+
+func (q *TimingExplorationQueue) EnqueueForValidationWithProvenance(
+	prog1, prog2 *prog.Prog,
+	targetPair *ddrd.MayUAFPair,
+	candidatePairs []*ddrd.MayUAFPair,
+	objectLink queue.ObjectLinkProvenance,
+	lowPriority bool,
+	reason string,
 ) {
 	if prog1 == nil || targetPair == nil {
 		return
@@ -284,13 +335,20 @@ func (q *TimingExplorationQueue) EnqueueForValidation(
 		Prog1:          prog1.Clone(),
 		TargetPair:     targetPair,
 		CandidatePairs: candidatePairs,
+		ObjectLink:     objectLink,
+		LowPriority:    lowPriority,
+		PriorityReason: reason,
 		EnqueuedAt:     time.Now(),
 	}
 	if prog2 != nil {
 		job.Prog2 = prog2.Clone()
 	}
 
-	q.validationQueue = append(q.validationQueue, job)
+	if lowPriority {
+		q.lowPriorityValidationQueue = append(q.lowPriorityValidationQueue, job)
+	} else {
+		q.validationQueue = append(q.validationQueue, job)
+	}
 }
 
 // DequeueValidationJob returns the next validation job (Phase 2).
@@ -310,9 +368,38 @@ func (q *TimingExplorationQueue) DequeueValidationJob() *ValidationJob {
 	return job
 }
 
+// DequeueLowPriorityValidationJob returns the next low-priority validation job.
+// These jobs run after normal validation and fresh discovery.
+func (q *TimingExplorationQueue) DequeueLowPriorityValidationJob() *ValidationJob {
+	q.mu.Lock()
+	defer q.mu.Unlock()
+
+	if len(q.lowPriorityValidationQueue) == 0 {
+		return nil
+	}
+
+	job := q.lowPriorityValidationQueue[0]
+	q.lowPriorityValidationQueue = q.lowPriorityValidationQueue[1:]
+	q.totalValidated++
+
+	return job
+}
+
 // HasValidationJobs returns true if there are Phase 2 validation jobs pending.
 func (q *TimingExplorationQueue) HasValidationJobs() bool {
 	q.mu.RLock()
 	defer q.mu.RUnlock()
+	return len(q.validationQueue) > 0 || len(q.lowPriorityValidationQueue) > 0
+}
+
+func (q *TimingExplorationQueue) HasHighPriorityValidationJobs() bool {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
 	return len(q.validationQueue) > 0
+}
+
+func (q *TimingExplorationQueue) LowPriorityValidationPending() int {
+	q.mu.RLock()
+	defer q.mu.RUnlock()
+	return len(q.lowPriorityValidationQueue)
 }
