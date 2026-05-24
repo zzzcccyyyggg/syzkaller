@@ -140,6 +140,8 @@ def build_producer_cmd(manifest: dict[str, Any], module: str, info: dict[str, An
             producer.get("codex_model") or "gpt-5.4",
             "--codex-sandbox",
             producer.get("codex_sandbox") or "read-only",
+            "--codex-reasoning-effort",
+            producer.get("codex_reasoning_effort") or "medium",
         ]
     elif provider == "kimi":
         cmd += [

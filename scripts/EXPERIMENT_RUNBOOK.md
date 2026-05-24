@@ -883,9 +883,9 @@ STATIC_NOOBJ_POLICY=runtime-randobj
 
 LLM producer 固定预算:
 
-- `entries_per_round=8`
+- `entries_per_round=4`
 - `variants_per_entry=2`
-- `parallel_calls=4`
+- `parallel_calls=2`
 - `max_calls=8`
 - `poll_sec=30`
 - `timeout_sec=600`
@@ -896,10 +896,11 @@ LLM producer 固定预算:
 | ---- | -------- | ----- | -------- | --------- |
 | random | none | none | none | none |
 | DeepSeek V4 Pro | `deepseek` | `deepseek-v4-pro` | disabled | thinking 关闭时不发送 |
-| GPT-4 | `codex` | 实际 `codex exec` 可用的 GPT-4 model id | n/a | high |
+| GPT-5.4 | `codex` | `gpt-5.4` | n/a | medium |
 | Kimi 2.6 | `kimi` | `kimi-k2.6` | disabled | thinking 关闭时不发送 |
 
-如果某 provider 的 reasoning-effort 与 thinking 独立存在，则统一设为 `high`。
+本轮对比中 Codex/GPT-5.4 固定使用 `medium` reasoning，以匹配 f2fs 参考轮次。
+其他 provider 如果存在与 thinking 独立的 reasoning-effort，则统一设为 `high`。
 如果 API 只允许 thinking enabled 时发送 reasoning-effort，则保持 thinking disabled，不发送该字段。
 
 ### 10.2 Validate 侧固定配置

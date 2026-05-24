@@ -49,7 +49,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-model", default=os.environ.get("CODEX_MODEL", DEFAULT_CODEX_MODEL))
     parser.add_argument("--codex-profile", default=os.environ.get("CODEX_PROFILE", ""))
     parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default=os.environ.get("CODEX_SANDBOX", "read-only"))
-    parser.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], default=os.environ.get("CODEX_REASONING_EFFORT", "high"))
+    parser.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], default=os.environ.get("CODEX_REASONING_EFFORT", "medium"))
     parser.add_argument("--dry-run", action="store_true", help="only sample entries and write prompts")
     parser.add_argument("--api-key-stdin", action="store_true", help="read API key from stdin instead of environment")
     parser.add_argument("--checker", default="./tools/syz-llm-candidate-check", help="go package/path for the local checker")

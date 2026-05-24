@@ -224,6 +224,8 @@ def launch_one(repo: Path, provider: str, module: str, info: dict[str, Any]) -> 
             "gpt-5.4",
             "--codex-sandbox",
             "read-only",
+            "--codex-reasoning-effort",
+            "medium",
         ]
     else:
         producer_cmd += [
@@ -346,7 +348,9 @@ def main() -> int:
         "modules": {},
     }
     if args.provider == "codex":
-        manifest["producer"].update({"codex_model": "gpt-5.4", "codex_sandbox": "read-only"})
+        manifest["producer"].update(
+            {"codex_model": "gpt-5.4", "codex_sandbox": "read-only", "codex_reasoning_effort": "medium"}
+        )
     else:
         manifest["producer"].update(
             {

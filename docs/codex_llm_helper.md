@@ -157,9 +157,9 @@ fuzz VMs: 4
 fuzz duration: 10 hours
 manager LLM seed poll interval: 10 seconds
 manager max seeds per poll: 32
-producer entries per round: 8
+producer entries per round: 4
 producer variants per entry: 2
-producer parallel calls: 4
+producer parallel calls: 2
 producer max calls per generated program: 8
 producer poll interval: 30 seconds
 producer timeout: 600 seconds
@@ -177,12 +177,14 @@ seeds from different providers.
 | ------- | ------------- | -------- | -------- | -------------- |
 | Random | none | none | none | none |
 | DeepSeek V4 Pro | `--provider deepseek` | `deepseek-v4-pro` | `disabled` | not sent when thinking is disabled |
-| GPT-4 | `--provider codex` | exact GPT-4 model id used by `codex exec` | n/a | `--codex-reasoning-effort high` |
+| GPT-5.4 | `--provider codex` | `gpt-5.4` | n/a | `--codex-reasoning-effort medium` |
 | Kimi 2.6 | `--provider kimi` | `kimi-k2.6` | `disabled` | not sent when thinking is disabled |
 
-If a provider exposes a reasoning-effort knob that is independent of thinking,
-set it to `high`. If the API only accepts `reasoning_effort` when thinking is
-enabled, keep thinking disabled and do not send the reasoning field.
+For this comparison, Codex/GPT-5.4 is fixed to `medium` reasoning to match the
+validated f2fs reference run. For any other provider that exposes a
+reasoning-effort knob independent of thinking, set it to `high`. If the API
+only accepts `reasoning_effort` when thinking is enabled, keep thinking
+disabled and do not send the reasoning field.
 
 Example continuous producer commands:
 
@@ -194,24 +196,24 @@ python3 tools/llm-mutate-pilot/continuous.py \
   --config <fuzz.cfg> \
   --module <module> \
   --out <producer-dir> \
-  --entries-per-round 8 \
+  --entries-per-round 4 \
   --variants-per-entry 2 \
-  --parallel-calls 4 \
+  --parallel-calls 2 \
   --max-calls 8 \
   --poll-sec 30 \
   --timeout-sec 600
 
 python3 tools/llm-mutate-pilot/continuous.py \
   --provider codex \
-  --codex-model <gpt-4-model-id> \
-  --codex-reasoning-effort high \
+  --codex-model gpt-5.4 \
+  --codex-reasoning-effort medium \
   --codex-sandbox read-only \
   --config <fuzz.cfg> \
   --module <module> \
   --out <producer-dir> \
-  --entries-per-round 8 \
+  --entries-per-round 4 \
   --variants-per-entry 2 \
-  --parallel-calls 4 \
+  --parallel-calls 2 \
   --max-calls 8 \
   --poll-sec 30 \
   --timeout-sec 600
@@ -224,9 +226,9 @@ python3 tools/llm-mutate-pilot/continuous.py \
   --config <fuzz.cfg> \
   --module <module> \
   --out <producer-dir> \
-  --entries-per-round 8 \
+  --entries-per-round 4 \
   --variants-per-entry 2 \
-  --parallel-calls 4 \
+  --parallel-calls 2 \
   --max-calls 8 \
   --poll-sec 30 \
   --timeout-sec 600
