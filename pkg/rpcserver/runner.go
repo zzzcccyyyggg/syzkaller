@@ -708,12 +708,18 @@ func (runner *Runner) buildExecRequest(id int64, ctx *requestContext) (*flatrpc.
 		execReq.UkcUseName = pair.UseAccessName
 		execReq.UkcUseStack = pair.UseCallStack
 		execReq.UkcUseSn = pair.UseSN
+		execReq.UkcUseSnMin = pair.UseSNMin
+		execReq.UkcUseSnMax = pair.UseSNMax
 		execReq.UkcUseTid = pair.UseTid
 		execReq.UkcFreeName = pair.FreeAccessName
 		execReq.UkcFreeStack = pair.FreeCallStack
 		execReq.UkcFreeSn = pair.FreeSN
+		execReq.UkcFreeSnMin = pair.FreeSNMin
+		execReq.UkcFreeSnMax = pair.FreeSNMax
 		execReq.UkcFreeTid = pair.FreeTid
 		execReq.UkcUseAccessDelayTime = ukcDelayMicros(pair)
+		execReq.UkcTargetDelaySide = req.UkcTargetDelaySide
+		execReq.UkcTargetDelayMode = req.UkcTargetDelayMode
 		execReq.UkcIsValid = true
 	}
 	if req.IsValidationMode {

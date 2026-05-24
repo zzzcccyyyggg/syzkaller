@@ -255,6 +255,9 @@ func (cfg *Config) completeServices() error {
 }
 
 func (cfg *Config) initBarrierMask() error {
+	if cfg.Experimental.StaticInputExploration && !cfg.Experimental.UAFMode {
+		return fmt.Errorf("experimental.static_input_exploration requires uaf_mode to be enabled")
+	}
 	if cfg.Experimental.UAFMode && !cfg.Experimental.BarrierMode {
 		return fmt.Errorf("experimental.uaf_mode requires barrier_mode to be enabled")
 	}
@@ -334,17 +337,68 @@ func (cfg *Config) initUAFValidate() error {
 	validate := cfg.Experimental.UAFValidate
 	validate.DisableBackoffSkip = validate.DisableBackoffSkip || validate.DisableHBSkip
 	validate.ContinueAfterBackoff = validate.ContinueAfterBackoff || validate.ContinueAfterHB
+	validate.DisableAccessDelay = validate.DisableAccessDelay || validate.DisableTargetDelay
 	if validate.MaxConcurrent <= 0 {
 		validate.MaxConcurrent = 1
 	}
 	if validate.DelayRetryBudget <= 0 {
 		validate.DelayRetryBudget = 1
 	}
+	if validate.MaxReplayHistory < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_replay_history must be >= 0")
+	}
 	if validate.TimeoutSeconds <= 0 {
 		validate.TimeoutSeconds = 90
 	}
+	if validate.MaxBatchTimeoutSeconds < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_batch_timeout_seconds must be >= 0")
+	}
+	if validate.VerifyAccessDelayMinUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_min_us must be >= 0")
+	}
 	if validate.RepeatCount <= 0 {
 		validate.RepeatCount = 1
+	}
+	if validate.TargetMatchMode == "" {
+		validate.TargetMatchMode = "sn-fallback"
+	}
+	switch validate.TargetMatchMode {
+	case "sn-fallback", "strict-sn", "sn-range", "sn-only", "sn-range-only", "stack-only", "site-only":
+	default:
+		return fmt.Errorf("experimental.uaf_validate.target_match_mode must be one of: sn-fallback, strict-sn, sn-range, sn-only, sn-range-only, stack-only, site-only")
+	}
+	if validate.SNFallbackRange < 0 {
+		return fmt.Errorf("experimental.uaf_validate.sn_fallback_range must be >= 0")
+	}
+	if validate.TargetDelaySide == "" {
+		validate.TargetDelaySide = "both"
+	}
+	switch validate.TargetDelaySide {
+	case "both", "use", "free", "none":
+	default:
+		return fmt.Errorf("experimental.uaf_validate.target_delay_side must be one of: both, use, free, none")
+	}
+	if validate.TargetDelayMode == "" {
+		validate.TargetDelayMode = "sleep"
+	}
+	switch validate.TargetDelayMode {
+	case "sleep", "nonblocking":
+	default:
+		return fmt.Errorf("experimental.uaf_validate.target_delay_mode must be one of: sleep, nonblocking")
+	}
+	if validate.OriginMatchMode == "" {
+		validate.OriginMatchMode = "exact"
+	}
+	switch validate.OriginMatchMode {
+	case "exact", "varname", "primary-varname":
+	default:
+		return fmt.Errorf("experimental.uaf_validate.origin_match_mode must be one of: exact, varname, primary-varname")
+	}
+	if validate.MaxStablePairsPerOrigin < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_stable_pairs_per_origin must be >= 0")
+	}
+	if validate.MaxStablePairsPerEntry < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_stable_pairs_per_entry must be >= 0")
 	}
 	if validate.ExecutorProgramTimeoutSeconds < 0 {
 		return fmt.Errorf("experimental.uaf_validate.executor_program_timeout_seconds must be >= 0")

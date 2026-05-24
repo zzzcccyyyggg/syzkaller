@@ -6,6 +6,12 @@
 
 // 和内核定义保持一致：最多支持两个 testing TID
 #define KCCWF_MAX_TESTING_TID_NUM 0x2
+#define KCCWF_UAF_DELAY_BOTH 0
+#define KCCWF_UAF_DELAY_USE 1
+#define KCCWF_UAF_DELAY_FREE 2
+#define KCCWF_UAF_DELAY_NONE 3
+#define KCCWF_UAF_DELAY_MODE_SLEEP 0
+#define KCCWF_UAF_DELAY_MODE_NONBLOCKING 1
 
 // 内核里 tid_t 本质上是 32 位的 pid_t，这里用 int32_t 对齐大小即可
 typedef int32_t tid_t;
@@ -60,12 +66,18 @@ typedef struct {
 	unsigned long use_name;
 	unsigned long use_stack;
 	int use_sn;
+	int use_sn_min;
+	int use_sn_max;
 	int use_tid;
 	unsigned long free_name;
 	unsigned long free_stack;
 	int free_sn;
+	int free_sn_min;
+	int free_sn_max;
 	int free_tid;
 	int use_access_delay_time;
+	int target_delay_side;
+	int target_delay_mode;
 	bool is_valid;
 } may_uaf_pair_t;
 

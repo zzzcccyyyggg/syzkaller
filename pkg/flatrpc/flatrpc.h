@@ -1960,9 +1960,15 @@ struct ExecRequestRawT : public flatbuffers::NativeTable {
   int32_t ukc_free_sn = 0;
   int32_t ukc_free_tid = 0;
   int32_t ukc_use_access_delay_time = 0;
+  int32_t ukc_target_delay_side = 0;
+  int32_t ukc_target_delay_mode = 0;
   bool ukc_is_valid = false;
   bool ukc_use_fine_mode = false;
   int64_t timing_threshold_us = 0;
+  int32_t ukc_use_sn_min = 0;
+  int32_t ukc_use_sn_max = 0;
+  int32_t ukc_free_sn_min = 0;
+  int32_t ukc_free_sn_max = 0;
   ExecRequestRawT() = default;
   ExecRequestRawT(const ExecRequestRawT &o);
   ExecRequestRawT(ExecRequestRawT&&) FLATBUFFERS_NOEXCEPT = default;
@@ -1994,9 +2000,15 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
     VT_UKC_FREE_SN = 40,
     VT_UKC_FREE_TID = 42,
     VT_UKC_USE_ACCESS_DELAY_TIME = 44,
-    VT_UKC_IS_VALID = 46,
-    VT_UKC_USE_FINE_MODE = 48,
-    VT_TIMING_THRESHOLD_US = 50
+    VT_UKC_TARGET_DELAY_SIDE = 46,
+    VT_UKC_TARGET_DELAY_MODE = 48,
+    VT_UKC_IS_VALID = 50,
+    VT_UKC_USE_FINE_MODE = 52,
+    VT_TIMING_THRESHOLD_US = 54,
+    VT_UKC_USE_SN_MIN = 56,
+    VT_UKC_USE_SN_MAX = 58,
+    VT_UKC_FREE_SN_MIN = 60,
+    VT_UKC_FREE_SN_MAX = 62
   };
   int64_t id() const {
     return GetField<int64_t>(VT_ID, 0);
@@ -2061,6 +2073,12 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   int32_t ukc_use_access_delay_time() const {
     return GetField<int32_t>(VT_UKC_USE_ACCESS_DELAY_TIME, 0);
   }
+  int32_t ukc_target_delay_side() const {
+    return GetField<int32_t>(VT_UKC_TARGET_DELAY_SIDE, 0);
+  }
+  int32_t ukc_target_delay_mode() const {
+    return GetField<int32_t>(VT_UKC_TARGET_DELAY_MODE, 0);
+  }
   bool ukc_is_valid() const {
     return GetField<uint8_t>(VT_UKC_IS_VALID, 0) != 0;
   }
@@ -2069,6 +2087,18 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
   }
   int64_t timing_threshold_us() const {
     return GetField<int64_t>(VT_TIMING_THRESHOLD_US, 0);
+  }
+  int32_t ukc_use_sn_min() const {
+    return GetField<int32_t>(VT_UKC_USE_SN_MIN, 0);
+  }
+  int32_t ukc_use_sn_max() const {
+    return GetField<int32_t>(VT_UKC_USE_SN_MAX, 0);
+  }
+  int32_t ukc_free_sn_min() const {
+    return GetField<int32_t>(VT_UKC_FREE_SN_MIN, 0);
+  }
+  int32_t ukc_free_sn_max() const {
+    return GetField<int32_t>(VT_UKC_FREE_SN_MAX, 0);
   }
   bool Verify(flatbuffers::Verifier &verifier) const {
     return VerifyTableStart(verifier) &&
@@ -2096,9 +2126,15 @@ struct ExecRequestRaw FLATBUFFERS_FINAL_CLASS : private flatbuffers::Table {
            VerifyField<int32_t>(verifier, VT_UKC_FREE_SN, 4) &&
            VerifyField<int32_t>(verifier, VT_UKC_FREE_TID, 4) &&
            VerifyField<int32_t>(verifier, VT_UKC_USE_ACCESS_DELAY_TIME, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_TARGET_DELAY_SIDE, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_TARGET_DELAY_MODE, 4) &&
            VerifyField<uint8_t>(verifier, VT_UKC_IS_VALID, 1) &&
            VerifyField<uint8_t>(verifier, VT_UKC_USE_FINE_MODE, 1) &&
            VerifyField<int64_t>(verifier, VT_TIMING_THRESHOLD_US, 8) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_SN_MIN, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_USE_SN_MAX, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_FREE_SN_MIN, 4) &&
+           VerifyField<int32_t>(verifier, VT_UKC_FREE_SN_MAX, 4) &&
            verifier.EndTable();
   }
   ExecRequestRawT *UnPack(const flatbuffers::resolver_function_t *_resolver = nullptr) const;
@@ -2173,6 +2209,12 @@ struct ExecRequestRawBuilder {
   void add_ukc_use_access_delay_time(int32_t ukc_use_access_delay_time) {
     fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_ACCESS_DELAY_TIME, ukc_use_access_delay_time, 0);
   }
+  void add_ukc_target_delay_side(int32_t ukc_target_delay_side) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_TARGET_DELAY_SIDE, ukc_target_delay_side, 0);
+  }
+  void add_ukc_target_delay_mode(int32_t ukc_target_delay_mode) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_TARGET_DELAY_MODE, ukc_target_delay_mode, 0);
+  }
   void add_ukc_is_valid(bool ukc_is_valid) {
     fbb_.AddElement<uint8_t>(ExecRequestRaw::VT_UKC_IS_VALID, static_cast<uint8_t>(ukc_is_valid), 0);
   }
@@ -2181,6 +2223,18 @@ struct ExecRequestRawBuilder {
   }
   void add_timing_threshold_us(int64_t timing_threshold_us) {
     fbb_.AddElement<int64_t>(ExecRequestRaw::VT_TIMING_THRESHOLD_US, timing_threshold_us, 0);
+  }
+  void add_ukc_use_sn_min(int32_t ukc_use_sn_min) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_SN_MIN, ukc_use_sn_min, 0);
+  }
+  void add_ukc_use_sn_max(int32_t ukc_use_sn_max) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_USE_SN_MAX, ukc_use_sn_max, 0);
+  }
+  void add_ukc_free_sn_min(int32_t ukc_free_sn_min) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_FREE_SN_MIN, ukc_free_sn_min, 0);
+  }
+  void add_ukc_free_sn_max(int32_t ukc_free_sn_max) {
+    fbb_.AddElement<int32_t>(ExecRequestRaw::VT_UKC_FREE_SN_MAX, ukc_free_sn_max, 0);
   }
   explicit ExecRequestRawBuilder(flatbuffers::FlatBufferBuilder &_fbb)
         : fbb_(_fbb) {
@@ -2216,9 +2270,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
     int32_t ukc_free_sn = 0,
     int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
+    int32_t ukc_target_delay_side = 0,
+    int32_t ukc_target_delay_mode = 0,
     bool ukc_is_valid = false,
     bool ukc_use_fine_mode = false,
-    int64_t timing_threshold_us = 0) {
+    int64_t timing_threshold_us = 0,
+    int32_t ukc_use_sn_min = 0,
+    int32_t ukc_use_sn_max = 0,
+    int32_t ukc_free_sn_min = 0,
+    int32_t ukc_free_sn_max = 0) {
   ExecRequestRawBuilder builder_(_fbb);
   builder_.add_timing_threshold_us(timing_threshold_us);
   builder_.add_ukc_free_stack(ukc_free_stack);
@@ -2231,6 +2291,12 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(
   builder_.add_avoid(avoid);
   builder_.add_type(type);
   builder_.add_id(id);
+  builder_.add_ukc_free_sn_max(ukc_free_sn_max);
+  builder_.add_ukc_free_sn_min(ukc_free_sn_min);
+  builder_.add_ukc_use_sn_max(ukc_use_sn_max);
+  builder_.add_ukc_use_sn_min(ukc_use_sn_min);
+  builder_.add_ukc_target_delay_mode(ukc_target_delay_mode);
+  builder_.add_ukc_target_delay_side(ukc_target_delay_side);
   builder_.add_ukc_use_access_delay_time(ukc_use_access_delay_time);
   builder_.add_ukc_free_tid(ukc_free_tid);
   builder_.add_ukc_free_sn(ukc_free_sn);
@@ -2270,9 +2336,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
     int32_t ukc_free_sn = 0,
     int32_t ukc_free_tid = 0,
     int32_t ukc_use_access_delay_time = 0,
+    int32_t ukc_target_delay_side = 0,
+    int32_t ukc_target_delay_mode = 0,
     bool ukc_is_valid = false,
     bool ukc_use_fine_mode = false,
-    int64_t timing_threshold_us = 0) {
+    int64_t timing_threshold_us = 0,
+    int32_t ukc_use_sn_min = 0,
+    int32_t ukc_use_sn_max = 0,
+    int32_t ukc_free_sn_min = 0,
+    int32_t ukc_free_sn_max = 0) {
   auto data__ = data ? _fbb.CreateVector<uint8_t>(*data) : 0;
   auto all_signal__ = all_signal ? _fbb.CreateVector<int32_t>(*all_signal) : 0;
   auto barrier_start_delay_us__ = barrier_start_delay_us ? _fbb.CreateVector<int64_t>(*barrier_start_delay_us) : 0;
@@ -2299,9 +2371,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRawDirect(
       ukc_free_sn,
       ukc_free_tid,
       ukc_use_access_delay_time,
+      ukc_target_delay_side,
+      ukc_target_delay_mode,
       ukc_is_valid,
       ukc_use_fine_mode,
-      timing_threshold_us);
+      timing_threshold_us,
+      ukc_use_sn_min,
+      ukc_use_sn_max,
+      ukc_free_sn_min,
+      ukc_free_sn_max);
 }
 
 flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT *_o, const flatbuffers::rehasher_function_t *_rehasher = nullptr);
@@ -4296,9 +4374,15 @@ inline ExecRequestRawT::ExecRequestRawT(const ExecRequestRawT &o)
         ukc_free_sn(o.ukc_free_sn),
         ukc_free_tid(o.ukc_free_tid),
         ukc_use_access_delay_time(o.ukc_use_access_delay_time),
+        ukc_target_delay_side(o.ukc_target_delay_side),
+        ukc_target_delay_mode(o.ukc_target_delay_mode),
         ukc_is_valid(o.ukc_is_valid),
         ukc_use_fine_mode(o.ukc_use_fine_mode),
-        timing_threshold_us(o.timing_threshold_us) {
+        timing_threshold_us(o.timing_threshold_us),
+        ukc_use_sn_min(o.ukc_use_sn_min),
+        ukc_use_sn_max(o.ukc_use_sn_max),
+        ukc_free_sn_min(o.ukc_free_sn_min),
+        ukc_free_sn_max(o.ukc_free_sn_max) {
 }
 
 inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFERS_NOEXCEPT {
@@ -4323,9 +4407,15 @@ inline ExecRequestRawT &ExecRequestRawT::operator=(ExecRequestRawT o) FLATBUFFER
   std::swap(ukc_free_sn, o.ukc_free_sn);
   std::swap(ukc_free_tid, o.ukc_free_tid);
   std::swap(ukc_use_access_delay_time, o.ukc_use_access_delay_time);
+  std::swap(ukc_target_delay_side, o.ukc_target_delay_side);
+  std::swap(ukc_target_delay_mode, o.ukc_target_delay_mode);
   std::swap(ukc_is_valid, o.ukc_is_valid);
   std::swap(ukc_use_fine_mode, o.ukc_use_fine_mode);
   std::swap(timing_threshold_us, o.timing_threshold_us);
+  std::swap(ukc_use_sn_min, o.ukc_use_sn_min);
+  std::swap(ukc_use_sn_max, o.ukc_use_sn_max);
+  std::swap(ukc_free_sn_min, o.ukc_free_sn_min);
+  std::swap(ukc_free_sn_max, o.ukc_free_sn_max);
   return *this;
 }
 
@@ -4359,9 +4449,15 @@ inline void ExecRequestRaw::UnPackTo(ExecRequestRawT *_o, const flatbuffers::res
   { auto _e = ukc_free_sn(); _o->ukc_free_sn = _e; }
   { auto _e = ukc_free_tid(); _o->ukc_free_tid = _e; }
   { auto _e = ukc_use_access_delay_time(); _o->ukc_use_access_delay_time = _e; }
+  { auto _e = ukc_target_delay_side(); _o->ukc_target_delay_side = _e; }
+  { auto _e = ukc_target_delay_mode(); _o->ukc_target_delay_mode = _e; }
   { auto _e = ukc_is_valid(); _o->ukc_is_valid = _e; }
   { auto _e = ukc_use_fine_mode(); _o->ukc_use_fine_mode = _e; }
   { auto _e = timing_threshold_us(); _o->timing_threshold_us = _e; }
+  { auto _e = ukc_use_sn_min(); _o->ukc_use_sn_min = _e; }
+  { auto _e = ukc_use_sn_max(); _o->ukc_use_sn_max = _e; }
+  { auto _e = ukc_free_sn_min(); _o->ukc_free_sn_min = _e; }
+  { auto _e = ukc_free_sn_max(); _o->ukc_free_sn_max = _e; }
 }
 
 inline flatbuffers::Offset<ExecRequestRaw> ExecRequestRaw::Pack(flatbuffers::FlatBufferBuilder &_fbb, const ExecRequestRawT* _o, const flatbuffers::rehasher_function_t *_rehasher) {
@@ -4393,9 +4489,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
   auto _ukc_free_sn = _o->ukc_free_sn;
   auto _ukc_free_tid = _o->ukc_free_tid;
   auto _ukc_use_access_delay_time = _o->ukc_use_access_delay_time;
+  auto _ukc_target_delay_side = _o->ukc_target_delay_side;
+  auto _ukc_target_delay_mode = _o->ukc_target_delay_mode;
   auto _ukc_is_valid = _o->ukc_is_valid;
   auto _ukc_use_fine_mode = _o->ukc_use_fine_mode;
   auto _timing_threshold_us = _o->timing_threshold_us;
+  auto _ukc_use_sn_min = _o->ukc_use_sn_min;
+  auto _ukc_use_sn_max = _o->ukc_use_sn_max;
+  auto _ukc_free_sn_min = _o->ukc_free_sn_min;
+  auto _ukc_free_sn_max = _o->ukc_free_sn_max;
   return rpc::CreateExecRequestRaw(
       _fbb,
       _id,
@@ -4419,9 +4521,15 @@ inline flatbuffers::Offset<ExecRequestRaw> CreateExecRequestRaw(flatbuffers::Fla
       _ukc_free_sn,
       _ukc_free_tid,
       _ukc_use_access_delay_time,
+      _ukc_target_delay_side,
+      _ukc_target_delay_mode,
       _ukc_is_valid,
       _ukc_use_fine_mode,
-      _timing_threshold_us);
+      _timing_threshold_us,
+      _ukc_use_sn_min,
+      _ukc_use_sn_max,
+      _ukc_free_sn_min,
+      _ukc_free_sn_max);
 }
 
 inline SignalUpdateRawT *SignalUpdateRaw::UnPack(const flatbuffers::resolver_function_t *_resolver) const {

@@ -10,6 +10,7 @@
 #include "ddrd/trace_manager.h"
 #include "ukc.h"
 #include <algorithm>
+#include <cerrno>
 #include <cstdint>
 #include <deque>
 #include <functional>
@@ -593,9 +594,19 @@ private:
 		if (msg_->ukc_is_valid) {
 			req.ukc_use_name = msg_->ukc_use_name;
 			req.ukc_use_stack = msg_->ukc_use_stack;
+			req.ukc_use_sn = msg_->ukc_use_sn;
+			req.ukc_use_sn_min = msg_->ukc_use_sn_min;
+			req.ukc_use_sn_max = msg_->ukc_use_sn_max;
+			req.ukc_use_tid = msg_->ukc_use_tid;
 			req.ukc_free_name = msg_->ukc_free_name;
 			req.ukc_free_stack = msg_->ukc_free_stack;
+			req.ukc_free_sn = msg_->ukc_free_sn;
+			req.ukc_free_sn_min = msg_->ukc_free_sn_min;
+			req.ukc_free_sn_max = msg_->ukc_free_sn_max;
+			req.ukc_free_tid = msg_->ukc_free_tid;
 			req.ukc_use_access_delay_time = msg_->ukc_use_access_delay_time;
+			req.ukc_target_delay_side = msg_->ukc_target_delay_side;
+			req.ukc_target_delay_mode = msg_->ukc_target_delay_mode;
 			req.ukc_is_valid = true;
 		}
 		exec_start_ = current_time_ms();
@@ -835,6 +846,7 @@ public:
 	      warned_unavailable_(false),
 	      extended_requested_(false),
 	      active_for_group_(false),
+	      target_pair_active_(false),
 	      timing_threshold_us_(0)
 	{
 	}
@@ -843,6 +855,8 @@ public:
 	{
 		if (initialized_)
 			race_detector_cleanup(&detector_);
+		if (target_pair_active_)
+			ukc_clear_may_uaf_pair();
 		ukc_enter_disable_mode();
 	}
 
@@ -866,24 +880,36 @@ public:
 			pair.use_name = req->ukc_use_name;
 			pair.use_stack = req->ukc_use_stack;
 			pair.use_sn = req->ukc_use_sn;
+			pair.use_sn_min = req->ukc_use_sn_min;
+			pair.use_sn_max = req->ukc_use_sn_max;
 			pair.use_tid = req->ukc_use_tid;
 			pair.free_name = req->ukc_free_name;
 			pair.free_stack = req->ukc_free_stack;
 			pair.free_sn = req->ukc_free_sn;
+			pair.free_sn_min = req->ukc_free_sn_min;
+			pair.free_sn_max = req->ukc_free_sn_max;
 			pair.free_tid = req->ukc_free_tid;
 			pair.use_access_delay_time = req->ukc_use_access_delay_time;
+			pair.target_delay_side = req->ukc_target_delay_side;
+			pair.target_delay_mode = req->ukc_target_delay_mode;
 			pair.is_valid = true;
 			set_pair = true;
 		} else if (collect_uaf && ukc_preload_valid) {
 			pair.use_name = ukc_preload_pair.use_name;
 			pair.use_stack = ukc_preload_pair.use_stack;
 			pair.use_sn = ukc_preload_pair.use_sn;
+			pair.use_sn_min = ukc_preload_pair.use_sn_min;
+			pair.use_sn_max = ukc_preload_pair.use_sn_max;
 			pair.use_tid = ukc_preload_pair.use_tid;
 			pair.free_name = ukc_preload_pair.free_name;
 			pair.free_stack = ukc_preload_pair.free_stack;
 			pair.free_sn = ukc_preload_pair.free_sn;
+			pair.free_sn_min = ukc_preload_pair.free_sn_min;
+			pair.free_sn_max = ukc_preload_pair.free_sn_max;
 			pair.free_tid = ukc_preload_pair.free_tid;
 			pair.use_access_delay_time = ukc_preload_pair.use_access_delay_time;
+			pair.target_delay_side = ukc_preload_pair.target_delay_side;
+			pair.target_delay_mode = ukc_preload_pair.target_delay_mode;
 			pair.is_valid = true;
 			set_pair = true;
 		}
@@ -895,9 +921,25 @@ public:
 			} else {
 				ukc_enter_monitor_mode();
 			}
-			ukc_set_may_uaf_pair(&pair);
+			int set_ret = ukc_set_may_uaf_pair(&pair);
+			target_pair_active_ = set_ret == 0;
+			fprintf(stderr,
+				"[KCCWF_UAF_TARGET_INSTALL] ret=%d fine=%d use=%llu use_stack=%llu use_sn=%d use_range=%d-%d use_tid=%d free=%llu free_stack=%llu free_sn=%d free_range=%d-%d free_tid=%d delay=%d delay_side=%d delay_mode=%d active=%d\n",
+				set_ret, req && req->ukc_use_fine_mode ? 1 : 0,
+				(unsigned long long)pair.use_name,
+				(unsigned long long)pair.use_stack, pair.use_sn,
+				pair.use_sn_min, pair.use_sn_max, pair.use_tid,
+				(unsigned long long)pair.free_name,
+				(unsigned long long)pair.free_stack, pair.free_sn,
+				pair.free_sn_min, pair.free_sn_max, pair.free_tid,
+				pair.use_access_delay_time,
+				pair.target_delay_side,
+				pair.target_delay_mode,
+				target_pair_active_ ? 1 : 0);
+			fflush(stderr);
 		} else if (collect_uaf) {
 			ukc_clear_may_uaf_pair();
+			target_pair_active_ = false;
 		}
 
 		if (!collect_uaf && !collect_extended) {
@@ -1098,11 +1140,71 @@ public:
 	{
 		ClearOutput();
 		active_for_group_ = false;
+		bool had_target_pair = target_pair_active_;
+		FILE* kmsg = fopen("/dev/kmsg", "w");
+		fprintf(stderr, "[KCCWF_UAF_TARGET_RESET] active=%d\n",
+			had_target_pair ? 1 : 0);
+		if (kmsg) {
+			fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_RESET] active=%d\n",
+				had_target_pair ? 1 : 0);
+			fclose(kmsg);
+		}
+		fflush(stderr);
+		if (target_pair_active_) {
+			ukc_clear_may_uaf_pair();
+			target_pair_active_ = false;
+		}
 		ukc_enter_disable_mode();
 	}
 
 private:
 	static constexpr size_t kDdrdMaxUafPairs = 0x200;
+
+	void DumpUafMatchStats()
+	{
+		FILE* f = fopen("/proc/kccwf_stats", "r");
+		if (!f) {
+			fprintf(stderr, "[KCCWF_UAF_TARGET_STATS] unavailable errno=%d\n", errno);
+			FILE* kmsg = fopen("/dev/kmsg", "w");
+			if (kmsg) {
+				fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_STATS] unavailable errno=%d\n", errno);
+				fclose(kmsg);
+			}
+			fflush(stderr);
+			return;
+		}
+		FILE* kmsg = fopen("/dev/kmsg", "w");
+		char line[256];
+		bool in_uaf_stats = false;
+		int lines_left = 0;
+		while (fgets(line, sizeof(line), f)) {
+			if (!in_uaf_stats && strstr(line, "UAF Target Match:")) {
+				fprintf(stderr, "[KCCWF_UAF_TARGET_STATS] %s", line);
+				if (kmsg)
+					fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_STATS] %s", line);
+				in_uaf_stats = true;
+				lines_left = 2;
+				continue;
+			}
+			if (in_uaf_stats && lines_left > 0) {
+				fprintf(stderr, "[KCCWF_UAF_TARGET_STATS] %s", line);
+				if (kmsg)
+					fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_STATS] %s", line);
+				lines_left--;
+				if (lines_left == 0)
+					break;
+			}
+		}
+		if (!in_uaf_stats) {
+			fprintf(stderr, "[KCCWF_UAF_TARGET_STATS] missing-section\n");
+			if (kmsg)
+				fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_STATS] missing-section\n");
+		}
+		fclose(f);
+		if (kmsg)
+			fclose(kmsg);
+		fflush(stderr);
+	}
 
 	void ClearOutput()
 	{
@@ -1151,6 +1253,7 @@ private:
 	bool warned_unavailable_;
 	bool extended_requested_;
 	bool active_for_group_;
+	bool target_pair_active_;
 	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 10ms)
 	DdrdOutputState output_;
 };
@@ -1298,6 +1401,7 @@ private:
 		size_t ready = 0;
 		bool queued = false;
 		bool ddrd_active = false;
+		bool ukc_active = false;
 		// Legacy placeholder; staging now lives in ActiveBarrierExecution.
 	};
 
@@ -1306,6 +1410,7 @@ private:
 		int32_t group_size = 0;
 		int32_t completed = 0; // number of members that have executed (staged)
 		bool ddrd_active = false;
+		bool ukc_active = false;
 		int32_t ready = 0; // number of members that finished handshake
 		bool released = false;
 		std::vector<Proc*> ready_procs;
@@ -1645,7 +1750,7 @@ private:
 #endif
 			}
 #if GOOS_linux
-			if (active.ddrd_active)
+			if (active.ukc_active)
 				ddrd_controller_.ResetAfterGroup();
 #endif
 			done_groups.push_back(group_id);
@@ -1763,8 +1868,10 @@ private:
 		if (collect_uaf || collect_extended || has_ukc_pair)
 			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, setup_req);
 		group.ddrd_active = collect_uaf || collect_extended;
+		group.ukc_active = collect_uaf || collect_extended || has_ukc_pair;
 #else
 		group.ddrd_active = false;
+		group.ukc_active = false;
 #endif
 
 		// debug("runner: dispatching barrier group=%lld members=%zu reserved_mask=0x%llx\n",
@@ -1777,6 +1884,7 @@ private:
 		active.group_size = static_cast<int32_t>(selected.size());
 		active.completed = 0;
 		active.ddrd_active = group.ddrd_active;
+		active.ukc_active = group.ukc_active;
 		active.ready = 0;
 		active.released = false;
 		active.ready_procs.assign(active.group_size, nullptr);

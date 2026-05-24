@@ -213,6 +213,12 @@ table ExecRequestRaw {
 	ukc_free_sn	:int32;
 	ukc_free_tid	:int32;
 	ukc_use_access_delay_time	:int32;
+	// Which matching side should receive the target access delay:
+	// 0=both (legacy), 1=use-only, 2=free-only, 3=none.
+	ukc_target_delay_side	:int32;
+	// How the target access delay is applied:
+	// 0=sleep in the matched access (legacy), 1=nonblocking watchpoint window.
+	ukc_target_delay_mode	:int32;
 	ukc_is_valid	:bool;
 	// Flag to use FINE_LOG/FINE_MONITOR modes instead of normal LOG/MONITOR (for validation mode)
 	ukc_use_fine_mode	:bool;
@@ -220,6 +226,13 @@ table ExecRequestRaw {
 	// If > 0, overrides the hardcoded 2ms threshold in executor.
 	// Used by timing exploration queue to use widened threshold (e.g., 500ms).
 	timing_threshold_us	:int64;
+	// Optional SN ranges for validation. When min/max are both zero, exact ukc_*_sn
+	// semantics are used. When either bound is non-zero, the kernel treats the
+	// corresponding access SN as a range match and ignores tid if the tid field is zero.
+	ukc_use_sn_min	:int32;
+	ukc_use_sn_max	:int32;
+	ukc_free_sn_min	:int32;
+	ukc_free_sn_max	:int32;
 }
 
 table SignalUpdateRaw {

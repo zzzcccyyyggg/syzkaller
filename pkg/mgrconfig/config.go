@@ -334,9 +334,43 @@ type Experimental struct {
 	// Deprecated: NoDiscoveryPenalty is no longer used (M1'/M2 removed). Kept for config compatibility.
 	NoDiscoveryPenalty int `json:"no_discovery_penalty,omitempty"`
 
-	// RandomBaselineMode disables all race-guided fuzzing strategies for A/B testing.
-	// When enabled, program and partner selection becomes purely random.
-	// This is useful for comparing the effectiveness of race-guided strategies.
+	// EnableCoverageTriage controls pair-level coverage triage jobs in UAF mode.
+	// Defaults to true when unset. Set to false for clean mechanism audits that
+	// remove legacy feedback costs without changing timing exploration or object linking.
+	EnableCoverageTriage *bool `json:"enable_coverage_triage,omitempty"`
+	// EnableAffinityTable controls the legacy syscall affinity table in UAF mode.
+	// Defaults to true when unset. Set to false when no active scheduler consumes
+	// affinity feedback and the table should not be updated.
+	EnableAffinityTable *bool `json:"enable_affinity_table,omitempty"`
+
+	// StaticInputExploration makes UAF input exploration sample concurrent program
+	// groups from the loaded corpus/candidate pool directly. It skips startup
+	// candidate triage and disables normal single-program mutation/generation in
+	// the UAF exploration source.
+	StaticInputExploration bool `json:"static_input_exploration,omitempty"`
+	// StaticInputSeed controls deterministic sampling from the static input pool.
+	// Zero uses a fixed default seed.
+	StaticInputSeed int64 `json:"static_input_seed,omitempty"`
+	// StaticInputSkipBuiltinSeeds prevents sys/<os>/test seeds from being added to
+	// the frozen static input pool. This keeps MRPFuzz ablations tied exactly to a
+	// prepared shared corpus database.
+	StaticInputSkipBuiltinSeeds bool `json:"static_input_skip_builtin_seeds,omitempty"`
+	// LLMInputSeedDir is an offline-pilot hook: when set, syz-manager loads exact
+	// two-program groups from this directory and enqueues them as high-priority UAF
+	// barrier requests after static input exploration is activated. Normal fuzzing
+	// is unchanged unless this field is explicitly configured.
+	LLMInputSeedDir string `json:"llm_input_seed_dir,omitempty"`
+	// LLMInputSeedPollSec enables continuous polling of LLMInputSeedDir for new
+	// parser-filtered seed groups. Zero preserves the offline-pilot behavior of
+	// loading the directory only once at UAF activation time.
+	LLMInputSeedPollSec int `json:"llm_input_seed_poll_sec,omitempty"`
+	// LLMInputSeedMaxPerPoll limits how many new seed groups are enqueued during
+	// each poll. Zero means no explicit limit.
+	LLMInputSeedMaxPerPoll int `json:"llm_input_seed_max_per_poll,omitempty"`
+
+	// RandomBaselineMode marks a baseline run and forces timing exploration off.
+	// Other mechanisms, such as affinity learning and object linking, remain enabled
+	// unless they are disabled by their own explicit config knobs.
 	RandomBaselineMode bool `json:"random_baseline_mode,omitempty"`
 
 	// EnableObjectLinking enables resource-aware cross-syscall object linking (ObjectLinker V2).
@@ -344,11 +378,38 @@ type Experimental struct {
 	// which is useful for ablation experiments measuring the contribution of resource-aware
 	// program group generation. Defaults to true when uaf_mode is enabled.
 	EnableObjectLinking *bool `json:"enable_object_linking,omitempty"`
+	// ObjectLinkAttemptRatio controls how often partner-program generation attempts
+	// ObjectLinker V2 when object linking is enabled. Values in (0,1] are honored;
+	// other values fall back to the default 1.0.
+	ObjectLinkAttemptRatio float64 `json:"object_link_attempt_ratio,omitempty"`
+
+	// NoObjectKccwfNamespace rewrites kccwf object names per partner program when
+	// object linking is disabled. This keeps intra-program file references coherent
+	// while avoiding accidental same-object reuse from the fixed kccwf path pool.
+	NoObjectKccwfNamespace bool `json:"no_object_kccwf_namespace,omitempty"`
+	// IsolateKccwfPartnerObjects rewrites kccwf object names per partner program
+	// before optional ObjectLinker alignment. This removes fixed-name sharing as
+	// a hidden baseline so ObjectLinker must explicitly align fs objects.
+	IsolateKccwfPartnerObjects bool `json:"isolate_kccwf_partner_objects,omitempty"`
+
+	// EnableStateScopeGuidance constructs concurrent program groups according to
+	// overlapping kernel state scopes instead of only exact user-visible object
+	// identifiers.
+	EnableStateScopeGuidance bool `json:"enable_state_scope_guidance,omitempty"`
+	// StateScopeGuidanceRatio controls how often state-scope partner selection is
+	// used in barrier mode. Values in (0,1] are honored.
+	StateScopeGuidanceRatio float64 `json:"state_scope_guidance_ratio,omitempty"`
+	// StateScopeSameInstanceRatio is the operator budget for exact same-instance
+	// alignment inside state-scope guidance. Zero disables exact alignment.
+	StateScopeSameInstanceRatio float64 `json:"state_scope_same_instance_ratio,omitempty"`
+	// StateScopePartnerSamples controls candidate sampling width for the guided
+	// partner selector.
+	StateScopePartnerSamples int `json:"state_scope_partner_samples,omitempty"`
 
 	// ======== Dual-Queue Timing Exploration Configuration ========
 	// EnableTimingExploration enables the timing exploration queue for race optimization.
 	// When enabled, newly discovered VarName pairs are enqueued for timing optimization
-	// using syz_delay() syscalls to explore timing windows.
+	// using either syz_delay() syscalls or barrier start-delay resampling.
 	// Defaults to false if unset.
 	EnableTimingExploration bool `json:"enable_timing_exploration,omitempty"`
 	// Deprecated: EnablePartnerSelection is no longer used (M1' removed). Kept for config compatibility.
@@ -361,17 +422,19 @@ type Experimental struct {
 	// TimingExplorationRatio is the fraction of executions for timing exploration (0.0-1.0).
 	// Defaults to 0.1 (10%) if unset or zero.
 	TimingExplorationRatio float64 `json:"timing_exploration_ratio,omitempty"`
-	// DelayMinMicros is the minimum delay in microseconds for syz_delay().
+	// DelayMinMicros is the minimum delay in microseconds for syz_delay()
+	// or barrier start-delay timing exploration.
 	// Defaults to 10 if unset or zero.
 	DelayMinMicros int64 `json:"delay_min_micros,omitempty"`
-	// DelayMaxMicros is the maximum delay in microseconds for syz_delay().
+	// DelayMaxMicros is the maximum delay in microseconds for syz_delay()
+	// or barrier start-delay timing exploration.
 	// Defaults to 200000 (200ms) if unset or zero.
 	DelayMaxMicros int64 `json:"delay_max_micros,omitempty"`
 	// MaxDelaysPerProgram limits syz_delay() calls per program.
 	// Defaults to 5 if unset or zero.
 	MaxDelaysPerProgram int `json:"max_delays_per_program,omitempty"`
-	// TimingMutationStrategy specifies the delay mutation strategy.
-	// Options: "random", "targeted", "binary_search", "timediff"
+	// TimingMutationStrategy specifies the timing mutation/resampling strategy.
+	// Options: "random", "targeted", "binary_search", "timediff", "start_delay"
 	// Defaults to "targeted" if unset.
 	TimingMutationStrategy string `json:"timing_mutation_strategy,omitempty"`
 	// NormalThresholdMicros overrides the default 10ms threshold for DDRD pair detection
@@ -417,7 +480,10 @@ type UAFValidateConfig struct {
 	MaxConcurrent    int `json:"max_concurrent"`
 	DelayRetryBudget int `json:"delay_retry_budget"`
 	TimeoutSeconds   int `json:"timeout_seconds"`
-	RepeatCount      int `json:"repeat_count"`
+	// MaxBatchTimeoutSeconds caps one batched replay+verify RPC session.
+	// When unset, the validator uses the legacy timeout_seconds*(requests+1) bound.
+	MaxBatchTimeoutSeconds int `json:"max_batch_timeout_seconds,omitempty"`
+	RepeatCount            int `json:"repeat_count"`
 	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
 	// Defaults to 10 if unset or zero.
 	VerifyRepeatTimes             int `json:"verify_repeat_times,omitempty"`
@@ -456,6 +522,34 @@ type UAFValidateConfig struct {
 	// When enabled (true), verification runs without barrier start delays,
 	// relying only on access_delay (kernel udelay) to create race windows.
 	DisableVerifyDelay bool `json:"disable_verify_delay,omitempty"`
+	// DisableAccessDelay disables the kernel-side target access delay during verification.
+	DisableAccessDelay bool `json:"disable_access_delay,omitempty"`
+	// DisableTargetDelay is a compatibility alias for DisableAccessDelay.
+	DisableTargetDelay bool `json:"disable_target_delay,omitempty"`
+	// VerifyAccessDelayMinUs floors the kernel-side target access delay during verification.
+	// This does not change barrier start_delay.
+	VerifyAccessDelayMinUs int64 `json:"verify_access_delay_min_us,omitempty"`
+	// TargetMatchMode controls target-pair matching in UAF validation.
+	// Supported values: "sn-fallback" (default), "strict-sn", "sn-range",
+	// "sn-only", "sn-range-only", "stack-only", "site-only".
+	// "sn-fallback" tries strict SN/TID first, bounded SN-range next, then stack-only.
+	// "sn-range" matches VarName+CallStack with SN in a configured interval and treats TID as a wildcard.
+	// "stack-only" matches VarName+CallStack and treats SN/TID as wildcards.
+	// "sn-only"/"sn-range-only" keep SN constraints but ignore stack/TID.
+	// "site-only" clears stack/SN/TID in the target request and is kept as an
+	// explicit diagnostic mode for kernels that support VarName-only matching.
+	TargetMatchMode string `json:"target_match_mode,omitempty"`
+	// SNFallbackRange controls bounded SN drift for target_match_mode=sn-fallback/sn-range.
+	// A value of N matches runtime sequence numbers in [SN-N, SN+N]. Zero disables this layer.
+	SNFallbackRange int `json:"sn_fallback_range,omitempty"`
+	// WildcardTargetTID clears target TID constraints while preserving VarName, stack, and SN.
+	WildcardTargetTID bool `json:"wildcard_target_tid,omitempty"`
+	// TargetDelaySide controls which matching side receives kernel access delay:
+	// "both" (default), "use", "free", or "none".
+	TargetDelaySide string `json:"target_delay_side,omitempty"`
+	// TargetDelayMode controls how the matched target access applies delay:
+	// "sleep" (default) or "nonblocking".
+	TargetDelayMode string `json:"target_delay_mode,omitempty"`
 	// EnableVMSnapshot enables VM snapshot mode for faster validation.
 	// When enabled, the VM state is saved after initial boot and SSH setup,
 	// then restored (instead of full reboot) between validation tasks.
@@ -490,6 +584,13 @@ type UAFValidateConfig struct {
 	// When false (default), replay runs in barrier mode but skips race pair collection
 	// to reduce performance overhead. When true, pairs are collected during replay as well.
 	ReplayCollectPairs bool `json:"replay_collect_pairs,omitempty"`
+	// VerifyCollectPairs collects DDRD pairs during verification for diagnostics.
+	// Observed target pairs are reported separately and do not count as validated
+	// unless a matching DATARACE crash is also reported.
+	VerifyCollectPairs bool `json:"verify_collect_pairs,omitempty"`
+	// MaxReplayHistory limits how many saved history records are replayed per validation attempt.
+	// When positive, the most recent N records are used. Zero means no limit.
+	MaxReplayHistory int `json:"max_replay_history,omitempty"`
 	// SnapshotCorpusWarmup enables running all corpus programs before creating the VM snapshot.
 	// When enabled with EnableVMSnapshot, all programs from corpus.db are executed once
 	// before saving the snapshot. This "warms up" kernel state (caches, internal structures)
@@ -514,6 +615,21 @@ type UAFValidateConfig struct {
 	// considered stable. When false, any runtime-discovered pair meeting the stability
 	// threshold is accepted, allowing discovery of new stack combinations.
 	RequireOriginMatch bool `json:"require_origin_match,omitempty"`
+	// OriginMatchMode controls how require_origin_match compares runtime pairs to entry.Pairs.
+	// "exact" requires VarName+stack equality. "varname" allows stack changes while keeping
+	// the original VarName pair. "primary-varname" uses only the entry's primary VarName pair.
+	OriginMatchMode string `json:"origin_match_mode,omitempty"`
+	// MaxStablePairsPerOrigin limits verification fanout after origin matching.
+	// For origin_match_mode=varname, this caps stack variants per original VarName pair.
+	// Zero means no limit.
+	MaxStablePairsPerOrigin int `json:"max_stable_pairs_per_origin,omitempty"`
+	// MaxStablePairsPerEntry limits total stable pairs verified for one corpus entry.
+	// Zero means no limit.
+	MaxStablePairsPerEntry int `json:"max_stable_pairs_per_entry,omitempty"`
+	// CollectionOnly stops after the replay+collection phase and skips target-pair
+	// verification. It is useful for no-history sensitivity probes that only need
+	// to count runtime-observed pairs.
+	CollectionOnly bool `json:"collection_only,omitempty"`
 
 	// DisableBackoffSkip disables probabilistic validation backoff skip logic.
 	// When enabled (true), entries and pairs are never skipped based on the

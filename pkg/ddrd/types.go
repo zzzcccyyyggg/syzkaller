@@ -57,6 +57,12 @@ type MayUAFPair struct {
 	UseCallIdx  int32 // Syscall index for use (-1 = kernel bg)
 	FreeProgIdx int32 // Program index for free (0 or 1 in barrier mode)
 	UseProgIdx  int32 // Program index for use (0 or 1 in barrier mode)
+
+	// Optional transient bounds used only when validation installs an SN-range target.
+	FreeSNMin int32 `json:",omitempty"`
+	FreeSNMax int32 `json:",omitempty"`
+	UseSNMin  int32 `json:",omitempty"`
+	UseSNMax  int32 `json:",omitempty"`
 }
 
 // MayRacePair represents a race condition pair transmitted from executor

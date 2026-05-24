@@ -51,6 +51,14 @@ func NewExecutorAdapter(inst *instance.ExecProgInstance, cfg Config) *ExecutorAd
 	return &ExecutorAdapter{inst: inst, cfg: cfg.withDefaults()}
 }
 
+func (e *ExecutorAdapter) batchTimeout(requests int) time.Duration {
+	timeout := e.cfg.ExecutionTimeout * time.Duration(requests+1)
+	if e.cfg.MaxBatchTimeout > 0 && timeout > e.cfg.MaxBatchTimeout {
+		return e.cfg.MaxBatchTimeout
+	}
+	return timeout
+}
+
 func (e *ExecutorAdapter) Run(ctx context.Context, req *ExecutionRequest) (*ExecutionResult, error) {
 	if e == nil || e.inst == nil {
 		return nil, fmt.Errorf("executor instance is nil")
@@ -215,12 +223,14 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	mask = (uint64(1) << participants) - 1
 
 	request := &queue.Request{
-		Prog:             baseProg,
-		ReturnOutput:     true,
-		ReturnError:      true,
-		Important:        true,
-		DisableDdrd:      execReq.DisableDdrd,
-		IsValidationMode: true,
+		Prog:               baseProg,
+		ReturnOutput:       true,
+		ReturnError:        true,
+		Important:          true,
+		DisableDdrd:        execReq.DisableDdrd,
+		IsValidationMode:   true,
+		UkcTargetDelaySide: execReq.TargetDelaySideKernel,
+		UkcTargetDelayMode: execReq.TargetDelayModeKernel,
 	}
 	if execReq.RepeatTimes > 0 {
 		// For barrier mode, we can't easily use syz-execprog's -repeat flag because
@@ -392,6 +402,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	}
 
 	triggeredCount := 0
+	observedTargetCount := 0
 
 	for (completed < target) || !haveOutcome {
 		select {
@@ -410,12 +421,12 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 			// Check if the target pair was triggered in this run
 			if execReq.TargetPair != nil && r.Ddrd != nil {
 				for _, pair := range r.Ddrd.UAFPairs {
-					if pair.FreeAccessName == execReq.TargetPair.FreeAccessName &&
-						pair.UseAccessName == execReq.TargetPair.UseAccessName &&
-						pair.FreeCallStack == execReq.TargetPair.FreeCallStack &&
-						pair.UseCallStack == execReq.TargetPair.UseCallStack {
-						triggeredCount++
-						if execReq.StopOnSuccess {
+					if targetPairMatches(pair, execReq.TargetPair) {
+						observedTargetCount++
+						if !execReq.ObserveTargetPairOnly {
+							triggeredCount++
+						}
+						if execReq.StopOnSuccess && triggeredCount > 0 {
 							runCancel()
 							completed = target
 						}
@@ -528,9 +539,10 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 	rep := firstNonNilReport(reports)
 
 	result := &ExecutionResult{
-		Output:         append([]byte{}, execOutput...),
-		Duration:       time.Since(start),
-		TriggeredCount: triggeredCount,
+		Output:              append([]byte{}, execOutput...),
+		Duration:            time.Since(start),
+		TriggeredCount:      triggeredCount,
+		ObservedTargetCount: observedTargetCount,
 	}
 	if rep != nil {
 		result.CrashReport = cloneReportBody(rep)
@@ -762,6 +774,48 @@ func cloneUkcPair(entry *fuzzer.UAFCorpusEntry) *ddrd.MayUAFPair {
 func isZeroUkcPair(pair ddrd.MayUAFPair) bool {
 	return pair.FreeAccessName == 0 && pair.UseAccessName == 0 &&
 		pair.FreeCallStack == 0 && pair.UseCallStack == 0
+}
+
+func targetPairMatches(pair *ddrd.MayUAFPair, target *ddrd.MayUAFPair) bool {
+	if pair == nil || target == nil {
+		return false
+	}
+	if target.FreeCallStack == 0 && target.UseCallStack == 0 {
+		forward := targetFieldMatches(target.FreeAccessName, pair.FreeAccessName) &&
+			targetFieldMatches(target.UseAccessName, pair.UseAccessName)
+		reverse := targetFieldMatches(target.FreeAccessName, pair.UseAccessName) &&
+			targetFieldMatches(target.UseAccessName, pair.FreeAccessName)
+		return forward || reverse
+	}
+	return targetFieldMatches(target.FreeAccessName, pair.FreeAccessName) &&
+		targetFieldMatches(target.UseAccessName, pair.UseAccessName) &&
+		targetFieldMatches(target.FreeCallStack, pair.FreeCallStack) &&
+		targetFieldMatches(target.UseCallStack, pair.UseCallStack) &&
+		targetSNMatches(pair.FreeSN, target.FreeSN, target.FreeSNMin, target.FreeSNMax) &&
+		targetSNMatches(pair.UseSN, target.UseSN, target.UseSNMin, target.UseSNMax) &&
+		targetInt32Matches(target.FreeTid, pair.FreeTid) &&
+		targetInt32Matches(target.UseTid, pair.UseTid)
+}
+
+func targetFieldMatches(want, got uint64) bool {
+	return want == 0 || want == got
+}
+
+func targetSNMatches(got, want, min, max int32) bool {
+	if min != 0 || max != 0 {
+		if min != 0 && got < min {
+			return false
+		}
+		if max != 0 && got > max {
+			return false
+		}
+		return true
+	}
+	return want == 0 || want == got
+}
+
+func targetInt32Matches(want, got int32) bool {
+	return want == 0 || want == got
 }
 
 func newValidationManager(cfg *mgrconfig.Config, req *queue.Request, debug bool, valCfg Config) *validationManager {
@@ -1111,13 +1165,15 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 		}
 
 		request := &queue.Request{
-			Prog:             baseProg.Clone(),
-			Stat:             stat.New(fmt.Sprintf("batch-request-%d", i), "", stat.NoGraph),
-			ExecOpts:         flatrpc.ExecOpts{},
-			ReturnOutput:     true,
-			ReturnError:      true,
-			DisableDdrd:      execReq.DisableDdrd,
-			IsValidationMode: true,
+			Prog:               baseProg.Clone(),
+			Stat:               stat.New(fmt.Sprintf("batch-request-%d", i), "", stat.NoGraph),
+			ExecOpts:           flatrpc.ExecOpts{},
+			ReturnOutput:       true,
+			ReturnError:        true,
+			DisableDdrd:        execReq.DisableDdrd,
+			IsValidationMode:   true,
+			UkcTargetDelaySide: execReq.TargetDelaySideKernel,
+			UkcTargetDelayMode: execReq.TargetDelayModeKernel,
 		}
 		// Note: We set DisableDdrd above; rpcserver/runner.go will handle ExecFlags
 		// based on that field when serializing for barrier execution.
@@ -1174,7 +1230,7 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 
 	command := fmt.Sprintf("%s runner 0 %s %s", executorBin, host, portStr)
 
-	ctx, cancel := context.WithTimeout(parentCtx, e.cfg.ExecutionTimeout*time.Duration(len(queueReqs)+1))
+	ctx, cancel := context.WithTimeout(parentCtx, e.batchTimeout(len(queueReqs)))
 	defer cancel()
 
 	serveCtx, serveCancel := context.WithCancel(ctx)
@@ -1208,13 +1264,18 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 
 	// Collect results from all requests
 	results := make([]*ExecutionResult, len(queueReqs))
-	resultIdx := 0
+	completed := 0
 
-	resCh := make(chan *queue.Result, len(queueReqs))
+	type indexedQueueResult struct {
+		idx int
+		res *queue.Result
+	}
+	resCh := make(chan indexedQueueResult, len(queueReqs))
 	for i := range queueReqs {
+		reqIdx := i
 		queueReqs[i].OnDone(func(_ *queue.Request, res *queue.Result) bool {
 			select {
-			case resCh <- res:
+			case resCh <- indexedQueueResult{idx: reqIdx, res: res}:
 			default:
 			}
 			return true
@@ -1226,10 +1287,12 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 	haveOutcome := false
 	var finalOutcome runOutcome
 
-	for resultIdx < len(queueReqs) || !haveOutcome {
+	for completed < len(queueReqs) || !haveOutcome {
 		select {
-		case res := <-resCh:
-			if resultIdx < len(results) {
+		case item := <-resCh:
+			resultIdx := item.idx
+			res := item.res
+			if resultIdx >= 0 && resultIdx < len(results) && results[resultIdx] == nil {
 				results[resultIdx] = &ExecutionResult{
 					Output:   append([]byte{}, res.Output...),
 					Duration: time.Since(start),
@@ -1249,19 +1312,19 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 				if resultIdx < len(reqs) && reqs[resultIdx].TargetPair != nil && res.Ddrd != nil {
 					target := reqs[resultIdx].TargetPair
 					for _, pair := range res.Ddrd.UAFPairs {
-						if pair.FreeAccessName == target.FreeAccessName &&
-							pair.UseAccessName == target.UseAccessName &&
-							pair.FreeCallStack == target.FreeCallStack &&
-							pair.UseCallStack == target.UseCallStack {
-							results[resultIdx].TriggeredCount++
+						if targetPairMatches(pair, target) {
+							results[resultIdx].ObservedTargetCount++
+							if !reqs[resultIdx].ObserveTargetPairOnly {
+								results[resultIdx].TriggeredCount++
+							}
 							break
 						}
 					}
 				}
 			}
-			resultIdx++
+			completed++
 			// Cancel VM.Run when all requests are done to trigger final output collection
-			if resultIdx >= len(queueReqs) {
+			if completed >= len(queueReqs) {
 				runCancel()
 			}
 
@@ -1272,7 +1335,10 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 				log.Logf(0, "uafvalidate: vm=%d batch run error: %v", vmIndex, outcome.err)
 			}
 			// Fill remaining results with crash info from VM exit
-			for i := resultIdx; i < len(results); i++ {
+			for i := range results {
+				if results[i] != nil {
+					continue
+				}
 				results[i] = &ExecutionResult{
 					Output:   outcome.output,
 					Duration: time.Since(start),
@@ -1292,19 +1358,22 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 				}
 			}
 			// Force all requests complete since VM exited
-			if resultIdx < len(queueReqs) {
-				log.Logf(0, "uafvalidate: vm=%d exited early after %d/%d requests", vmIndex, resultIdx, len(queueReqs))
-				resultIdx = len(queueReqs)
+			if completed < len(queueReqs) {
+				log.Logf(0, "uafvalidate: vm=%d exited early after %d/%d requests", vmIndex, completed, len(queueReqs))
+				completed = len(queueReqs)
 			}
 
 		case <-ctx.Done():
-			for i := resultIdx; i < len(results); i++ {
+			for i := range results {
+				if results[i] != nil {
+					continue
+				}
 				results[i] = &ExecutionResult{
 					Duration: time.Since(start),
 					Crashed:  true,
 				}
 			}
-			resultIdx = len(queueReqs)
+			completed = len(queueReqs)
 			// Still wait for runOutcomeCh to get final crash info
 			if !haveOutcome {
 				select {
@@ -1344,6 +1413,19 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 					results[i].TriggeredCount = matches
 					log.Logf(0, "uafvalidate: batch final crash matched target pair for request %d, triggered=%d", i, matches)
 				}
+			}
+		}
+	}
+
+	if haveOutcome && len(finalOutcome.output) != 0 {
+		for i := range results {
+			if results[i] == nil {
+				continue
+			}
+			if len(results[i].Output) == 0 {
+				results[i].Output = append([]byte{}, finalOutcome.output...)
+			} else {
+				results[i].Output = append(results[i].Output, finalOutcome.output...)
 			}
 		}
 	}
@@ -1409,13 +1491,15 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 		}
 
 		request := &queue.Request{
-			Prog:             p,
-			Stat:             stat.New(fmt.Sprintf("async-batch-%d", i), "", stat.NoGraph),
-			ExecOpts:         flatrpc.ExecOpts{},
-			ReturnOutput:     true,
-			ReturnError:      true,
-			DisableDdrd:      execReq.DisableDdrd,
-			IsValidationMode: true,
+			Prog:               p,
+			Stat:               stat.New(fmt.Sprintf("async-batch-%d", i), "", stat.NoGraph),
+			ExecOpts:           flatrpc.ExecOpts{},
+			ReturnOutput:       true,
+			ReturnError:        true,
+			DisableDdrd:        execReq.DisableDdrd,
+			IsValidationMode:   true,
+			UkcTargetDelaySide: execReq.TargetDelaySideKernel,
+			UkcTargetDelayMode: execReq.TargetDelayModeKernel,
 		}
 
 		if execReq.TargetPair != nil {
@@ -1460,7 +1544,7 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 
 	command := fmt.Sprintf("%s runner 0 %s %s", executorBin, host, portStr)
 
-	ctx, cancel := context.WithTimeout(parentCtx, e.cfg.ExecutionTimeout*time.Duration(len(queueReqs)+1))
+	ctx, cancel := context.WithTimeout(parentCtx, e.batchTimeout(len(queueReqs)))
 	defer cancel()
 
 	serveCtx, serveCancel := context.WithCancel(ctx)
@@ -1494,13 +1578,18 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 
 	// Collect results
 	results := make([]*ExecutionResult, len(queueReqs))
-	resultIdx := 0
+	completed := 0
 
-	resCh := make(chan *queue.Result, len(queueReqs))
+	type indexedQueueResult struct {
+		idx int
+		res *queue.Result
+	}
+	resCh := make(chan indexedQueueResult, len(queueReqs))
 	for i := range queueReqs {
+		reqIdx := i
 		queueReqs[i].OnDone(func(_ *queue.Request, res *queue.Result) bool {
 			select {
-			case resCh <- res:
+			case resCh <- indexedQueueResult{idx: reqIdx, res: res}:
 			default:
 			}
 			return true
@@ -1510,10 +1599,12 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 	haveOutcome := false
 	var finalOutcome runOutcome
 
-	for resultIdx < len(queueReqs) || !haveOutcome {
+	for completed < len(queueReqs) || !haveOutcome {
 		select {
-		case res := <-resCh:
-			if resultIdx < len(results) {
+		case item := <-resCh:
+			resultIdx := item.idx
+			res := item.res
+			if resultIdx >= 0 && resultIdx < len(results) && results[resultIdx] == nil {
 				results[resultIdx] = &ExecutionResult{
 					Output:   append([]byte{}, res.Output...),
 					Duration: time.Since(start),
@@ -1532,18 +1623,18 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 				if resultIdx < len(reqs) && reqs[resultIdx].TargetPair != nil && res.Ddrd != nil {
 					target := reqs[resultIdx].TargetPair
 					for _, pair := range res.Ddrd.UAFPairs {
-						if pair.FreeAccessName == target.FreeAccessName &&
-							pair.UseAccessName == target.UseAccessName &&
-							pair.FreeCallStack == target.FreeCallStack &&
-							pair.UseCallStack == target.UseCallStack {
-							results[resultIdx].TriggeredCount++
+						if targetPairMatches(pair, target) {
+							results[resultIdx].ObservedTargetCount++
+							if !reqs[resultIdx].ObserveTargetPairOnly {
+								results[resultIdx].TriggeredCount++
+							}
 							break
 						}
 					}
 				}
 			}
-			resultIdx++
-			if resultIdx >= len(queueReqs) {
+			completed++
+			if completed >= len(queueReqs) {
 				runCancel()
 			}
 
@@ -1553,7 +1644,10 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 			if outcome.err != nil && !errors.Is(outcome.err, context.Canceled) {
 				log.Logf(0, "uafvalidate: vm=%d async batch run error: %v", vmIndex, outcome.err)
 			}
-			for i := resultIdx; i < len(results); i++ {
+			for i := range results {
+				if results[i] != nil {
+					continue
+				}
 				results[i] = &ExecutionResult{
 					Output:   outcome.output,
 					Duration: time.Since(start),
@@ -1570,19 +1664,22 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 					}
 				}
 			}
-			if resultIdx < len(queueReqs) {
-				log.Logf(0, "uafvalidate: vm=%d async exited early after %d/%d requests", vmIndex, resultIdx, len(queueReqs))
-				resultIdx = len(queueReqs)
+			if completed < len(queueReqs) {
+				log.Logf(0, "uafvalidate: vm=%d async exited early after %d/%d requests", vmIndex, completed, len(queueReqs))
+				completed = len(queueReqs)
 			}
 
 		case <-ctx.Done():
-			for i := resultIdx; i < len(results); i++ {
+			for i := range results {
+				if results[i] != nil {
+					continue
+				}
 				results[i] = &ExecutionResult{
 					Duration: time.Since(start),
 					Crashed:  true,
 				}
 			}
-			resultIdx = len(queueReqs)
+			completed = len(queueReqs)
 			if !haveOutcome {
 				select {
 				case outcome := <-runOutcomeCh:

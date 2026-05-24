@@ -79,10 +79,12 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		entries = entries[:cfg.MaxEntries]
 	}
 
-	// Debug: check entries history after loading
-	for i, entry := range entries {
-		if entry != nil && len(entry.ReplayHistory) > 0 {
-			log.Logf(0, "[history] race_validate: loaded entry %d (ptr=%p) has %d history records", i, entry, len(entry.ReplayHistory))
+	if cfg.EnableReplay {
+		// Debug: check entries history after loading
+		for i, entry := range entries {
+			if entry != nil && len(entry.ReplayHistory) > 0 {
+				log.Logf(0, "[history] race_validate: loaded entry %d (ptr=%p) has %d history records", i, entry, len(entry.ReplayHistory))
+			}
 		}
 	}
 
@@ -90,6 +92,7 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		MaxConcurrent:             cfg.MaxConcurrent,
 		DelayRetryBudget:          cfg.DelayRetryBudget,
 		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
 		Debug:                     *flagDebug,
 		RepeatCount:               cfg.RepeatCount,
 		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
@@ -99,15 +102,28 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 		DisableAsyncSplit:         cfg.DisableAsyncSplit,
 		DisableCollectionDelay:    cfg.DisableCollectionDelay,
 		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		DisableAccessDelay:        cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
+		TargetMatchMode:           cfg.TargetMatchMode,
+		SNFallbackRange:           cfg.SNFallbackRange,
+		TargetDelaySide:           cfg.TargetDelaySide,
+		TargetDelayMode:           cfg.TargetDelayMode,
+		WildcardTargetTID:         cfg.WildcardTargetTID,
 		VerifyDelaySweep:          cfg.VerifyDelaySweep,
 		VerifyDelaySteps:          cfg.VerifyDelaySteps,
 		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
 		VerifyDelayPower:          cfg.VerifyDelayPower,
 		EnableReplay:              cfg.EnableReplay,
 		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		VerifyCollectPairs:        cfg.VerifyCollectPairs,
+		MaxReplayHistory:          cfg.MaxReplayHistory,
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
+		OriginMatchMode:           cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
+		CollectionOnly:            cfg.CollectionOnly,
 		DisableBackoffSkip:        cfg.DisableBackoffSkip,
 		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
@@ -143,7 +159,9 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	}()
 
 	for i, entry := range entries {
-		log.Logf(0, "[history] race_validate: enqueueing entry %d (ptr=%p) history=%d", i, entry, len(entry.ReplayHistory))
+		if cfg.EnableReplay {
+			log.Logf(0, "[history] race_validate: enqueueing entry %d (ptr=%p) history=%d", i, entry, len(entry.ReplayHistory))
+		}
 		stage.Enqueue(entry)
 	}
 	stage.Close()
@@ -157,6 +175,7 @@ func (mgr *Manager) newUAFValidatorConfig(cfg *mgrconfig.UAFValidateConfig) uafv
 		MaxConcurrent:             cfg.MaxConcurrent,
 		DelayRetryBudget:          cfg.DelayRetryBudget,
 		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
 		Debug:                     *flagDebug,
 		RepeatCount:               cfg.RepeatCount,
 		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
@@ -166,15 +185,28 @@ func (mgr *Manager) newUAFValidatorConfig(cfg *mgrconfig.UAFValidateConfig) uafv
 		DisableAsyncSplit:         cfg.DisableAsyncSplit,
 		DisableCollectionDelay:    cfg.DisableCollectionDelay,
 		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		DisableAccessDelay:        cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
+		TargetMatchMode:           cfg.TargetMatchMode,
+		SNFallbackRange:           cfg.SNFallbackRange,
+		TargetDelaySide:           cfg.TargetDelaySide,
+		TargetDelayMode:           cfg.TargetDelayMode,
+		WildcardTargetTID:         cfg.WildcardTargetTID,
 		VerifyDelaySweep:          cfg.VerifyDelaySweep,
 		VerifyDelaySteps:          cfg.VerifyDelaySteps,
 		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
 		VerifyDelayPower:          cfg.VerifyDelayPower,
 		EnableReplay:              cfg.EnableReplay,
 		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		VerifyCollectPairs:        cfg.VerifyCollectPairs,
+		MaxReplayHistory:          cfg.MaxReplayHistory,
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
+		OriginMatchMode:           cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
+		CollectionOnly:            cfg.CollectionOnly,
 		DisableBackoffSkip:        cfg.DisableBackoffSkip,
 		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
@@ -1018,9 +1050,27 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 		return
 	}
 
+	if res.CollectionOnly {
+		if res.Err != nil {
+			log.Errorf("uaf validation: collection-only executor error for %s: %v", signatureKey, res.Err)
+			mgr.statUAFFailed.Add(1)
+			return
+		}
+		if res.Success {
+			log.Logf(0, "uaf validation: collection-only result for %s succeeded runtime_pairs=%d stable_pairs=%d",
+				signatureKey, len(res.Pairs), len(res.StablePairs))
+		} else {
+			log.Logf(0, "uaf validation: collection-only result for %s crashed (%s)", signatureKey, res.CrashTitle)
+		}
+		return
+	}
+
 	confirmed := false
 	if res.Err != nil {
 		log.Errorf("uaf validation: executor error: %v", res.Err)
+	} else if res.NoStablePairs {
+		log.Logf(0, "uaf validation: no stable pair for %s runtime_pairs=%d",
+			signatureKey, len(res.Pairs))
 	} else if res.Success {
 		confirmed = true
 		log.Logf(0, "uaf validation: confirmed pair %s", signatureKey)
@@ -1079,6 +1129,7 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		MaxConcurrent:             cfg.MaxConcurrent,
 		DelayRetryBudget:          cfg.DelayRetryBudget,
 		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
 		Debug:                     *flagDebug,
 		RepeatCount:               cfg.RepeatCount,
 		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
@@ -1088,15 +1139,28 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 		DisableAsyncSplit:         cfg.DisableAsyncSplit,
 		DisableCollectionDelay:    cfg.DisableCollectionDelay,
 		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		DisableAccessDelay:        cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
+		TargetMatchMode:           cfg.TargetMatchMode,
+		SNFallbackRange:           cfg.SNFallbackRange,
+		TargetDelaySide:           cfg.TargetDelaySide,
+		TargetDelayMode:           cfg.TargetDelayMode,
+		WildcardTargetTID:         cfg.WildcardTargetTID,
 		VerifyDelaySweep:          cfg.VerifyDelaySweep,
 		VerifyDelaySteps:          cfg.VerifyDelaySteps,
 		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
 		VerifyDelayPower:          cfg.VerifyDelayPower,
 		EnableReplay:              cfg.EnableReplay,
 		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		VerifyCollectPairs:        cfg.VerifyCollectPairs,
+		MaxReplayHistory:          cfg.MaxReplayHistory,
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
+		OriginMatchMode:           cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
+		CollectionOnly:            cfg.CollectionOnly,
 		DisableBackoffSkip:        cfg.DisableBackoffSkip,
 		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
@@ -1335,6 +1399,7 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 		MaxConcurrent:             cfg.MaxConcurrent,
 		DelayRetryBudget:          cfg.DelayRetryBudget,
 		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
 		Debug:                     *flagDebug,
 		RepeatCount:               cfg.RepeatCount,
 		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
@@ -1344,15 +1409,28 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 		DisableAsyncSplit:         cfg.DisableAsyncSplit,
 		DisableCollectionDelay:    cfg.DisableCollectionDelay,
 		DisableVerifyDelay:        cfg.DisableVerifyDelay,
+		DisableAccessDelay:        cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
+		TargetMatchMode:           cfg.TargetMatchMode,
+		SNFallbackRange:           cfg.SNFallbackRange,
+		TargetDelaySide:           cfg.TargetDelaySide,
+		TargetDelayMode:           cfg.TargetDelayMode,
+		WildcardTargetTID:         cfg.WildcardTargetTID,
 		VerifyDelaySweep:          cfg.VerifyDelaySweep,
 		VerifyDelaySteps:          cfg.VerifyDelaySteps,
 		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
 		VerifyDelayPower:          cfg.VerifyDelayPower,
 		EnableReplay:              cfg.EnableReplay,
 		ReplayCollectPairs:        cfg.ReplayCollectPairs,
+		VerifyCollectPairs:        cfg.VerifyCollectPairs,
+		MaxReplayHistory:          cfg.MaxReplayHistory,
 		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
 		PriorityLowHistory:        cfg.PriorityLowHistory,
 		RequireOriginMatch:        cfg.RequireOriginMatch,
+		OriginMatchMode:           cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
+		CollectionOnly:            cfg.CollectionOnly,
 		DisableBackoffSkip:        cfg.DisableBackoffSkip,
 		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
 		EnableHistoryMinimization: cfg.EnableHistoryMinimization,

@@ -25,11 +25,90 @@ type PairStatusSink interface {
 	MarkPairInvalid(pair ddrd.MayUAFPair)
 }
 
+const (
+	TargetMatchModeSNFallback  = "sn-fallback"
+	TargetMatchModeStrictSN    = "strict-sn"
+	TargetMatchModeSNRange     = "sn-range"
+	TargetMatchModeSNOnly      = "sn-only"
+	TargetMatchModeSNRangeOnly = "sn-range-only"
+	TargetMatchModeSiteOnly    = "site-only"
+	TargetMatchModeStackOnly   = "stack-only"
+
+	TargetDelaySideBoth = "both"
+	TargetDelaySideUse  = "use"
+	TargetDelaySideFree = "free"
+	TargetDelaySideNone = "none"
+
+	TargetDelayModeSleep       = "sleep"
+	TargetDelayModeNonblocking = "nonblocking"
+
+	OriginMatchModeExact          = "exact"
+	OriginMatchModeVarName        = "varname"
+	OriginMatchModePrimaryVarName = "primary-varname"
+)
+
+func NormalizeTargetMatchMode(mode string) string {
+	switch mode {
+	case "", TargetMatchModeSNFallback:
+		return TargetMatchModeSNFallback
+	case TargetMatchModeStrictSN, TargetMatchModeSNRange, TargetMatchModeSNOnly,
+		TargetMatchModeSNRangeOnly, TargetMatchModeSiteOnly, TargetMatchModeStackOnly:
+		return mode
+	default:
+		return mode
+	}
+}
+
+func NormalizeTargetDelaySide(side string) string {
+	switch side {
+	case "", TargetDelaySideBoth:
+		return TargetDelaySideBoth
+	case TargetDelaySideUse, TargetDelaySideFree, TargetDelaySideNone:
+		return side
+	default:
+		return side
+	}
+}
+
+func TargetDelaySideID(side string) int32 {
+	switch NormalizeTargetDelaySide(side) {
+	case TargetDelaySideUse:
+		return 1
+	case TargetDelaySideFree:
+		return 2
+	case TargetDelaySideNone:
+		return 3
+	default:
+		return 0
+	}
+}
+
+func NormalizeTargetDelayMode(mode string) string {
+	switch mode {
+	case "", TargetDelayModeSleep:
+		return TargetDelayModeSleep
+	case TargetDelayModeNonblocking:
+		return mode
+	default:
+		return mode
+	}
+}
+
+func TargetDelayModeID(mode string) int32 {
+	switch NormalizeTargetDelayMode(mode) {
+	case TargetDelayModeNonblocking:
+		return 1
+	default:
+		return 0
+	}
+}
+
 // Config captures high level knobs for the validation stage.
 type Config struct {
 	MaxConcurrent    int
 	DelayRetryBudget int
 	ExecutionTimeout time.Duration
+	MaxBatchTimeout  time.Duration
 	Debug            bool
 	RepeatCount      int
 	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
@@ -59,6 +138,40 @@ type Config struct {
 	// When enabled (true), verification runs without barrier start delays,
 	// relying only on access_delay (kernel udelay) to create race windows.
 	DisableVerifyDelay bool
+	// DisableAccessDelay disables the kernel-side target access delay during verification.
+	// When enabled, the target pair is still installed, but its TimeDiff is zeroed before
+	// being sent to the executor.
+	DisableAccessDelay bool
+	// VerifyAccessDelayMinUs floors the kernel-side target access delay during verification.
+	// It keeps the original barrier start delay intact and only widens the watchpoint window.
+	VerifyAccessDelayMinUs int64
+	// TargetMatchMode controls how the target UAF access is matched in the kernel.
+	// "sn-fallback" first tries exact SN/TID/stack matching, then bounded
+	// stack+SN-range matching, then falls back to stack-only on misses.
+	// "strict-sn" requires SN/TID/stack matching. "sn-range" matches
+	// VarName+stack with SN falling into a configured interval and ignores TID.
+	// "sn-only" and "sn-range-only" keep SN constraints but ignore stack/TID;
+	// they are useful when call stacks drift but sequence positions are stable.
+	// "stack-only" matches VarName+stack but ignores SN/TID.
+	// "site-only" clears stack/SN/TID in the target request and is kept as an explicit
+	// diagnostic mode for kernels that support VarName-only matching.
+	TargetMatchMode string
+	// SNFallbackRange controls the half-window used by target_match_mode=sn-fallback/sn-range.
+	// A value of N matches runtime sequence numbers in [SN-N, SN+N]. Zero disables
+	// the range layer, so sn-fallback becomes strict-sn -> stack-only.
+	SNFallbackRange int
+	// TargetDelaySide controls which matched target side receives the kernel access
+	// delay during verification. "both" preserves legacy behavior; "use"/"free"
+	// reduce timing perturbation by keeping the other side observable but undelayed.
+	TargetDelaySide string
+	// TargetDelayMode controls how a matched target access applies its delay.
+	// "sleep" preserves the legacy pre-access udelay. "nonblocking" arms a
+	// persistent watchpoint window and lets the matched access continue.
+	TargetDelayMode string
+	// WildcardTargetTID clears target TID constraints while preserving VarName, stack,
+	// and SN constraints. This is useful for testing whether executor thread-id drift
+	// causes otherwise stable SN-directed pairs to miss.
+	WildcardTargetTID bool
 	// VerifyDelaySweep enables progressive start_delay sweep during verification.
 	// When enabled, multiple verify requests are generated with different delays,
 	// from 0 to VerifyDelayMaxUs using an exponential curve.
@@ -81,6 +194,13 @@ type Config struct {
 	// When false (default), replay runs in barrier mode but skips race pair collection
 	// to reduce overhead. When true, pairs are collected during replay as well.
 	ReplayCollectPairs bool
+	// VerifyCollectPairs collects DDRD pairs during verification for diagnostics.
+	// Observed target pairs are logged separately and are not counted as validated
+	// unless the kernel also reports a matching DATARACE crash.
+	VerifyCollectPairs bool
+	// MaxReplayHistory limits how many saved history records are replayed per validation attempt.
+	// When positive, the most recent N records are used. Zero means no limit.
+	MaxReplayHistory int
 
 	// EnableVarNameScheduling enables VarName-based round-robin scheduling.
 	// When enabled, entries are grouped by their VarName pairs and scheduled
@@ -95,6 +215,20 @@ type Config struct {
 	// When false (default), any runtime-discovered pair meeting the stability threshold is accepted.
 	// When true, only pairs that also exist in entry.Pairs are considered stable.
 	RequireOriginMatch bool
+	// OriginMatchMode controls how RequireOriginMatch compares runtime pairs to entry.Pairs.
+	// "exact" requires VarName+stack equality. "varname" only requires the original VarName pair.
+	// "primary-varname" only uses the entry's primary pair VarName as the origin.
+	OriginMatchMode string
+	// MaxStablePairsPerOrigin limits how many runtime stable stack variants are verified for
+	// each original origin match key. Zero means no limit.
+	MaxStablePairsPerOrigin int
+	// MaxStablePairsPerEntry limits total stable pairs verified for one corpus entry.
+	// Zero means no limit.
+	MaxStablePairsPerEntry int
+	// CollectionOnly stops after the replay+collection phase and does not run the
+	// target-pair verification phase. This is intended for sensitivity probes that
+	// measure how many pairs the current program group can expose without history.
+	CollectionOnly bool
 
 	// DisableBackoffSkip disables probabilistic validation backoff skip logic.
 	// When enabled (true), entries and pairs are never skipped based on the
@@ -148,6 +282,9 @@ func (cfg Config) withDefaults() Config {
 	if cfg.VerifyRepeatTimes <= 0 {
 		cfg.VerifyRepeatTimes = 10
 	}
+	cfg.TargetMatchMode = NormalizeTargetMatchMode(cfg.TargetMatchMode)
+	cfg.TargetDelaySide = NormalizeTargetDelaySide(cfg.TargetDelaySide)
+	cfg.TargetDelayMode = NormalizeTargetDelayMode(cfg.TargetDelayMode)
 	if cfg.VerifyDelaySteps <= 0 {
 		cfg.VerifyDelaySteps = 10
 	}

@@ -85,9 +85,13 @@ var (
 	flagUkcUseName            = flag.Uint64("ukc_use_name", 0, "UKC use access name")
 	flagUkcUseStack           = flag.Uint64("ukc_use_stack", 0, "UKC use access stack")
 	flagUkcUseSN              = flag.Int("ukc_use_sn", 0, "UKC use access sequence number")
+	flagUkcUseSNMin           = flag.Int("ukc_use_sn_min", 0, "UKC use access sequence number lower bound")
+	flagUkcUseSNMax           = flag.Int("ukc_use_sn_max", 0, "UKC use access sequence number upper bound")
 	flagUkcFreeName           = flag.Uint64("ukc_free_name", 0, "UKC free access name")
 	flagUkcFreeStack          = flag.Uint64("ukc_free_stack", 0, "UKC free access stack")
 	flagUkcFreeSN             = flag.Int("ukc_free_sn", 0, "UKC free access sequence number")
+	flagUkcFreeSNMin          = flag.Int("ukc_free_sn_min", 0, "UKC free access sequence number lower bound")
+	flagUkcFreeSNMax          = flag.Int("ukc_free_sn_max", 0, "UKC free access sequence number upper bound")
 	flagUkcUseAccessDelayTime = flag.Int("ukc_use_access_delay_time", 0, "UKC use access delay time")
 )
 
@@ -265,9 +269,13 @@ func (ctx *Context) Next() *queue.Request {
 			UseAccessName:  *flagUkcUseName,
 			UseCallStack:   *flagUkcUseStack,
 			UseSN:          int32(*flagUkcUseSN),
+			UseSNMin:       int32(*flagUkcUseSNMin),
+			UseSNMax:       int32(*flagUkcUseSNMax),
 			FreeAccessName: *flagUkcFreeName,
 			FreeCallStack:  *flagUkcFreeStack,
 			FreeSN:         int32(*flagUkcFreeSN),
+			FreeSNMin:      int32(*flagUkcFreeSNMin),
+			FreeSNMax:      int32(*flagUkcFreeSNMax),
 			TimeDiff:       uint64(*flagUkcUseAccessDelayTime),
 		}
 	}

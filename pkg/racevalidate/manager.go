@@ -9,6 +9,7 @@ import (
 	"math/rand"
 	"path/filepath"
 	"sort"
+	"strings"
 	"sync"
 	"time"
 
@@ -37,12 +38,19 @@ type ExecutionRequest struct {
 	RepeatTimes   int
 	DisableDdrd   bool
 	StopOnSuccess bool
+	// ObserveTargetPairOnly records DDRD target-pair observations without counting
+	// them as validation success. Matching crashes still update TriggeredCount.
+	ObserveTargetPairOnly bool
 
 	// Per-pair computed delays for verification phase
 	// StartDelayUs: original delay - used for barrier start delay (nanosleep in executor), same as discovery phase
 	// AccessDelayUs: max(original, runtime) - used for UAF access delay (udelay in kernel)
-	StartDelayUs  int64
-	AccessDelayUs int64
+	StartDelayUs          int64
+	AccessDelayUs         int64
+	TargetDelaySide       string
+	TargetDelaySideKernel int32
+	TargetDelayMode       string
+	TargetDelayModeKernel int32
 }
 
 // StablePairWithDelays extends MayUAFPair with computed delay values for verification
@@ -52,30 +60,47 @@ type StablePairWithDelays struct {
 	AccessDelayUs int64 // max(original TimeDiff, runtime TimeDiff) in microseconds
 }
 
+type snSampleStats struct {
+	Count         int
+	FreeMin       int32
+	FreeMax       int32
+	UseMin        int32
+	UseMax        int32
+	FreeTidMin    int32
+	FreeTidMax    int32
+	UseTidMin     int32
+	UseTidMax     int32
+	FreeTidValues map[int32]int
+	UseTidValues  map[int32]int
+}
+
 type ExecutionResult struct {
-	Output         []byte
-	Duration       time.Duration
-	Crashed        bool
-	CrashTitle     string
-	CrashReport    []byte
-	Ddrd           *ddrd.Report
-	TriggeredCount int
+	Output              []byte
+	Duration            time.Duration
+	Crashed             bool
+	CrashTitle          string
+	CrashReport         []byte
+	Ddrd                *ddrd.Report
+	TriggeredCount      int
+	ObservedTargetCount int
 }
 
 type ValidationResult struct {
-	Entry       *fuzzer.UAFCorpusEntry
-	Signature   fuzzer.UAFPairProfile
-	Delays      []int64
-	Duration    time.Duration
-	Output      []byte
-	Success     bool
-	CrashTitle  string
-	Err         error
-	Attempt     int
-	RepeatIndex int
-	RepeatTotal int
-	Pairs       []ddrd.MayUAFPair
-	StablePairs []ddrd.MayUAFPair
+	Entry          *fuzzer.UAFCorpusEntry
+	Signature      fuzzer.UAFPairProfile
+	Delays         []int64
+	Duration       time.Duration
+	Output         []byte
+	Success        bool
+	NoStablePairs  bool
+	CrashTitle     string
+	Err            error
+	Attempt        int
+	RepeatIndex    int
+	RepeatTotal    int
+	Pairs          []ddrd.MayUAFPair
+	StablePairs    []ddrd.MayUAFPair
+	CollectionOnly bool
 }
 
 type StageManager struct {
@@ -137,6 +162,7 @@ type validationTask struct {
 	pairLatest     map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
 	pairCounts     map[string]int
 	pairOriginalTD map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
+	pairSNSamples  map[string]*snSampleStats
 }
 
 func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
@@ -436,10 +462,11 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 		}
 		log.Logf(0, "uafvalidate: task start key=%s attempt=%d repeat=%d/%d delays=%d", task.key, task.attempts, task.repeats+1, sm.cfg.RepeatCount, len(delays))
 		result := &ValidationResult{
-			Entry:     task.lightResultEntry(),
-			Signature: task.signature,
-			Delays:    append([]int64(nil), delays...),
-			Attempt:   task.attempts,
+			Entry:          task.lightResultEntry(),
+			Signature:      task.signature,
+			Delays:         append([]int64(nil), delays...),
+			Attempt:        task.attempts,
+			CollectionOnly: sm.cfg.CollectionOnly,
 		}
 		exec, err := sm.factory(ctx)
 		if err != nil {
@@ -495,9 +522,13 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 			if task.entry != nil {
 				originalPairs = task.entry.Pairs
 			}
+			originMatchMode := sm.cfg.OriginMatchMode
+			if normalizeOriginMatchMode(originMatchMode) == OriginMatchModePrimaryVarName {
+				originalPairs = primaryOriginPairs(task.entry)
+			}
 			// skipOriginalCheck: skip if debug mode OR if RequireOriginMatch is disabled
 			skipOriginalCheck := sm.cfg.TargetVarNamePair != "" || !sm.cfg.RequireOriginMatch
-			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs, skipOriginalCheck)
+			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs, skipOriginalCheck, originMatchMode, sm.cfg.MaxStablePairsPerOrigin, sm.cfg.MaxStablePairsPerEntry)
 			if len(result.StablePairs) > 0 {
 				// Compute stable pairs with per-pair delays (min/max of original vs runtime TimeDiff)
 				stablePairsWithDelays := collectStablePairsWithDelays(
@@ -507,8 +538,33 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 					sm.stable,
 					originalPairs,
 					skipOriginalCheck,
+					originMatchMode,
+					sm.cfg.MaxStablePairsPerOrigin,
+					sm.cfg.MaxStablePairsPerEntry,
 				)
-				sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
+				if sm.cfg.TargetVarNamePair != "" {
+					logTargetCollectionSummary(task, result, originalPairs, stablePairsWithDelays, sm.cfg.TargetVarNamePair, sm.stable, sm.cfg.EnableReplay)
+				}
+				logSNDriftSummary(task, stablePairsWithDelays, originalPairs, originMatchMode, sm.cfg.SNFallbackRange)
+				if sm.cfg.CollectionOnly {
+					log.Logf(0, "uafvalidate: collection-only summary key=%s runtime_pairs=%d stable_pairs=%d repeat=%d/%d replay_enabled=%t history=%d",
+						task.key, len(result.Pairs), len(result.StablePairs), task.repeats+1, sm.cfg.RepeatCount, sm.cfg.EnableReplay, len(task.entry.ReplayHistory))
+				} else {
+					sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
+				}
+			} else {
+				if sm.cfg.TargetVarNamePair != "" {
+					logTargetCollectionSummary(task, result, originalPairs, nil, sm.cfg.TargetVarNamePair, sm.stable, sm.cfg.EnableReplay)
+				}
+				result.NoStablePairs = true
+				if !sm.cfg.CollectionOnly {
+					result.Success = false
+					log.Logf(0, "uafvalidate: no stable pairs key=%s runtime_pairs=%d repeat=%d/%d replay_enabled=%t history=%d",
+						task.key, len(result.Pairs), task.repeats+1, sm.cfg.RepeatCount, sm.cfg.EnableReplay, len(task.entry.ReplayHistory))
+				} else {
+					log.Logf(0, "uafvalidate: collection-only summary key=%s runtime_pairs=%d stable_pairs=0 repeat=%d/%d replay_enabled=%t history=%d",
+						task.key, len(result.Pairs), task.repeats+1, sm.cfg.RepeatCount, sm.cfg.EnableReplay, len(task.entry.ReplayHistory))
+				}
 			}
 		}
 		sm.results <- result
@@ -677,9 +733,11 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		entryKey = SignatureKey(signature)
 	}
 
-	// If TargetCorpusKey is set, only process the matching entry
+	// If TargetCorpusKey is set, only process the matching entry. Accept both
+	// the stable signature key and the persisted uaf-corpus.db record key so
+	// targeted diagnostics can replay an exact saved corpus record.
 	if sm.cfg.TargetCorpusKey != "" {
-		if entryKey != sm.cfg.TargetCorpusKey {
+		if !targetCorpusKeyMatches(sm.cfg.TargetCorpusKey, entryKey, clone.CorpusRecordID) {
 			return nil
 		}
 		log.Logf(1, "uafvalidate: [debug mode] entry matches target corpus key %s", sm.cfg.TargetCorpusKey)
@@ -775,7 +833,7 @@ func (sm *StageManager) prepareTaskRef(ref *ValidationEntryRef) *validationTask 
 	}
 
 	if sm.cfg.TargetCorpusKey != "" {
-		if entryKey != sm.cfg.TargetCorpusKey {
+		if !targetCorpusKeyMatches(sm.cfg.TargetCorpusKey, entryKey, ref.CorpusRecordID) {
 			return nil
 		}
 		log.Logf(1, "uafvalidate: [debug mode] ref matches target corpus key %s", sm.cfg.TargetCorpusKey)
@@ -1243,7 +1301,11 @@ func (sm *StageManager) buildReplayRequests(task *validationTask) []*ExecutionRe
 	if !sm.cfg.EnableReplay || len(task.entry.ReplayHistory) == 0 {
 		return nil
 	}
-	for _, record := range task.entry.ReplayHistory {
+	history := task.entry.ReplayHistory
+	if limit := sm.cfg.MaxReplayHistory; limit > 0 && len(history) > limit {
+		history = history[len(history)-limit:]
+	}
+	for _, record := range history {
 		if record == nil || len(record.Programs) == 0 {
 			continue
 		}
@@ -1389,14 +1451,18 @@ func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, total
 
 	// Aggregate multiple results
 	aggregated := &ExecutionResult{
-		Duration:       totalDuration,
-		TriggeredCount: 0,
+		Duration:            totalDuration,
+		TriggeredCount:      0,
+		ObservedTargetCount: 0,
 	}
 
 	triggeredDelays := []int64{}
 	for i, r := range results {
 		if r == nil {
 			continue
+		}
+		if len(r.Output) != 0 {
+			aggregated.Output = append(aggregated.Output, r.Output...)
 		}
 		if r.TriggeredCount > 0 {
 			aggregated.TriggeredCount++
@@ -1405,6 +1471,9 @@ func (sm *StageManager) aggregateVerifyResults(results []*ExecutionResult, total
 				sweepDelay := sweepDelayForStep(i, len(results), sm.cfg.VerifyDelayMaxUs, sm.cfg.VerifyDelayPower)
 				triggeredDelays = append(triggeredDelays, sweepDelay)
 			}
+		}
+		if r.ObservedTargetCount > 0 {
+			aggregated.ObservedTargetCount++
 		}
 		// Capture first crash info
 		if r.Crashed && aggregated.CrashTitle == "" {
@@ -1521,6 +1590,9 @@ func (sm *StageManager) updateIntersection(task *validationTask, res *Validation
 	if task.pairCounts == nil {
 		task.pairCounts = make(map[string]int)
 	}
+	if task.pairSNSamples == nil {
+		task.pairSNSamples = make(map[string]*snSampleStats)
+	}
 	seen := make(map[string]struct{}, len(res.Pairs))
 	for _, pair := range res.Pairs {
 		key := pairKey(pair)
@@ -1530,7 +1602,374 @@ func (sm *StageManager) updateIntersection(task *validationTask, res *Validation
 		seen[key] = struct{}{}
 		task.pairLatest[key] = pair
 		task.pairCounts[key]++
+		recordSNSample(task.pairSNSamples, key, pair)
 	}
+}
+
+func recordSNSample(samples map[string]*snSampleStats, key string, pair ddrd.MayUAFPair) {
+	if samples == nil {
+		return
+	}
+	stats := samples[key]
+	if stats == nil {
+		stats = &snSampleStats{}
+		samples[key] = stats
+	}
+	stats.Count++
+	if stats.Count == 1 {
+		stats.FreeMin = pair.FreeSN
+		stats.FreeMax = pair.FreeSN
+		stats.UseMin = pair.UseSN
+		stats.UseMax = pair.UseSN
+		stats.FreeTidMin = pair.FreeTid
+		stats.FreeTidMax = pair.FreeTid
+		stats.UseTidMin = pair.UseTid
+		stats.UseTidMax = pair.UseTid
+	} else {
+		stats.FreeMin = minSN(stats.FreeMin, pair.FreeSN)
+		stats.FreeMax = maxSN(stats.FreeMax, pair.FreeSN)
+		stats.UseMin = minSN(stats.UseMin, pair.UseSN)
+		stats.UseMax = maxSN(stats.UseMax, pair.UseSN)
+		if pair.FreeTid < stats.FreeTidMin {
+			stats.FreeTidMin = pair.FreeTid
+		}
+		if pair.FreeTid > stats.FreeTidMax {
+			stats.FreeTidMax = pair.FreeTid
+		}
+		if pair.UseTid < stats.UseTidMin {
+			stats.UseTidMin = pair.UseTid
+		}
+		if pair.UseTid > stats.UseTidMax {
+			stats.UseTidMax = pair.UseTid
+		}
+	}
+	if stats.FreeTidValues == nil {
+		stats.FreeTidValues = make(map[int32]int)
+	}
+	if stats.UseTidValues == nil {
+		stats.UseTidValues = make(map[int32]int)
+	}
+	stats.FreeTidValues[pair.FreeTid]++
+	stats.UseTidValues[pair.UseTid]++
+}
+
+func minSN(a, b int32) int32 {
+	if a <= 0 {
+		return b
+	}
+	if b <= 0 {
+		return a
+	}
+	if b < a {
+		return b
+	}
+	return a
+}
+
+func maxSN(a, b int32) int32 {
+	if b > a {
+		return b
+	}
+	return a
+}
+
+func logSNDriftSummary(task *validationTask, stablePairs []StablePairWithDelays, originalPairs []*ddrd.MayUAFPair, originMatchMode string, configuredRange int) {
+	if task == nil || len(stablePairs) == 0 || len(task.pairSNSamples) == 0 {
+		return
+	}
+
+	expectedRepeats := task.repeats + 1
+	var (
+		withSamples    int
+		withOriginal   int
+		fullObserved   int
+		exactSN        int
+		within1        int
+		within2        int
+		within4        int
+		within8        int
+		withinConfig   int
+		exactTID       int
+		stableTID      int
+		multiTID       int
+		maxFreeTIDVals int
+		maxUseTIDVals  int
+		maxAbsObserved int32
+		detailLogged   int
+	)
+
+	for _, spd := range stablePairs {
+		pair := spd.Pair
+		key := pairKey(pair)
+		samples := task.pairSNSamples[key]
+		if samples == nil || samples.Count == 0 {
+			continue
+		}
+		withSamples++
+		if samples.Count >= expectedRepeats {
+			fullObserved++
+		}
+		original, ok := findOriginalPairForSNDrift(pair, originalPairs, originMatchMode)
+		if ok {
+			withOriginal++
+		}
+
+		maxAbs := pairMaxAbsSNDelta(samples, pair)
+		if maxAbs > maxAbsObserved {
+			maxAbsObserved = maxAbs
+		}
+		if pairSNWithin(samples, pair, 0) {
+			exactSN++
+		}
+		if pairSNWithin(samples, pair, 1) {
+			within1++
+		}
+		if pairSNWithin(samples, pair, 2) {
+			within2++
+		}
+		if pairSNWithin(samples, pair, 4) {
+			within4++
+		}
+		if pairSNWithin(samples, pair, 8) {
+			within8++
+		}
+		if configuredRange > 0 && pairSNWithin(samples, pair, configuredRange) {
+			withinConfig++
+		}
+		freeTidVals := len(samples.FreeTidValues)
+		useTidVals := len(samples.UseTidValues)
+		if freeTidVals > maxFreeTIDVals {
+			maxFreeTIDVals = freeTidVals
+		}
+		if useTidVals > maxUseTIDVals {
+			maxUseTIDVals = useTidVals
+		}
+		if pairTIDExact(samples, pair) {
+			exactTID++
+		}
+		if pairTIDStable(samples) {
+			stableTID++
+		}
+		if freeTidVals > 1 || useTidVals > 1 {
+			multiTID++
+		}
+
+		if detailLogged < 8 {
+			freeLow, freeHigh, freeOK := sideSNDeltaRange(samples.FreeMin, samples.FreeMax, pair.FreeSN)
+			useLow, useHigh, useOK := sideSNDeltaRange(samples.UseMin, samples.UseMax, pair.UseSN)
+			originField := "n/a"
+			if ok {
+				originField = fmt.Sprintf("free:%d use:%d", original.FreeSN, original.UseSN)
+			}
+			log.Logf(0, "uafvalidate: sn-drift pair key=%s vnkey=%s observed=%d/%d ref_sn=(free:%d use:%d) origin_sn=(%s) observed_sn=(free:%d-%d use:%d-%d) delta_from_ref=(free:%s use:%s) ref_tid=(free:%d use:%d) observed_tid=(free:%s use:%s) tid_exact=%t recommend_half_window=%d",
+				task.key, VarNamePairKey(&pair), samples.Count, expectedRepeats,
+				pair.FreeSN, pair.UseSN, originField, samples.FreeMin, samples.FreeMax, samples.UseMin, samples.UseMax,
+				formatSNDeltaRange(freeLow, freeHigh, freeOK), formatSNDeltaRange(useLow, useHigh, useOK),
+				pair.FreeTid, pair.UseTid, formatInt32Counts(samples.FreeTidValues), formatInt32Counts(samples.UseTidValues),
+				pairTIDExact(samples, pair), maxAbs)
+			detailLogged++
+		}
+	}
+
+	configField := "n/a"
+	if configuredRange > 0 {
+		configField = fmt.Sprintf("%d", configuredRange)
+	}
+	log.Logf(0, "uafvalidate: sn-drift summary key=%s stable_pairs=%d samples=%d with_original=%d full_observed=%d/%d repeat=%d stable_threshold=%d exact_sn=%d within_1=%d within_2=%d within_4=%d within_8=%d within_config_range=%d config_range=%s max_abs_delta=%d exact_tid=%d stable_tid=%d multi_tid=%d max_free_tid_values=%d max_use_tid_values=%d",
+		task.key, len(stablePairs), withSamples, withOriginal, fullObserved, withSamples,
+		expectedRepeats, requiredStableCount(expectedRepeats), exactSN, within1, within2, within4, within8,
+		withinConfig, configField, maxAbsObserved, exactTID, stableTID, multiTID, maxFreeTIDVals, maxUseTIDVals)
+}
+
+func logTargetCollectionSummary(task *validationTask, result *ValidationResult, originalPairs []*ddrd.MayUAFPair, stablePairs []StablePairWithDelays, target string, stableThreshold int, replayEnabled bool) {
+	if task == nil || result == nil || target == "" {
+		return
+	}
+	var storedPairs []*ddrd.MayUAFPair
+	historyCount := 0
+	if task.entry != nil {
+		storedPairs = task.entry.Pairs
+		historyCount = len(task.entry.ReplayHistory)
+	}
+	log.Logf(0, "uafvalidate: target collection summary key=%s corpus_record=%s target=%s stored_target_pairs=%d origin_filter_target_pairs=%d latest_runtime_target_pairs=%d stable_target_pairs=%d stable_pairs=%d pair_keys_seen=%d repeat=%d/%d stable_threshold=%d replay_enabled=%t history=%d",
+		task.key,
+		func() string {
+			if task.entry != nil {
+				return task.entry.CorpusRecordID
+			}
+			return ""
+		}(),
+		target,
+		countTargetPairs(storedPairs, target),
+		countTargetPairs(originalPairs, target),
+		countTargetPairsFromValues(result.Pairs, target),
+		countTargetStablePairs(stablePairs, target),
+		len(stablePairs),
+		len(task.pairCounts),
+		task.repeats+1,
+		result.RepeatTotal,
+		stableThreshold,
+		replayEnabled && historyCount > 0,
+		historyCount,
+	)
+}
+
+func countTargetPairs(pairs []*ddrd.MayUAFPair, target string) int {
+	if len(pairs) == 0 || target == "" {
+		return 0
+	}
+	count := 0
+	for _, pair := range pairs {
+		if pairMatchesTargetVarName(pair, target) {
+			count++
+		}
+	}
+	return count
+}
+
+func countTargetPairsFromValues(pairs []ddrd.MayUAFPair, target string) int {
+	if len(pairs) == 0 || target == "" {
+		return 0
+	}
+	count := 0
+	for i := range pairs {
+		if pairMatchesTargetVarName(&pairs[i], target) {
+			count++
+		}
+	}
+	return count
+}
+
+func countTargetStablePairs(pairs []StablePairWithDelays, target string) int {
+	if len(pairs) == 0 || target == "" {
+		return 0
+	}
+	count := 0
+	for i := range pairs {
+		if pairMatchesTargetVarName(&pairs[i].Pair, target) {
+			count++
+		}
+	}
+	return count
+}
+
+func findOriginalPairForSNDrift(runtime ddrd.MayUAFPair, originalPairs []*ddrd.MayUAFPair, originMatchMode string) (ddrd.MayUAFPair, bool) {
+	if len(originalPairs) == 0 {
+		return ddrd.MayUAFPair{}, false
+	}
+	exact := pairKey(runtime)
+	for _, pair := range originalPairs {
+		if pair != nil && pairKey(*pair) == exact {
+			return *pair, true
+		}
+	}
+	origin := originMatchKey(runtime, originMatchMode)
+	for _, pair := range originalPairs {
+		if pair != nil && originMatchKey(*pair, originMatchMode) == origin {
+			return *pair, true
+		}
+	}
+	vn := varNamePairKey(runtime)
+	for _, pair := range originalPairs {
+		if pair != nil && varNamePairKey(*pair) == vn {
+			return *pair, true
+		}
+	}
+	return ddrd.MayUAFPair{}, false
+}
+
+func pairSNWithin(samples *snSampleStats, original ddrd.MayUAFPair, halfWindow int) bool {
+	if samples == nil {
+		return false
+	}
+	return sideSNWithin(samples.FreeMin, samples.FreeMax, original.FreeSN, halfWindow) &&
+		sideSNWithin(samples.UseMin, samples.UseMax, original.UseSN, halfWindow)
+}
+
+func pairTIDExact(samples *snSampleStats, ref ddrd.MayUAFPair) bool {
+	if samples == nil || samples.Count == 0 {
+		return false
+	}
+	return len(samples.FreeTidValues) == 1 && samples.FreeTidValues[ref.FreeTid] == samples.Count &&
+		len(samples.UseTidValues) == 1 && samples.UseTidValues[ref.UseTid] == samples.Count
+}
+
+func pairTIDStable(samples *snSampleStats) bool {
+	if samples == nil || samples.Count == 0 {
+		return false
+	}
+	return len(samples.FreeTidValues) == 1 && len(samples.UseTidValues) == 1
+}
+
+func sideSNWithin(observedMin, observedMax, original int32, halfWindow int) bool {
+	if original <= 0 {
+		return true
+	}
+	if observedMin <= 0 || observedMax <= 0 {
+		return false
+	}
+	return int(observedMin) >= int(original)-halfWindow && int(observedMax) <= int(original)+halfWindow
+}
+
+func pairMaxAbsSNDelta(samples *snSampleStats, original ddrd.MayUAFPair) int32 {
+	var maxAbs int32
+	if low, high, ok := sideSNDeltaRange(samples.FreeMin, samples.FreeMax, original.FreeSN); ok {
+		maxAbs = max32(maxAbs, abs32(low))
+		maxAbs = max32(maxAbs, abs32(high))
+	}
+	if low, high, ok := sideSNDeltaRange(samples.UseMin, samples.UseMax, original.UseSN); ok {
+		maxAbs = max32(maxAbs, abs32(low))
+		maxAbs = max32(maxAbs, abs32(high))
+	}
+	return maxAbs
+}
+
+func sideSNDeltaRange(observedMin, observedMax, original int32) (int32, int32, bool) {
+	if original <= 0 || observedMin <= 0 || observedMax <= 0 {
+		return 0, 0, false
+	}
+	return observedMin - original, observedMax - original, true
+}
+
+func formatSNDeltaRange(low, high int32, ok bool) string {
+	if !ok {
+		return "n/a"
+	}
+	if low == high {
+		return fmt.Sprintf("%+d", low)
+	}
+	return fmt.Sprintf("%+d..%+d", low, high)
+}
+
+func formatInt32Counts(values map[int32]int) string {
+	if len(values) == 0 {
+		return "n/a"
+	}
+	keys := make([]int, 0, len(values))
+	for value := range values {
+		keys = append(keys, int(value))
+	}
+	sort.Ints(keys)
+	parts := make([]string, 0, len(keys))
+	for _, key := range keys {
+		value := int32(key)
+		parts = append(parts, fmt.Sprintf("%d:%d", value, values[value]))
+	}
+	return strings.Join(parts, ",")
+}
+
+func abs32(v int32) int32 {
+	if v < 0 {
+		return -v
+	}
+	return v
+}
+
+func max32(a, b int32) int32 {
+	if b > a {
+		return b
+	}
+	return a
 }
 
 func clonePairs(report *ddrd.Report) []ddrd.MayUAFPair {
@@ -1547,33 +1986,27 @@ func clonePairs(report *ddrd.Report) []ddrd.MayUAFPair {
 	return cloned
 }
 
-func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair, skipOriginalCheck bool) []ddrd.MayUAFPair {
+func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int, minCount int, originalPairs []*ddrd.MayUAFPair, skipOriginalCheck bool, originMatchMode string, maxPerOrigin int, maxPerEntry int) []ddrd.MayUAFPair {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
 	}
 	if minCount <= 1 {
 		minCount = 1
 	}
-	// Build a set of original pair keys for fast lookup
-	originalKeys := make(map[string]struct{}, len(originalPairs))
-	for _, pair := range originalPairs {
-		if pair == nil {
-			continue
-		}
-		originalKeys[pairKey(*pair)] = struct{}{}
-	}
+	originalKeys, _ := buildOriginalMatchIndexes(originalPairs, originMatchMode)
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
 		if count < minCount {
 			continue
 		}
-		if _, ok := latest[key]; !ok {
+		pair, ok := latest[key]
+		if !ok {
 			continue
 		}
 		// Additional condition: pair must exist in original corpus pairs
-		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs
+		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs.
 		if !skipOriginalCheck && len(originalKeys) > 0 {
-			if _, inOriginal := originalKeys[key]; !inOriginal {
+			if _, inOriginal := originalKeys[originMatchKey(pair, originMatchMode)]; !inOriginal {
 				continue
 			}
 		}
@@ -1582,7 +2015,9 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 	if len(keys) == 0 {
 		return nil
 	}
-	sort.Strings(keys)
+	sortStablePairKeys(keys, latest, counts, originalPairs, originMatchMode)
+	keys = limitKeysPerOrigin(keys, latest, originMatchMode, maxPerOrigin)
+	keys = limitKeysPerEntry(keys, maxPerEntry)
 	stable := make([]ddrd.MayUAFPair, 0, len(keys))
 	for _, key := range keys {
 		stable = append(stable, latest[key])
@@ -1600,6 +2035,9 @@ func collectStablePairsWithDelays(
 	minCount int,
 	originalPairs []*ddrd.MayUAFPair,
 	skipOriginalCheck bool,
+	originMatchMode string,
+	maxPerOrigin int,
+	maxPerEntry int,
 ) []StablePairWithDelays {
 	if len(latest) == 0 || len(counts) == 0 {
 		return nil
@@ -1607,26 +2045,20 @@ func collectStablePairsWithDelays(
 	if minCount <= 1 {
 		minCount = 1
 	}
-	// Build a set of original pair keys for fast lookup
-	originalKeys := make(map[string]struct{}, len(originalPairs))
-	for _, pair := range originalPairs {
-		if pair == nil {
-			continue
-		}
-		originalKeys[pairKey(*pair)] = struct{}{}
-	}
+	originalKeys, originalTDByMatchKey := buildOriginalMatchIndexes(originalPairs, originMatchMode)
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
 		if count < minCount {
 			continue
 		}
-		if _, ok := latest[key]; !ok {
+		pair, ok := latest[key]
+		if !ok {
 			continue
 		}
 		// Additional condition: pair must exist in original corpus pairs
 		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs
 		if !skipOriginalCheck && len(originalKeys) > 0 {
-			if _, inOriginal := originalKeys[key]; !inOriginal {
+			if _, inOriginal := originalKeys[originMatchKey(pair, originMatchMode)]; !inOriginal {
 				continue
 			}
 		}
@@ -1635,12 +2067,17 @@ func collectStablePairsWithDelays(
 	if len(keys) == 0 {
 		return nil
 	}
-	sort.Strings(keys)
+	sortStablePairKeys(keys, latest, counts, originalPairs, originMatchMode)
+	keys = limitKeysPerOrigin(keys, latest, originMatchMode, maxPerOrigin)
+	keys = limitKeysPerEntry(keys, maxPerEntry)
 	result := make([]StablePairWithDelays, 0, len(keys))
 	for _, key := range keys {
 		pair := latest[key]
 		runtimeTD := pair.TimeDiff // nanoseconds from runtime observation
 		origTD := originalTD[key]  // nanoseconds from original corpus entry
+		if origTD == 0 {
+			origTD = originalTDByMatchKey[originMatchKey(pair, originMatchMode)]
+		}
 		if origTD == 0 {
 			origTD = runtimeTD // fallback if not recorded
 		}
@@ -1677,6 +2114,166 @@ func pairKey(pair ddrd.MayUAFPair) string {
 	)
 }
 
+func varNamePairKey(pair ddrd.MayUAFPair) string {
+	return fmt.Sprintf("%016x-%016x", pair.FreeAccessName, pair.UseAccessName)
+}
+
+func normalizeOriginMatchMode(mode string) string {
+	switch mode {
+	case OriginMatchModeVarName, OriginMatchModePrimaryVarName:
+		return mode
+	default:
+		return OriginMatchModeExact
+	}
+}
+
+func originKeyMode(mode string) string {
+	if normalizeOriginMatchMode(mode) == OriginMatchModeExact {
+		return OriginMatchModeExact
+	}
+	return OriginMatchModeVarName
+}
+
+func primaryOriginPairs(entry *fuzzer.UAFCorpusEntry) []*ddrd.MayUAFPair {
+	if entry == nil {
+		return nil
+	}
+	pair := entry.PairBasicInfo
+	if pair.UAFPairID() == 0 && !IsZeroSignature(entry.Profile) {
+		pair = ddrd.MayUAFPair{
+			FreeAccessName: entry.Profile.FreeAccessName,
+			UseAccessName:  entry.Profile.UseAccessName,
+			FreeCallStack:  entry.Profile.FreeCallStack,
+			UseCallStack:   entry.Profile.UseCallStack,
+		}
+	}
+	if pair.UAFPairID() == 0 {
+		return nil
+	}
+	return []*ddrd.MayUAFPair{&pair}
+}
+
+func originMatchKey(pair ddrd.MayUAFPair, mode string) string {
+	if originKeyMode(mode) == OriginMatchModeVarName {
+		return varNamePairKey(pair)
+	}
+	return pairKey(pair)
+}
+
+func buildOriginalMatchIndexes(originalPairs []*ddrd.MayUAFPair, mode string) (map[string]struct{}, map[string]uint64) {
+	keys := make(map[string]struct{}, len(originalPairs))
+	timeDiffs := make(map[string]uint64, len(originalPairs))
+	for _, pair := range originalPairs {
+		if pair == nil {
+			continue
+		}
+		key := originMatchKey(*pair, mode)
+		keys[key] = struct{}{}
+		if pair.TimeDiff != 0 {
+			if cur := timeDiffs[key]; cur == 0 || pair.TimeDiff < cur {
+				timeDiffs[key] = pair.TimeDiff
+			}
+		}
+	}
+	return keys, timeDiffs
+}
+
+func buildExactOriginalIndex(originalPairs []*ddrd.MayUAFPair) map[string]uint64 {
+	timeDiffs := make(map[string]uint64, len(originalPairs))
+	for _, pair := range originalPairs {
+		if pair == nil {
+			continue
+		}
+		key := pairKey(*pair)
+		if pair.TimeDiff != 0 {
+			if cur := timeDiffs[key]; cur == 0 || pair.TimeDiff < cur {
+				timeDiffs[key] = pair.TimeDiff
+			}
+			continue
+		}
+		if _, ok := timeDiffs[key]; !ok {
+			timeDiffs[key] = 0
+		}
+	}
+	return timeDiffs
+}
+
+func sortStablePairKeys(keys []string, latest map[string]ddrd.MayUAFPair, counts map[string]int, originalPairs []*ddrd.MayUAFPair, originMatchMode string) {
+	exactOriginalTD := buildExactOriginalIndex(originalPairs)
+	_, originalTDByMatchKey := buildOriginalMatchIndexes(originalPairs, originMatchMode)
+	sort.Slice(keys, func(i, j int) bool {
+		ki, kj := keys[i], keys[j]
+		pi, iok := latest[ki]
+		pj, jok := latest[kj]
+		if iok != jok {
+			return iok
+		}
+		if !iok {
+			return ki < kj
+		}
+
+		_, exactI := exactOriginalTD[pairKey(pi)]
+		_, exactJ := exactOriginalTD[pairKey(pj)]
+		if exactI != exactJ {
+			return exactI
+		}
+
+		if counts[ki] != counts[kj] {
+			return counts[ki] > counts[kj]
+		}
+
+		di := stablePairTimeDiffDelta(pi, exactOriginalTD, originalTDByMatchKey, originMatchMode)
+		dj := stablePairTimeDiffDelta(pj, exactOriginalTD, originalTDByMatchKey, originMatchMode)
+		if di != dj {
+			return di < dj
+		}
+
+		return ki < kj
+	})
+}
+
+func stablePairTimeDiffDelta(pair ddrd.MayUAFPair, exactOriginalTD map[string]uint64, originalTDByMatchKey map[string]uint64, originMatchMode string) uint64 {
+	orig := exactOriginalTD[pairKey(pair)]
+	if orig == 0 {
+		orig = originalTDByMatchKey[originMatchKey(pair, originMatchMode)]
+	}
+	if orig == 0 || pair.TimeDiff == 0 {
+		return ^uint64(0)
+	}
+	if pair.TimeDiff > orig {
+		return pair.TimeDiff - orig
+	}
+	return orig - pair.TimeDiff
+}
+
+func limitKeysPerOrigin(keys []string, latest map[string]ddrd.MayUAFPair, mode string, maxPerOrigin int) []string {
+	if maxPerOrigin <= 0 || len(keys) <= maxPerOrigin {
+		return keys
+	}
+	counts := make(map[string]int)
+	limited := make([]string, 0, len(keys))
+	for _, key := range keys {
+		pair, ok := latest[key]
+		if !ok {
+			continue
+		}
+		originKey := originMatchKey(pair, mode)
+		if counts[originKey] >= maxPerOrigin {
+			continue
+		}
+		counts[originKey]++
+		limited = append(limited, key)
+	}
+	return limited
+}
+
+func limitKeysPerEntry(keys []string, maxPerEntry int) []string {
+	if maxPerEntry <= 0 || len(keys) <= maxPerEntry {
+		return keys
+	}
+	return keys[:maxPerEntry]
+}
+
 // entryContainsTargetVarName checks if any pair in the entry matches the target VarName pair.
 // targetVarNamePair format: "freeAccessName-useAccessName" (hex without 0x prefix)
 func entryContainsTargetVarName(entry *fuzzer.UAFCorpusEntry, targetVarNamePair string) bool {
@@ -1701,6 +2298,19 @@ func pairMatchesTargetVarName(pair *ddrd.MayUAFPair, targetVarNamePair string) b
 		return false
 	}
 	return VarNamePairKey(pair) == targetVarNamePair
+}
+
+func targetCorpusKeyMatches(target, signatureKey, corpusRecordID string) bool {
+	if target == "" {
+		return true
+	}
+	if signatureKey != "" && target == signatureKey {
+		return true
+	}
+	if corpusRecordID == "" {
+		return false
+	}
+	return target == corpusRecordID || target == "corpus-"+corpusRecordID
 }
 
 func (sm *StageManager) shouldRetry(task *validationTask, res *ValidationResult) bool {
@@ -1728,8 +2338,209 @@ func requiredStableCount(repeat int) int {
 	return repeat/2 + 1
 }
 
+func targetPairForMatchMode(pair ddrd.MayUAFPair, mode string) ddrd.MayUAFPair {
+	switch NormalizeTargetMatchMode(mode) {
+	case TargetMatchModeSNOnly, TargetMatchModeSNRangeOnly:
+		pair.FreeCallStack = 0
+		pair.UseCallStack = 0
+		pair.FreeSNMin = 0
+		pair.FreeSNMax = 0
+		pair.UseSNMin = 0
+		pair.UseSNMax = 0
+		pair.FreeTid = 0
+		pair.UseTid = 0
+	case TargetMatchModeSiteOnly:
+		pair.FreeCallStack = 0
+		pair.UseCallStack = 0
+		pair.FreeSN = 0
+		pair.UseSN = 0
+		pair.FreeSNMin = 0
+		pair.FreeSNMax = 0
+		pair.UseSNMin = 0
+		pair.UseSNMax = 0
+		pair.FreeTid = 0
+		pair.UseTid = 0
+	case TargetMatchModeStackOnly:
+		pair.FreeSN = 0
+		pair.UseSN = 0
+		pair.FreeSNMin = 0
+		pair.FreeSNMax = 0
+		pair.UseSNMin = 0
+		pair.UseSNMax = 0
+		pair.FreeTid = 0
+		pair.UseTid = 0
+	default:
+		pair.FreeSNMin = 0
+		pair.FreeSNMax = 0
+		pair.UseSNMin = 0
+		pair.UseSNMax = 0
+	}
+	return pair
+}
+
+type targetMatchAttempt struct {
+	mode string
+	pair ddrd.MayUAFPair
+}
+
+func targetMatchAttempts(pair ddrd.MayUAFPair, mode string, cfg Config) []targetMatchAttempt {
+	var attempts []targetMatchAttempt
+	switch NormalizeTargetMatchMode(mode) {
+	case TargetMatchModeStrictSN:
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeStrictSN, pair: targetPairForMatchMode(pair, TargetMatchModeStrictSN)}}
+	case TargetMatchModeSNRange:
+		if rangePair, ok := targetPairForSNRange(pair, cfg.SNFallbackRange); ok {
+			attempts = []targetMatchAttempt{{mode: TargetMatchModeSNRange, pair: rangePair}}
+			break
+		}
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeStackOnly, pair: targetPairForMatchMode(pair, TargetMatchModeStackOnly)}}
+	case TargetMatchModeSNOnly:
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeSNOnly, pair: targetPairForMatchMode(pair, TargetMatchModeSNOnly)}}
+	case TargetMatchModeSNRangeOnly:
+		if rangePair, ok := targetPairForSNRangeOnly(pair, cfg.SNFallbackRange); ok {
+			attempts = []targetMatchAttempt{{mode: TargetMatchModeSNRangeOnly, pair: rangePair}}
+			break
+		}
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeSNOnly, pair: targetPairForMatchMode(pair, TargetMatchModeSNOnly)}}
+	case TargetMatchModeStackOnly:
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeStackOnly, pair: targetPairForMatchMode(pair, TargetMatchModeStackOnly)}}
+	case TargetMatchModeSiteOnly:
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeSiteOnly, pair: targetPairForMatchMode(pair, TargetMatchModeSiteOnly)}}
+	default:
+		attempts = []targetMatchAttempt{{mode: TargetMatchModeStrictSN, pair: targetPairForMatchMode(pair, TargetMatchModeStrictSN)}}
+		if rangePair, ok := targetPairForSNRange(pair, cfg.SNFallbackRange); ok {
+			attempts = append(attempts, targetMatchAttempt{mode: TargetMatchModeSNRange, pair: rangePair})
+		}
+		attempts = append(attempts, targetMatchAttempt{mode: TargetMatchModeStackOnly, pair: targetPairForMatchMode(pair, TargetMatchModeStackOnly)})
+	}
+	return applyTargetTIDPolicy(attempts, cfg)
+}
+
+func applyTargetTIDPolicy(attempts []targetMatchAttempt, cfg Config) []targetMatchAttempt {
+	if !cfg.WildcardTargetTID {
+		return attempts
+	}
+	for i := range attempts {
+		attempts[i].pair.FreeTid = 0
+		attempts[i].pair.UseTid = 0
+	}
+	return attempts
+}
+
+func targetPairForSNRange(pair ddrd.MayUAFPair, halfWindow int) (ddrd.MayUAFPair, bool) {
+	if halfWindow <= 0 || (pair.FreeSN <= 0 && pair.UseSN <= 0) {
+		return ddrd.MayUAFPair{}, false
+	}
+	pair = targetPairForMatchMode(pair, TargetMatchModeStrictSN)
+	pair.FreeTid = 0
+	pair.UseTid = 0
+	var ok bool
+	pair.FreeSNMin, pair.FreeSNMax, ok = snBounds(pair.FreeSN, halfWindow)
+	if !ok {
+		pair.FreeSN = 0
+	}
+	pair.UseSNMin, pair.UseSNMax, ok = snBounds(pair.UseSN, halfWindow)
+	if !ok {
+		pair.UseSN = 0
+	}
+	return pair, pair.FreeSNMin != 0 || pair.FreeSNMax != 0 || pair.UseSNMin != 0 || pair.UseSNMax != 0
+}
+
+func targetPairForSNRangeOnly(pair ddrd.MayUAFPair, halfWindow int) (ddrd.MayUAFPair, bool) {
+	pair, ok := targetPairForSNRange(pair, halfWindow)
+	if !ok {
+		return ddrd.MayUAFPair{}, false
+	}
+	pair.FreeCallStack = 0
+	pair.UseCallStack = 0
+	pair.FreeTid = 0
+	pair.UseTid = 0
+	return pair, true
+}
+
+func snBounds(sn int32, halfWindow int) (int32, int32, bool) {
+	if sn <= 0 || halfWindow < 0 {
+		return 0, 0, false
+	}
+	min := int(sn) - halfWindow
+	if min < 1 {
+		min = 1
+	}
+	max := int(sn) + halfWindow
+	if max > math.MaxInt32 {
+		max = math.MaxInt32
+	}
+	return int32(min), int32(max), true
+}
+
+func targetMatchAttemptsForLog(req *ExecutionRequest, runs int) int {
+	if req == nil || runs <= 0 {
+		return 0
+	}
+	if req.RepeatTimes <= 0 {
+		return runs
+	}
+	return runs * req.RepeatTimes
+}
+
+func (sm *StageManager) runVerificationAttempt(ctx context.Context, task *validationTask,
+	req *ExecutionRequest, attemptMode string) (*ExecutionResult, error) {
+	exec, err := sm.factory(ctx)
+	if err != nil {
+		return nil, err
+	}
+	defer func() {
+		if closer, ok := exec.(interface{ Close() error }); ok {
+			if cerr := closer.Close(); cerr != nil {
+				log.Logf(0, "uafvalidate: verification executor close error key=%s mode=%s err=%v",
+					task.key, attemptMode, cerr)
+			}
+		}
+	}()
+	res, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
+	logUAFProbeOutput(task.key, attemptMode, res)
+	return res, runErr
+}
+
+func logUAFProbeOutput(key, attemptMode string, res *ExecutionResult) {
+	if res == nil || len(res.Output) == 0 {
+		return
+	}
+	const prefix = "[KCCWF"
+	for _, line := range strings.Split(string(res.Output), "\n") {
+		if !strings.Contains(line, prefix) {
+			continue
+		}
+		if strings.Contains(line, "UAF_TARGET") || strings.Contains(line, "UAF pair") {
+			log.Logf(0, "uafvalidate: kernel target trace key=%s mode=%s %s", key, attemptMode, line)
+		}
+	}
+}
+
 func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validationTask, stablePairs []ddrd.MayUAFPair) {
-	log.Logf(0, "uafvalidate: starting verification phase for key=%s pairs=%d", task.key, len(stablePairs))
+	matchMode := NormalizeTargetMatchMode(sm.cfg.TargetMatchMode)
+	log.Logf(0, "uafvalidate: starting verification phase for key=%s pairs=%d target_match_mode=%s",
+		task.key, len(stablePairs), matchMode)
+
+	var (
+		skippedDebug        int
+		skippedInvalid      int
+		skippedValidated    int
+		skippedBackoff      int
+		executedPairs       int
+		validatedPairs      int
+		failedPairs         int
+		strictSuccesses     int
+		fallbackRuns        int
+		fallbackSuccess     int
+		snRangeRuns         int
+		snRangeSuccess      int
+		stackRuns           int
+		stackSuccess        int
+		siteOnlySuccess     int
+		observedTargets     int
+		nonblockingObserved int
+	)
 
 	for i, pair := range stablePairs {
 		if ctx.Err() != nil {
@@ -1741,11 +2552,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 		// ========== Layer 1: Exact match skip ==========
 		if sm.isInvalid(fullKey) {
+			skippedInvalid++
 			log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
 
 		if sm.isValidated(fullKey) {
+			skippedValidated++
 			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
@@ -1754,6 +2567,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		if sm.varNameBackoffStore != nil {
 			skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 			if skip {
+				skippedBackoff++
 				log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
 					i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 				continue
@@ -1769,41 +2583,68 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			i+1, len(stablePairs), task.key,
 			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack)
 
-		pairCopy := pair
-		exec, err := sm.factory(ctx)
-		if err != nil {
-			log.Logf(0, "uafvalidate: failed to create executor for verification: %v", err)
-			continue
-		}
-
-		req := &ExecutionRequest{
-			Entry:         task.entry,
-			Delays:        sm.delay.BuildDelays(task.entry),
-			TargetPair:    &pairCopy,
-			RepeatTimes:   sm.cfg.VerifyRepeatTimes,
-			DisableDdrd:   true,
-			StopOnSuccess: true,
-		}
-
-		// closeExec returns the VM to the pool. Must not be called until we
-		// are completely done with exec (including any minimize phase).
-		closeExec := func() {
-			if closer, ok := exec.(interface{ Close() error }); ok {
-				closer.Close()
+		var (
+			pairCopy    ddrd.MayUAFPair
+			req         *ExecutionRequest
+			execRes     *ExecutionResult
+			runErr      error
+			attemptMode string
+			attemptRuns int
+		)
+		attempts := targetMatchAttempts(pair, matchMode, sm.cfg)
+		for attemptIndex, attempt := range attempts {
+			attemptMode = attempt.mode
+			pairCopy = attempt.pair
+			if sm.cfg.DisableAccessDelay {
+				pairCopy.TimeDiff = 0
 			}
+			req = &ExecutionRequest{
+				Entry:                 task.entry,
+				Delays:                sm.delay.BuildDelays(task.entry),
+				TargetPair:            &pairCopy,
+				RepeatTimes:           sm.cfg.VerifyRepeatTimes,
+				DisableDdrd:           !sm.cfg.VerifyCollectPairs,
+				StopOnSuccess:         true,
+				ObserveTargetPairOnly: sm.cfg.VerifyCollectPairs,
+				TargetDelaySide:       sm.cfg.TargetDelaySide,
+				TargetDelaySideKernel: TargetDelaySideID(sm.cfg.TargetDelaySide),
+				TargetDelayMode:       sm.cfg.TargetDelayMode,
+				TargetDelayModeKernel: TargetDelayModeID(sm.cfg.TargetDelayMode),
+			}
+			log.Logf(0, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
+				task.key, attemptMode, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
+				pairCopy.FreeSN, pairCopy.UseSN, pairCopy.FreeSNMin, pairCopy.FreeSNMax,
+				pairCopy.UseSNMin, pairCopy.UseSNMax, pairCopy.FreeTid, pairCopy.UseTid)
+			execRes, runErr = sm.runVerificationAttempt(ctx, task, req, attemptMode)
+			attemptRuns++
+			if matchMode == TargetMatchModeSNFallback && attemptMode != TargetMatchModeStrictSN {
+				fallbackRuns++
+			}
+			switch attemptMode {
+			case TargetMatchModeSNRange:
+				snRangeRuns++
+			case TargetMatchModeStackOnly:
+				stackRuns++
+			}
+			if runErr != nil || execRes == nil || execRes.TriggeredCount > 0 || attemptIndex == len(attempts)-1 {
+				break
+			}
+			nextMode := attempts[attemptIndex+1].mode
+			log.Logf(0, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
+				attemptMode, task.key, vnKey, nextMode)
 		}
-
-		// Use batch execution to run replay + verification in a single RPC session
-		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
 
 		// Extract crash info
 		crashInfo := ""
 		if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
 			crashInfo = fmt.Sprintf(" crash=%q", execRes.CrashTitle)
 		}
+		executedPairs++
+		if execRes != nil {
+			observedTargets += execRes.ObservedTargetCount
+		}
 
 		if runErr != nil {
-			closeExec()
 			// Log run error with any available crash info
 			if crashInfo != "" {
 				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
@@ -1835,11 +2676,43 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			statusDetail = " (crashed with different race, target pair not matched)"
 		}
 
-		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s%s",
-			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, req.RepeatTimes, status, statusDetail)
+		totalAttempts := targetMatchAttemptsForLog(req, attemptRuns)
+		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
+			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
+			matchMode, attemptMode)
+
+		nonblockingEvidence := req != nil &&
+			NormalizeTargetDelayMode(req.TargetDelayMode) == TargetDelayModeNonblocking &&
+			execRes.TriggeredCount > 0
+		if nonblockingEvidence {
+			nonblockingObserved++
+			log.Logf(0, "uafvalidate: nonblocking target observed after %d trigger(s); treating as candidate evidence only, not validated target_match_mode=%s final_attempt_mode=%s",
+				execRes.TriggeredCount, matchMode, attemptMode)
+			continue
+		}
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves this VarName pair can trigger ==========
+			validatedPairs++
+			switch {
+			case attemptMode == TargetMatchModeStrictSN:
+				strictSuccesses++
+			case attemptMode == TargetMatchModeSNRange:
+				snRangeSuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			case attemptMode == TargetMatchModeStackOnly:
+				stackSuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			case attemptMode == TargetMatchModeSiteOnly:
+				siteOnlySuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			}
 
 			// Try to minimize history if enabled
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
@@ -1860,14 +2733,14 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
 			sm.markValidated(fullKey, reportData)
 			if sm.cfg.PairStatusSink != nil {
-				sm.cfg.PairStatusSink.MarkPairValidated(pairCopy, reportData)
+				sm.cfg.PairStatusSink.MarkPairValidated(pair, reportData)
 			}
 
 			// Update VarName backoff statistics (success) and mark as verified
 			// This will cause ALL future entries with the same VarName pair to be skipped
 			if sm.varNameBackoffStore != nil {
-				sm.varNameBackoffStore.RecordSuccessWithKey(&pairCopy, task.key)
-				stats := sm.varNameBackoffStore.GetByPair(&pairCopy)
+				sm.varNameBackoffStore.RecordSuccessWithKey(&pair, task.key)
+				stats := sm.varNameBackoffStore.GetByPair(&pair)
 				log.Logf(0, "uafvalidate: pair validated, backoff score updated: vnkey=%s new_score=%.2f verified=%t",
 					vnKey, stats.BackoffScore(), stats.IsVerified())
 			}
@@ -1877,28 +2750,35 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			if len(reportPreview) > 2000 {
 				reportPreview = reportPreview[:2000] + "...[truncated]"
 			}
-			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
-			closeExec()
+			log.Logf(0, "uafvalidate: pair validated after %d trigger(s) target_match_mode=%s final_attempt_mode=%s\n%s",
+				execRes.TriggeredCount, matchMode, attemptMode, reportPreview)
 			continue
 		}
 
 		// ========== Failure: increase backoff score ==========
-		closeExec()
-
+		failedPairs++
 		// Layer 1: Mark this exact pair as invalid
 		sm.markInvalid(fullKey)
 		if sm.cfg.PairStatusSink != nil {
-			sm.cfg.PairStatusSink.MarkPairInvalid(pairCopy)
+			sm.cfg.PairStatusSink.MarkPairInvalid(pair)
 		}
 
 		// Layer 2: Update VarName backoff statistics (failure)
 		if sm.varNameBackoffStore != nil {
-			sm.varNameBackoffStore.RecordFailure(&pairCopy)
-			stats := sm.varNameBackoffStore.GetByPair(&pairCopy)
+			sm.varNameBackoffStore.RecordFailure(&pair)
+			stats := sm.varNameBackoffStore.GetByPair(&pair)
 			log.Logf(0, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
 				vnKey, stats.BackoffScore(), stats.SkipProbability())
 		}
 	}
+
+	skippedPairs := skippedDebug + skippedInvalid + skippedValidated + skippedBackoff
+	handledPairs := executedPairs + skippedPairs
+	log.Logf(0, "uafvalidate: verification phase summary key=%s target_match_mode=%s pairs=%d handled=%d executed=%d skipped=%d executed_verify_pairs=%d skipped_pairs=%d skipped_debug=%d skipped_invalid=%d skipped_validated=%d skipped_backoff=%d validated=%d failed=%d strict_success=%d fallback_runs=%d fallback_success=%d site_only_success=%d observed_target=%d nonblocking_observed=%d sn_range_runs=%d sn_range_success=%d stack_fallback_runs=%d stack_fallback_success=%d",
+		task.key, matchMode, len(stablePairs), handledPairs, executedPairs, skippedPairs,
+		executedPairs, skippedPairs, skippedDebug, skippedInvalid, skippedValidated, skippedBackoff,
+		validatedPairs, failedPairs, strictSuccesses, fallbackRuns, fallbackSuccess, siteOnlySuccess, observedTargets, nonblockingObserved,
+		snRangeRuns, snRangeSuccess, stackRuns, stackSuccess)
 
 	// Output statistics summary
 	if sm.varNameBackoffStore != nil {
@@ -1912,12 +2792,34 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 // - AccessDelayUs (max of original/runtime) for kernel UAF access delay
 func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
 	debugMode := sm.cfg.TargetVarNamePair != ""
+	matchMode := NormalizeTargetMatchMode(sm.cfg.TargetMatchMode)
 	if debugMode {
-		log.Logf(1, "uafvalidate: [debug mode] starting verification phase for key=%s pairs=%d target=%s",
-			task.key, len(stablePairs), sm.cfg.TargetVarNamePair)
+		log.Logf(0, "uafvalidate: [debug mode] starting verification phase for key=%s pairs=%d target=%s target_match_mode=%s",
+			task.key, len(stablePairs), sm.cfg.TargetVarNamePair, matchMode)
 	} else {
-		log.Logf(1, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d", task.key, len(stablePairs))
+		log.Logf(0, "uafvalidate: starting verification phase (with delays) for key=%s pairs=%d target_match_mode=%s",
+			task.key, len(stablePairs), matchMode)
 	}
+
+	var (
+		skippedDebug        int
+		skippedInvalid      int
+		skippedValidated    int
+		skippedBackoff      int
+		executedPairs       int
+		validatedPairs      int
+		failedPairs         int
+		strictSuccesses     int
+		fallbackRuns        int
+		fallbackSuccess     int
+		snRangeRuns         int
+		snRangeSuccess      int
+		stackRuns           int
+		stackSuccess        int
+		siteOnlySuccess     int
+		observedTargets     int
+		nonblockingObserved int
+	)
 
 	for i, spd := range stablePairs {
 		if ctx.Err() != nil {
@@ -1931,6 +2833,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		// In debug mode, only verify pairs matching the target VarName
 		if debugMode {
 			if !pairMatchesTargetVarName(&pair, sm.cfg.TargetVarNamePair) {
+				skippedDebug++
 				log.Logf(1, "uafvalidate: [debug mode] skipping non-target pair %d/%d vnkey=%s", i+1, len(stablePairs), vnKey)
 				continue
 			}
@@ -1941,12 +2844,14 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			// (Skipped when DisableBackoffSkip is enabled or the backoff phase is already complete)
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
-				log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+				skippedInvalid++
+				log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
 			if sm.isValidated(fullKey) {
-				log.Logf(1, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+				skippedValidated++
+				log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
@@ -1954,6 +2859,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			if sm.varNameBackoffStore != nil {
 				skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 				if skip {
+					skippedBackoff++
 					log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
 						i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 					continue
@@ -1974,53 +2880,77 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			startDelays = nil
 			actualStartDelayUs = 0
 		}
+		actualAccessDelayUs := verificationAccessDelayUs(spd.AccessDelayUs, sm.cfg)
 
 		// ========== Execute verification ==========
 		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus access_delay=%dus",
 			i+1, len(stablePairs), task.key,
 			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack,
-			actualStartDelayUs, spd.AccessDelayUs)
+			actualStartDelayUs, actualAccessDelayUs)
 
-		// Create a copy of the pair with AccessDelayUs as TimeDiff (for kernel udelay)
-		pairCopy := pair
-		pairCopy.TimeDiff = uint64(spd.AccessDelayUs) * 1000 // Convert to nanoseconds for ukcDelayMicros
+		var (
+			pairCopy    ddrd.MayUAFPair
+			req         *ExecutionRequest
+			execRes     *ExecutionResult
+			runErr      error
+			attemptMode string
+			attemptRuns int
+		)
+		attempts := targetMatchAttempts(pair, matchMode, sm.cfg)
+		for attemptIndex, attempt := range attempts {
+			attemptMode = attempt.mode
+			pairCopy = attempt.pair
+			pairCopy.TimeDiff = uint64(actualAccessDelayUs) * 1000 // Convert to nanoseconds for ukcDelayMicros
 
-		exec, err := sm.factory(ctx)
-		if err != nil {
-			log.Logf(0, "uafvalidate: failed to create executor for verification: %v", err)
-			continue
-		}
-
-		req := &ExecutionRequest{
-			Entry:         task.entry,
-			Delays:        startDelays,
-			TargetPair:    &pairCopy,
-			RepeatTimes:   sm.cfg.VerifyRepeatTimes,
-			DisableDdrd:   true,
-			StopOnSuccess: true,
-			StartDelayUs:  spd.StartDelayUs,
-			AccessDelayUs: spd.AccessDelayUs,
-		}
-
-		// closeExec returns the VM to the pool. Must not be called until we
-		// are completely done with exec (including any minimize phase).
-		closeExec := func() {
-			if closer, ok := exec.(interface{ Close() error }); ok {
-				closer.Close()
+			req = &ExecutionRequest{
+				Entry:                 task.entry,
+				Delays:                startDelays,
+				TargetPair:            &pairCopy,
+				RepeatTimes:           sm.cfg.VerifyRepeatTimes,
+				DisableDdrd:           !sm.cfg.VerifyCollectPairs,
+				StopOnSuccess:         true,
+				ObserveTargetPairOnly: sm.cfg.VerifyCollectPairs,
+				StartDelayUs:          actualStartDelayUs,
+				AccessDelayUs:         actualAccessDelayUs,
+				TargetDelaySide:       sm.cfg.TargetDelaySide,
+				TargetDelaySideKernel: TargetDelaySideID(sm.cfg.TargetDelaySide),
+				TargetDelayMode:       sm.cfg.TargetDelayMode,
+				TargetDelayModeKernel: TargetDelayModeID(sm.cfg.TargetDelayMode),
 			}
+			log.Logf(0, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
+				task.key, attemptMode, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
+				pairCopy.FreeSN, pairCopy.UseSN, pairCopy.FreeSNMin, pairCopy.FreeSNMax,
+				pairCopy.UseSNMin, pairCopy.UseSNMax, pairCopy.FreeTid, pairCopy.UseTid)
+			execRes, runErr = sm.runVerificationAttempt(ctx, task, req, attemptMode)
+			attemptRuns++
+			if matchMode == TargetMatchModeSNFallback && attemptMode != TargetMatchModeStrictSN {
+				fallbackRuns++
+			}
+			switch attemptMode {
+			case TargetMatchModeSNRange:
+				snRangeRuns++
+			case TargetMatchModeStackOnly:
+				stackRuns++
+			}
+			if runErr != nil || execRes == nil || execRes.TriggeredCount > 0 || attemptIndex == len(attempts)-1 {
+				break
+			}
+			nextMode := attempts[attemptIndex+1].mode
+			log.Logf(0, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
+				attemptMode, task.key, vnKey, nextMode)
 		}
-
-		// Use batch execution to run replay + verification in a single RPC session
-		execRes, runErr := sm.runBatchReplayAndVerify(ctx, exec, task, req)
 
 		// Extract crash info
 		crashInfo := ""
 		if execRes != nil && execRes.Crashed && execRes.CrashTitle != "" {
 			crashInfo = fmt.Sprintf(" crash=%q", execRes.CrashTitle)
 		}
+		executedPairs++
+		if execRes != nil {
+			observedTargets += execRes.ObservedTargetCount
+		}
 
 		if runErr != nil {
-			closeExec()
 			// Log run error with any available crash info
 			if crashInfo != "" {
 				log.Logf(0, "uafvalidate: verification run failed: %v%s", runErr, crashInfo)
@@ -2042,9 +2972,9 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 		// ========== Update statistics ==========
 		// Determine total attempts (delay sweep steps or repeat times)
-		totalAttempts := req.RepeatTimes
+		totalAttempts := targetMatchAttemptsForLog(req, attemptRuns)
 		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
-			totalAttempts = sm.cfg.VerifyDelaySteps
+			totalAttempts = attemptRuns * sm.cfg.VerifyDelaySteps
 		}
 
 		status := "Not Triggerable"
@@ -2059,21 +2989,53 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d (delay_sweep) status=%s%s",
-				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)
+			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d (delay_sweep) status=%s%s target_match_mode=%s final_attempt_mode=%s",
+				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
+				matchMode, attemptMode)
 		} else {
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d status=%s%s",
-				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, status, statusDetail)
+			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
+				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
+				matchMode, attemptMode)
+		}
+
+		nonblockingEvidence := req != nil &&
+			NormalizeTargetDelayMode(req.TargetDelayMode) == TargetDelayModeNonblocking &&
+			execRes.TriggeredCount > 0
+		if nonblockingEvidence {
+			nonblockingObserved++
+			log.Logf(0, "uafvalidate: nonblocking target observed after %d trigger(s); treating as candidate evidence only, not validated target_match_mode=%s final_attempt_mode=%s",
+				execRes.TriggeredCount, matchMode, attemptMode)
+			continue
 		}
 
 		if execRes.TriggeredCount > 0 {
 			// ========== Success: proves this VarName pair can trigger ==========
+			validatedPairs++
+			switch {
+			case attemptMode == TargetMatchModeStrictSN:
+				strictSuccesses++
+			case attemptMode == TargetMatchModeSNRange:
+				snRangeSuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			case attemptMode == TargetMatchModeStackOnly:
+				stackSuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			case attemptMode == TargetMatchModeSiteOnly:
+				siteOnlySuccess++
+				if matchMode == TargetMatchModeSNFallback {
+					fallbackSuccess++
+				}
+			}
 
 			// Try to minimize history if enabled
 			var minimizedHistory []*fuzzer.BarrierExecutionRecord
 			if sm.cfg.EnableHistoryMinimization && len(task.entry.ReplayHistory) > 1 {
 				log.Logf(0, "uafvalidate: starting history minimization for key=%s", task.key)
-				minimizer := sm.newHistoryMinimizer(task, &pair, req.Delays)
+				minimizer := sm.newHistoryMinimizer(task, &pairCopy, req.Delays)
 				minResult := minimizer.Minimize(ctx)
 				if minResult.Success && minResult.MinimalHistory != nil {
 					minimizedHistory = minResult.MinimalHistory
@@ -2118,14 +3080,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			if len(reportPreview) > 2000 {
 				reportPreview = reportPreview[:2000] + "...[truncated]"
 			}
-			log.Logf(0, "uafvalidate: pair validated after %d attempt(s)\n%s", execRes.TriggeredCount, reportPreview)
-			closeExec()
+			log.Logf(0, "uafvalidate: pair validated after %d trigger(s) target_match_mode=%s final_attempt_mode=%s\n%s",
+				execRes.TriggeredCount, matchMode, attemptMode, reportPreview)
 			continue
 		}
 
 		// ========== Failure: increase backoff score ==========
-		closeExec()
-
+		failedPairs++
 		// In debug mode, only log but don't update databases
 		if debugMode {
 			log.Logf(1, "uafvalidate: [debug mode] FAILED vnkey=%s triggered=0/%d (not updating databases)",
@@ -2148,11 +3109,29 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 	}
 
+	skippedPairs := skippedDebug + skippedInvalid + skippedValidated + skippedBackoff
+	handledPairs := executedPairs + skippedPairs
+	log.Logf(0, "uafvalidate: verification phase summary key=%s target_match_mode=%s pairs=%d handled=%d executed=%d skipped=%d executed_verify_pairs=%d skipped_pairs=%d skipped_debug=%d skipped_invalid=%d skipped_validated=%d skipped_backoff=%d validated=%d failed=%d strict_success=%d fallback_runs=%d fallback_success=%d site_only_success=%d observed_target=%d nonblocking_observed=%d sn_range_runs=%d sn_range_success=%d stack_fallback_runs=%d stack_fallback_success=%d",
+		task.key, matchMode, len(stablePairs), handledPairs, executedPairs, skippedPairs,
+		executedPairs, skippedPairs, skippedDebug, skippedInvalid, skippedValidated, skippedBackoff,
+		validatedPairs, failedPairs, strictSuccesses, fallbackRuns, fallbackSuccess, siteOnlySuccess, observedTargets, nonblockingObserved,
+		snRangeRuns, snRangeSuccess, stackRuns, stackSuccess)
+
 	// Output statistics summary
 	if sm.varNameBackoffStore != nil {
 		total, highScore, verified := sm.varNameBackoffStore.Stats()
 		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName backoff stats: total=%d high_score=%d verified=%d", total, highScore, verified)
 	}
+}
+
+func verificationAccessDelayUs(accessDelayUs int64, cfg Config) int64 {
+	if cfg.VerifyAccessDelayMinUs > 0 && accessDelayUs < cfg.VerifyAccessDelayMinUs {
+		accessDelayUs = cfg.VerifyAccessDelayMinUs
+	}
+	if cfg.DisableAccessDelay {
+		return 0
+	}
+	return accessDelayUs
 }
 
 // buildStartDelaysFromPair builds barrier start delays array using the given start delay for proc 0
