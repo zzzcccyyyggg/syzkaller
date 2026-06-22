@@ -681,6 +681,7 @@ type Config struct {
 	NormalThresholdMicros int64
 	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
 	// In dynamic-threshold mode this acts as the minimum Phase 1 discovery window.
+	// Current MRPFuzz experiment configs set 20000.
 	WidenedThresholdMicros int64
 	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair
 	MaxAttemptsPerPair int
@@ -695,11 +696,14 @@ type Config struct {
 	// EnableDynamicThreshold enables dynamic threshold adjustment based on
 	// fuzzer/validator supply-demand balancing.
 	EnableDynamicThreshold bool
-	// DynamicThresholdInitialUs is the starting threshold (microseconds). Default: 1000.
+	// DynamicThresholdInitialUs is the starting threshold (microseconds).
+	// Generic fallback: 1000. Current MRPFuzz experiment configs set 2500.
 	DynamicThresholdInitialUs int64
-	// DynamicThresholdMinUs is the minimum threshold (microseconds). Default: 50.
+	// DynamicThresholdMinUs is the minimum threshold (microseconds).
+	// Generic fallback: 50. Current MRPFuzz experiment configs set 500.
 	DynamicThresholdMinUs int64
-	// DynamicThresholdMaxUs is the maximum threshold (microseconds). Default: 50000.
+	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
+	// Generic fallback: 50000. Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64
 	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Default: 120.
 	DynamicThresholdEvalSec int

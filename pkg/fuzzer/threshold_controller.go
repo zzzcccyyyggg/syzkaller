@@ -77,6 +77,9 @@ func DefaultThresholdControllerConfig() ThresholdControllerConfig {
 
 // ThresholdController dynamically adjusts the MRP time threshold to balance
 // fuzzing discovery rate and validation consumption rate.
+// It is the production backlog-watermark variant of the paper's backpressure
+// controller: it uses validator pending/idle state plus fuzzer discovery rate,
+// rather than the paper's idealized EWMA producer/consumer-rate pseudocode.
 //
 // Core idea: time threshold τ controls the quality/quantity tradeoff of MRPs.
 //   - Small τ → fewer, higher-quality MRPs (closer to real races)

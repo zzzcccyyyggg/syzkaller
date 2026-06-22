@@ -223,8 +223,8 @@ table ExecRequestRaw {
 	// Flag to use FINE_LOG/FINE_MONITOR modes instead of normal LOG/MONITOR (for validation mode)
 	ukc_use_fine_mode	:bool;
 	// Dynamic timing threshold in microseconds for race pair detection.
-	// If > 0, overrides the hardcoded 2ms threshold in executor.
-	// Used by timing exploration queue to use widened threshold (e.g., 500ms).
+	// If > 0, overrides the executor default 10ms threshold.
+	// Used by timing exploration queue to use a widened threshold.
 	timing_threshold_us	:int64;
 	// Optional SN ranges for validation. When min/max are both zero, exact ukc_*_sn
 	// semantics are used. When either bound is non-zero, the kernel treats the

@@ -107,7 +107,7 @@ int race_detector_analyze_and_generate_uaf_infos(RaceDetector* detector,
 int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
 						 may_uaf_pair_t* uaf_buffer, int max_uaf_pairs,
 						 SyscallContextTable* syscall_ctx);
-// With configurable threshold (in microseconds). If threshold_us=0, uses default 2ms.
+// With configurable threshold (in microseconds). If threshold_us=0, uses default 10ms.
 int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* detector,
 						 may_uaf_pair_t* uaf_buffer, int max_uaf_pairs,
 						 SyscallContextTable* syscall_ctx, uint64_t threshold_us);

@@ -567,7 +567,7 @@ int race_detector_analyze_and_generate_uaf_pairs_with_extend_infos(RaceDetector*
 }
 
 // 为了减少改动 先将uaf模型暂用到race上
-// With configurable threshold (in microseconds). If threshold_us=0, uses default 2ms.
+// With configurable threshold (in microseconds). If threshold_us=0, uses default 10ms.
 int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* detector,
    may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx, uint64_t threshold_us)
 {
@@ -665,7 +665,7 @@ int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* d
     return basic_count;
 }
 
-// Backward-compatible wrapper: uses default threshold (0 = 2ms)
+// Backward-compatible wrapper: uses default threshold (0 = 10ms)
 int race_detector_analyze_and_generate_race_infos(RaceDetector* detector,
    may_uaf_pair_t* uaf_buffer, int max_uaf_pairs, SyscallContextTable* syscall_ctx)
 {

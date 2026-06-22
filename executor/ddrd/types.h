@@ -84,7 +84,7 @@ typedef struct {
     int second_access_index;    // 第二个访问在历史中的索引
 } RacePair;
 int access_context_analyze_race_pairs(AccessContext* record_ctx, RacePair* pairs, int max_pairs);
-// With configurable threshold (in microseconds). If threshold_us=0, uses default 2ms.
+// With configurable threshold (in microseconds). If threshold_us=0, uses default 10ms.
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us);
 
 typedef struct {

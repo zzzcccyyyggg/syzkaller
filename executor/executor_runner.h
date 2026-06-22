@@ -1057,7 +1057,7 @@ public:
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
 		// 为避免更改过多 race 也先使用uaf pair的模型
 		// Pass merged syscall context to race detector
-		// Use configurable threshold if set, otherwise use default (0 = 2ms)
+		// Use configurable threshold if set, otherwise use default (0 = 10ms)
 		int count = race_detector_analyze_and_generate_race_infos_with_threshold(&detector_, pairs.data(),
 									  (int)kDdrdMaxUafPairs,
 									  &merged_ctx, timing_threshold_us_);

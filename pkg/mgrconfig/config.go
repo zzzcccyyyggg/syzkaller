@@ -443,7 +443,7 @@ type Experimental struct {
 	// WidenedThresholdMicros is the widened timing threshold for exploration queue (microseconds).
 	// This allows timing exploration to detect pairs with larger timediff that normal threshold misses.
 	// When dynamic threshold is enabled, this acts as the minimum Phase 1 discovery window.
-	// Defaults to 500000 (500ms) if unset or zero.
+	// The generic fallback is 500000 (500ms); current MRPFuzz experiment configs set 20000.
 	WidenedThresholdMicros int64 `json:"widened_threshold_micros,omitempty"`
 	// MaxAttemptsPerPair is the maximum number of timing exploration attempts per unique pair.
 	// Defaults to 20 if unset or zero.
@@ -464,13 +464,14 @@ type Experimental struct {
 	// based on validator supply-demand balancing.
 	EnableDynamicThreshold bool `json:"enable_dynamic_threshold,omitempty"`
 	// DynamicThresholdInitialUs is the starting threshold (microseconds).
-	// Default: 1000 (1ms). Overrides NormalThresholdMicros when dynamic threshold is enabled.
+	// Generic fallback: 1000 (1ms). Current MRPFuzz experiment configs set 2500.
+	// Overrides NormalThresholdMicros when dynamic threshold is enabled.
 	DynamicThresholdInitialUs int64 `json:"dynamic_threshold_initial_us,omitempty"`
 	// DynamicThresholdMinUs is the minimum threshold (microseconds).
-	// Default: 50 (50μs).
+	// Generic fallback: 50. Current MRPFuzz experiment configs set 500.
 	DynamicThresholdMinUs int64 `json:"dynamic_threshold_min_us,omitempty"`
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
-	// Default: 50000 (50ms).
+	// Generic fallback: 50000 (50ms). Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64 `json:"dynamic_threshold_max_us,omitempty"`
 	// DynamicThresholdEvalSec is the evaluation interval (seconds). Default: 120.
 	DynamicThresholdEvalSec int `json:"dynamic_threshold_eval_sec,omitempty"`
