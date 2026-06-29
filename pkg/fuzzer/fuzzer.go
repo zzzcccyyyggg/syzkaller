@@ -705,7 +705,7 @@ type Config struct {
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
 	// Generic fallback: 50000. Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64
-	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Default: 120.
+	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Paper default: 30.
 	DynamicThresholdEvalSec int
 	// Workdir is used for the shared state file between fuzzer and validator.
 	Workdir string

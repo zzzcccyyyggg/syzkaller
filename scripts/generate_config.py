@@ -112,7 +112,7 @@ FUZZ_EXPERIMENTAL = {
     "dynamic_threshold_initial_us": 2500,
     "dynamic_threshold_min_us": 500,
     "dynamic_threshold_max_us": 10000,
-    "dynamic_threshold_eval_sec": 120,
+    "dynamic_threshold_eval_sec": 30,
 }
 
 # ---------------------------------------------------------------------------

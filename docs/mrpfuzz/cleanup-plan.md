@@ -100,7 +100,7 @@ Cleanup status:
 - `paper/comparison exp/`: modified on `2026-05-27`; it also contains source data used by earlier comparison artifacts.
 - `paper/archive/root-cleanup-20260622/`: preserves old root-level `graph/`, logs, plots, and bundles that were moved out of the repository root on `2026-06-22`.
 - `paper/archive/tmp-cleanup-20260622/`: preserves non-sensitive old `tmp/` files moved out of the repository root on `2026-06-22`; DeepSeek helper key/env files were deleted instead of archived.
-- `docs/mrpfuzz/threshold-alignment.md`: records the current paper/code threshold alignment and the known mismatch between the paper pseudocode and production controller.
+- `docs/mrpfuzz/threshold-alignment.md`: records the current paper-matched threshold controller and the historical pre-alignment behavior.
 
 ## Recommended Execution Order
 

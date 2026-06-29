@@ -23,65 +23,67 @@ func TestThresholdControllerDefaults(t *testing.T) {
 func TestThresholdControllerZeroConfigUsesDefaultEvalWindow(t *testing.T) {
 	tc := NewThresholdController(ThresholdControllerConfig{}, func() int { return 0 })
 
-	if tc.config.EvalWindowSeconds != 120 {
-		t.Fatalf("default eval window: got %d, want 120", tc.config.EvalWindowSeconds)
+	if tc.config.EvalWindowSeconds != 30 {
+		t.Fatalf("default eval window: got %d, want 30", tc.config.EvalWindowSeconds)
 	}
 }
 
-func TestThresholdControllerGrowsOnLowDiscovery(t *testing.T) {
+func TestThresholdControllerPaperDefaults(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
-	config.EvalWindowSeconds = 1 // fast evaluation
-	config.MinDiscoveryRatePerMin = 10.0
 
-	counter := 0 // No new MRPs discovered
-	tc := NewThresholdController(config, func() int { return counter })
-	initial := tc.CurrentThreshold()
-
-	// First evaluation: lowRateStreak=1, no change yet
-	tc.mu.Lock()
-	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.mu.Unlock()
-	tc.Evaluate()
-
-	// Second evaluation: lowRateStreak=2, should grow
-	tc.mu.Lock()
-	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.mu.Unlock()
-	tc.Evaluate()
-
-	if tc.CurrentThreshold() <= initial {
-		t.Fatalf("threshold should grow on sustained low discovery: got %d, initial was %d", tc.CurrentThreshold(), initial)
+	if config.EvalWindowSeconds != 30 {
+		t.Fatalf("EvalWindowSeconds: got %d, want 30", config.EvalWindowSeconds)
+	}
+	if config.WorkloadLowWatermark != 10 {
+		t.Fatalf("WorkloadLowWatermark: got %v, want 10", config.WorkloadLowWatermark)
+	}
+	if config.WorkloadHighWatermark != 40 {
+		t.Fatalf("WorkloadHighWatermark: got %v, want 40", config.WorkloadHighWatermark)
+	}
+	if config.SmoothingFactor != 0.8 {
+		t.Fatalf("SmoothingFactor: got %v, want 0.8", config.SmoothingFactor)
+	}
+	if config.WorkloadEpsilon != 1 {
+		t.Fatalf("WorkloadEpsilon: got %v, want 1", config.WorkloadEpsilon)
+	}
+	if config.TighteningFactor != 0.5 {
+		t.Fatalf("TighteningFactor: got %v, want 0.5", config.TighteningFactor)
+	}
+	if config.RelaxationStepFraction != 0.05 {
+		t.Fatalf("RelaxationStepFraction: got %v, want 0.05", config.RelaxationStepFraction)
 	}
 }
 
-func TestThresholdControllerDoesNotShrinkWithoutValidator(t *testing.T) {
+func TestThresholdControllerGrowsWhenQueueEmpty(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	config.EvalWindowSeconds = 1
-	config.MinDiscoveryRatePerMin = 1.0
+	config.MinThresholdUs = 500
+	config.MaxThresholdUs = 10500
+	config.InitialThresholdUs = 2500
 
 	counter := 0
 	tc := NewThresholdController(config, func() int { return counter })
-	tc.ForceThreshold(10000) // Start high
+	initial := tc.CurrentThreshold()
 
-	// Simulate very high discovery rate without validator stats.
+	// Paper Algorithm 1 grows when Q = 0.
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.lastMRPCount = 0
 	tc.mu.Unlock()
-
-	counter = 1000 // 1000 new MRPs in ~2 seconds = very high rate
 	tc.Evaluate()
 
-	if tc.CurrentThreshold() != 10000 {
-		t.Fatalf("threshold should stay stable without validator feedback: got %d", tc.CurrentThreshold())
+	want := initial + 500 // 0.05 * (10500 - 500)
+	if tc.CurrentThreshold() != want {
+		t.Fatalf("threshold should grow additively when queue is empty: got %d, want %d", tc.CurrentThreshold(), want)
 	}
 }
 
 func TestThresholdControllerRespectsMinMax(t *testing.T) {
+	workdir := t.TempDir()
 	config := DefaultThresholdControllerConfig()
 	config.MinThresholdUs = 100
 	config.MaxThresholdUs = 5000
 	config.EvalWindowSeconds = 1
+	config.Workdir = workdir
 
 	counter := 0
 	tc := NewThresholdController(config, func() int { return counter })
@@ -90,9 +92,12 @@ func TestThresholdControllerRespectsMinMax(t *testing.T) {
 	tc.ForceThreshold(100)
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.lastMRPCount = 0
 	tc.mu.Unlock()
 	counter = 100000
+	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
+		PendingCount: 100,
+		LastUpdate:   time.Now(),
+	})
 	tc.Evaluate()
 
 	if tc.CurrentThreshold() < config.MinThresholdUs {
@@ -101,11 +106,12 @@ func TestThresholdControllerRespectsMinMax(t *testing.T) {
 
 	// Force to max, try to grow further
 	tc.ForceThreshold(5000)
-	counter = 0
+	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
+		PendingCount: 0,
+		LastUpdate:   time.Now(),
+	})
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.lastMRPCount = 0
-	tc.lowRateStreak = 5
 	tc.mu.Unlock()
 	tc.Evaluate()
 
@@ -119,8 +125,6 @@ func TestThresholdControllerValidatorHungry(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	config.EvalWindowSeconds = 1
 	config.Workdir = workdir
-	config.PendingLowWatermark = 5
-	config.PendingHighWatermark = 50
 
 	counter := 100
 	tc := NewThresholdController(config, func() int { return counter })
@@ -136,20 +140,11 @@ func TestThresholdControllerValidatorHungry(t *testing.T) {
 
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.lastMRPCount = counter
-	tc.mu.Unlock()
-	tc.Evaluate()
-	tc.mu.Lock()
-	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.mu.Unlock()
-	tc.Evaluate()
-	tc.mu.Lock()
-	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
 	tc.mu.Unlock()
 	tc.Evaluate()
 
 	if tc.CurrentThreshold() <= initial {
-		t.Fatalf("threshold should grow when validator is hungry: got %d, initial was %d",
+		t.Fatalf("threshold should grow when validator workload is low: got %d, initial was %d",
 			tc.CurrentThreshold(), initial)
 	}
 }
@@ -159,29 +154,22 @@ func TestThresholdControllerValidatorOverloaded(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	config.EvalWindowSeconds = 1
 	config.Workdir = workdir
-	config.PendingLowWatermark = 5
-	config.PendingHighWatermark = 50
 
 	counter := 100
 	tc := NewThresholdController(config, func() int { return counter })
 	tc.ForceThreshold(10000)
 
-	// Write validator stats: pending is very high
+	// Write validator stats: pending implies W > Whigh.
 	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
-		PendingCount:   100, // > 50 high watermark
-		ProcessedCount: 200,
-		Idle:           false,
-		LastUpdate:     time.Now(),
+		PendingCount: 100,
+		Idle:         false,
+		LastUpdate:   time.Now(),
 	})
 
 	tc.mu.Lock()
 	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.lastMRPCount = counter
 	tc.mu.Unlock()
-	tc.Evaluate()
-	tc.mu.Lock()
-	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
-	tc.mu.Unlock()
+	counter = 1000
 	tc.Evaluate()
 
 	if tc.CurrentThreshold() >= 10000 {
@@ -212,11 +200,11 @@ func TestThresholdControllerIgnoresStaleValidatorStats(t *testing.T) {
 
 	tc.Evaluate()
 
-	// With stale stats, should use supply-only mode (not validator-overloaded mode)
-	// First eval: lowRateStreak=1, no change
-	if tc.CurrentThreshold() != initial {
-		// Should NOT have shrunk due to stale validator pending=100
-		t.Logf("threshold changed on first eval (may be expected): %d → %d", initial, tc.CurrentThreshold())
+	// Stale stats should not trigger the overload branch. With no fresh Q/C
+	// observation, Algorithm 1 sees Q=0 and may grow, but it must not shrink.
+	if tc.CurrentThreshold() < initial {
+		t.Fatalf("threshold should not shrink from stale validator stats: got %d, initial was %d",
+			tc.CurrentThreshold(), initial)
 	}
 }
 

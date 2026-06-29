@@ -1,6 +1,7 @@
 package fuzzer
 
 import (
+	"math"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -25,33 +26,35 @@ type ThresholdControllerConfig struct {
 	MaxThresholdUs int64
 
 	// EvalWindowSeconds is how often the controller evaluates and adjusts.
-	// Default: 120 seconds.
+	// Paper default: 30 seconds.
 	EvalWindowSeconds int
 
-	// PendingLowWatermark: if validator pending count is below this,
-	// the validator is hungry — increase threshold.
-	// Default: 5.
-	PendingLowWatermark int
+	// WorkloadLowWatermark is the paper Wlow watermark.
+	// Paper default: 10.
+	WorkloadLowWatermark float64
 
-	// PendingHighWatermark: if validator pending count is above this,
-	// the validator is overloaded — decrease threshold.
-	// Default: 50.
-	PendingHighWatermark int
+	// WorkloadHighWatermark is the paper Whigh watermark.
+	// Paper default: 40.
+	WorkloadHighWatermark float64
 
-	// GrowFactor: multiplicative increase factor when validator is hungry.
-	// Default: 1.5.
-	GrowFactor float64
+	// SmoothingFactor is rho for the producer/consumer EWMAs.
+	// Paper default: 0.8.
+	SmoothingFactor float64
 
-	// ShrinkFactor: multiplicative decrease factor when validator is overloaded.
-	// Default: 0.6.
-	ShrinkFactor float64
+	// WorkloadEpsilon prevents division by zero in W = Q / max(Cbar, epsilon).
+	// Paper default: 1.
+	WorkloadEpsilon float64
 
-	// MinDiscoveryRatePerMin: if MRP discovery rate drops below this for >2 windows,
-	// force threshold increase. Default: 1.0 (at least 1 new MRP/min).
-	MinDiscoveryRatePerMin float64
+	// RelaxationStepFraction is delta_tau as a fraction of (tau_max - tau_min).
+	// Paper default: 0.05.
+	RelaxationStepFraction float64
+
+	// TighteningFactor is gamma_shrink for multiplicative threshold tightening.
+	// Paper default: 0.5.
+	TighteningFactor float64
 
 	// StaleValidatorTimeout: if validator stats haven't been updated for this long,
-	// assume validator is not running and use supply-only mode.
+	// treat the observable scheduling queue as empty.
 	// Default: 3 minutes.
 	StaleValidatorTimeout time.Duration
 
@@ -65,34 +68,28 @@ func DefaultThresholdControllerConfig() ThresholdControllerConfig {
 		InitialThresholdUs:     1000,  // 1ms
 		MinThresholdUs:         50,    // 50μs
 		MaxThresholdUs:         50000, // 50ms
-		EvalWindowSeconds:      120,   // 2 minutes
-		PendingLowWatermark:    5,
-		PendingHighWatermark:   50,
-		GrowFactor:             1.5,
-		ShrinkFactor:           0.6,
-		MinDiscoveryRatePerMin: 1.0,
+		EvalWindowSeconds:      30,
+		WorkloadLowWatermark:   10,
+		WorkloadHighWatermark:  40,
+		SmoothingFactor:        0.8,
+		WorkloadEpsilon:        1,
+		RelaxationStepFraction: 0.05,
+		TighteningFactor:       0.5,
 		StaleValidatorTimeout:  3 * time.Minute,
 	}
 }
 
 // ThresholdController dynamically adjusts the MRP time threshold to balance
 // fuzzing discovery rate and validation consumption rate.
-// It is the production backlog-watermark variant of the paper's backpressure
-// controller: it uses validator pending/idle state plus fuzzer discovery rate,
-// rather than the paper's idealized EWMA producer/consumer-rate pseudocode.
+// It implements the paper's backpressure controller: at each control interval it
+// observes newly produced MRPs P, consumed MRPs C, pending MRPs Q, maintains EWMA
+// producer/consumer rates Pbar/Cbar, and adjusts tau from W = Q/max(Cbar, eps).
 //
 // Core idea: time threshold τ controls the quality/quantity tradeoff of MRPs.
 //   - Small τ → fewer, higher-quality MRPs (closer to real races)
 //   - Large τ → more, lower-quality MRPs (many won't be confirmed)
 //
-// The controller monitors:
-//   - Fuzzer side: MRP discovery rate (new unique MRPs per minute)
-//   - Validator side: pending queue depth and processing rate
-//
-// It adjusts τ to keep the validator neither starved nor overwhelmed.
-// When validator stats are unavailable, the controller becomes conservative:
-// it may increase τ on sustained low discovery, but it will not shrink τ based
-// on discovery rate alone because that can prematurely suppress valuable pairs.
+// The controller adjusts τ to keep the validator neither starved nor overwhelmed.
 type ThresholdController struct {
 	config ThresholdControllerConfig
 	mu     sync.Mutex
@@ -101,13 +98,12 @@ type ThresholdController struct {
 	// Accessed atomically for fast reads from hot path.
 	currentThreshold atomic.Int64
 
-	// Tracking state
+	// Tracking state for Algorithm 1.
 	lastEvalTime      time.Time
-	lastMRPCount      int     // Total MRP count at last evaluation
-	lowRateStreak     int     // Consecutive windows with low discovery rate
-	prevDiscoveryRate float64 // Previous window's discovery rate
-	highPendingStreak int     // Consecutive windows with high validator backlog
-	idlePendingStreak int     // Consecutive windows with empty/idle validator backlog
+	lastMRPCount      int
+	lastConsumedCount int
+	producedEWMA      float64
+	consumedEWMA      float64
 
 	// MRP count provider (from ddrd.Store or uafCorpus)
 	mrpCountFunc func() int
@@ -130,31 +126,42 @@ func NewThresholdController(config ThresholdControllerConfig, mrpCountFunc func(
 		config.MaxThresholdUs = 50000
 	}
 	if config.EvalWindowSeconds <= 0 {
-		config.EvalWindowSeconds = 120
+		config.EvalWindowSeconds = 30
 	}
-	if config.PendingLowWatermark <= 0 {
-		config.PendingLowWatermark = 5
+	if config.WorkloadLowWatermark <= 0 {
+		config.WorkloadLowWatermark = 10
 	}
-	if config.PendingHighWatermark <= config.PendingLowWatermark {
-		config.PendingHighWatermark = config.PendingLowWatermark * 10
+	if config.WorkloadHighWatermark <= config.WorkloadLowWatermark {
+		config.WorkloadHighWatermark = 40
+		if config.WorkloadHighWatermark <= config.WorkloadLowWatermark {
+			config.WorkloadHighWatermark = config.WorkloadLowWatermark * 4
+		}
 	}
-	if config.GrowFactor <= 1.0 {
-		config.GrowFactor = 1.5
+	if config.SmoothingFactor < 0 || config.SmoothingFactor >= 1 {
+		config.SmoothingFactor = 0.8
 	}
-	if config.ShrinkFactor <= 0 || config.ShrinkFactor >= 1.0 {
-		config.ShrinkFactor = 0.6
+	if config.WorkloadEpsilon <= 0 {
+		config.WorkloadEpsilon = 1
 	}
-	if config.MinDiscoveryRatePerMin <= 0 {
-		config.MinDiscoveryRatePerMin = 1.0
+	if config.RelaxationStepFraction <= 0 {
+		config.RelaxationStepFraction = 0.05
+	}
+	if config.TighteningFactor <= 0 || config.TighteningFactor >= 1 {
+		config.TighteningFactor = 0.5
 	}
 	if config.StaleValidatorTimeout <= 0 {
 		config.StaleValidatorTimeout = 3 * time.Minute
 	}
 
+	initialMRPCount := 0
+	if mrpCountFunc != nil {
+		initialMRPCount = mrpCountFunc()
+	}
 	tc := &ThresholdController{
 		config:       config,
 		mrpCountFunc: mrpCountFunc,
 		lastEvalTime: time.Now(),
+		lastMRPCount: initialMRPCount,
 	}
 	tc.currentThreshold.Store(config.InitialThresholdUs)
 
@@ -175,7 +182,7 @@ func (tc *ThresholdController) CurrentThreshold() int64 {
 }
 
 // Evaluate performs one evaluation cycle. Call this periodically (e.g., every EvalWindowSeconds).
-// It reads the current MRP discovery rate and validator state, then adjusts the threshold.
+// It implements Algorithm 1 from the paper.
 func (tc *ThresholdController) Evaluate() {
 	tc.mu.Lock()
 	defer tc.mu.Unlock()
@@ -186,19 +193,23 @@ func (tc *ThresholdController) Evaluate() {
 		return // Too soon since last evaluation
 	}
 
-	// 1. Compute MRP discovery rate
+	// 1. Compute newly produced MRPs P for this control interval.
 	currentMRPCount := 0
 	if tc.mrpCountFunc != nil {
 		currentMRPCount = tc.mrpCountFunc()
 	}
-	newMRPs := currentMRPCount - tc.lastMRPCount
+	produced := currentMRPCount - tc.lastMRPCount
+	if produced < 0 {
+		// Counter reset across process restarts.
+		produced = currentMRPCount
+	}
 	elapsedMinutes := elapsed.Minutes()
 	if elapsedMinutes < 0.01 {
 		elapsedMinutes = 0.01
 	}
-	discoveryRate := float64(newMRPs) / elapsedMinutes
+	discoveryRate := float64(produced) / elapsedMinutes
 
-	// 2. Read validator stats if available
+	// 2. Read validator stats and compute consumed MRPs C plus pending MRPs Q.
 	var validatorStats *ddrd.ValidatorStats
 	if tc.config.Workdir != "" {
 		state, err := ddrd.ReadThresholdState(tc.config.Workdir)
@@ -210,56 +221,38 @@ func (tc *ThresholdController) Evaluate() {
 		}
 	}
 
-	// 3. Determine adjustment
+	consumed := 0
+	pending := 0
+	if validatorStats != nil {
+		consumed = validatorStats.ProcessedCount - tc.lastConsumedCount
+		if consumed < 0 {
+			// Validator counter reset across process restarts.
+			consumed = validatorStats.ProcessedCount
+		}
+		pending = validatorStats.PendingCount
+	}
+
+	// 3. Update EWMA producer/consumer counts and compute workload W.
+	rho := tc.config.SmoothingFactor
+	tc.producedEWMA = rho*tc.producedEWMA + (1-rho)*float64(produced)
+	tc.consumedEWMA = rho*tc.consumedEWMA + (1-rho)*float64(consumed)
+	workload := float64(pending) / math.Max(tc.consumedEWMA, tc.config.WorkloadEpsilon)
+
+	// 4. Determine threshold adjustment using the paper conditions.
 	oldThreshold := tc.currentThreshold.Load()
 	newThreshold := oldThreshold
 	reason := "stable"
 
-	if validatorStats != nil {
-		// Validator is alive: drive threshold mainly from backlog pressure.
-		// We intentionally make this less sensitive than the original version:
-		// require consecutive windows and use smaller step sizes so that normal
-		// threshold does not oscillate aggressively around short-term bursts.
-		pending := validatorStats.PendingCount
-
-		switch {
-		case pending > tc.config.PendingHighWatermark:
-			tc.highPendingStreak++
-			tc.idlePendingStreak = 0
-			tc.lowRateStreak = 0
-			if tc.highPendingStreak >= 2 {
-				newThreshold = int64(float64(oldThreshold) * tc.conservativeShrinkFactor())
-				reason = "validator-overloaded-shrink"
-			}
-		case pending < tc.config.PendingLowWatermark && validatorStats.Idle:
-			tc.idlePendingStreak++
-			tc.highPendingStreak = 0
-			tc.lowRateStreak = 0
-			if tc.idlePendingStreak >= 3 {
-				newThreshold = int64(float64(oldThreshold) * tc.conservativeGrowFactor())
-				reason = "validator-idle-grow"
-			}
-		default:
-			tc.highPendingStreak = 0
-			tc.idlePendingStreak = 0
-			tc.lowRateStreak = 0
-		}
-	} else {
-		// No validator stats: discovery-only mode.
-		// We only widen on sustained low discovery. Shrinking without validator
-		// feedback tended to overfit to easy pairs and starve later validation.
-		if discoveryRate < tc.config.MinDiscoveryRatePerMin {
-			tc.lowRateStreak++
-			if tc.lowRateStreak >= 2 {
-				newThreshold = int64(float64(oldThreshold) * tc.config.GrowFactor)
-				reason = "no-validator-low-rate-grow"
-			}
-		} else {
-			tc.lowRateStreak = 0
-		}
+	switch {
+	case workload > tc.config.WorkloadHighWatermark && tc.producedEWMA >= tc.consumedEWMA:
+		newThreshold = int64(float64(oldThreshold) * tc.config.TighteningFactor)
+		reason = "paper-backpressure-shrink"
+	case pending == 0 || (workload < tc.config.WorkloadLowWatermark && tc.producedEWMA <= tc.consumedEWMA):
+		newThreshold = oldThreshold + tc.relaxationStep()
+		reason = "paper-backpressure-grow"
 	}
 
-	// 4. Clamp threshold
+	// 5. Clamp threshold.
 	if newThreshold < tc.config.MinThresholdUs {
 		newThreshold = tc.config.MinThresholdUs
 	}
@@ -267,22 +260,22 @@ func (tc *ThresholdController) Evaluate() {
 		newThreshold = tc.config.MaxThresholdUs
 	}
 
-	// 5. Apply
+	// 6. Apply.
 	if newThreshold != oldThreshold {
 		tc.currentThreshold.Store(newThreshold)
 		if tc.statAdjustments != nil {
 			tc.statAdjustments.Add(1)
 		}
-		log.Logf(0, "[THRESHOLD] adjusted: %dμs → %dμs (reason=%s, discovery_rate=%.1f/min, new_mrps=%d, "+
-			"elapsed=%.0fs, validator=%v)",
-			oldThreshold, newThreshold, reason, discoveryRate, newMRPs, elapsed.Seconds(),
-			validatorStats != nil)
+		log.Logf(0, "[THRESHOLD] adjusted: %dμs → %dμs (reason=%s, P=%d, C=%d, Q=%d, "+
+			"Pbar=%.2f, Cbar=%.2f, W=%.2f, discovery_rate=%.1f/min, elapsed=%.0fs, validator=%v)",
+			oldThreshold, newThreshold, reason, produced, consumed, pending,
+			tc.producedEWMA, tc.consumedEWMA, workload, discoveryRate, elapsed.Seconds(), validatorStats != nil)
 	} else {
-		log.Logf(1, "[THRESHOLD] stable at %dμs (discovery_rate=%.1f/min, new_mrps=%d)",
-			oldThreshold, discoveryRate, newMRPs)
+		log.Logf(1, "[THRESHOLD] stable at %dμs (P=%d, C=%d, Q=%d, Pbar=%.2f, Cbar=%.2f, W=%.2f, discovery_rate=%.1f/min)",
+			oldThreshold, produced, consumed, pending, tc.producedEWMA, tc.consumedEWMA, workload, discoveryRate)
 	}
 
-	// 6. Write fuzzer stats to shared state
+	// 7. Write fuzzer stats to shared state.
 	if tc.config.Workdir != "" {
 		_ = ddrd.WriteFuzzerStats(tc.config.Workdir, ddrd.FuzzerStats{
 			CurrentThresholdUs:   newThreshold,
@@ -295,23 +288,17 @@ func (tc *ThresholdController) Evaluate() {
 	// Update tracking
 	tc.lastEvalTime = now
 	tc.lastMRPCount = currentMRPCount
-	tc.prevDiscoveryRate = discoveryRate
+	if validatorStats != nil {
+		tc.lastConsumedCount = validatorStats.ProcessedCount
+	}
 }
 
-func (tc *ThresholdController) conservativeGrowFactor() float64 {
-	grow := tc.config.GrowFactor
-	if grow <= 1.0 {
-		return 1.0
+func (tc *ThresholdController) relaxationStep() int64 {
+	step := int64(math.Ceil(float64(tc.config.MaxThresholdUs-tc.config.MinThresholdUs) * tc.config.RelaxationStepFraction))
+	if step < 1 {
+		step = 1
 	}
-	return 1.0 + (grow-1.0)*0.5
-}
-
-func (tc *ThresholdController) conservativeShrinkFactor() float64 {
-	shrink := tc.config.ShrinkFactor
-	if shrink <= 0 || shrink >= 1.0 {
-		return 1.0
-	}
-	return 1.0 - (1.0-shrink)*0.5
+	return step
 }
 
 // Run starts the periodic evaluation loop. Call in a goroutine.

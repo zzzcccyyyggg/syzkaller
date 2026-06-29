@@ -473,7 +473,7 @@ type Experimental struct {
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
 	// Generic fallback: 50000 (50ms). Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64 `json:"dynamic_threshold_max_us,omitempty"`
-	// DynamicThresholdEvalSec is the evaluation interval (seconds). Default: 120.
+	// DynamicThresholdEvalSec is the evaluation interval (seconds). Paper default: 30.
 	DynamicThresholdEvalSec int `json:"dynamic_threshold_eval_sec,omitempty"`
 }
 
