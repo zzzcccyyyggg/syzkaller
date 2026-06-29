@@ -113,6 +113,88 @@ func TestEnqueueSeedFallsBackToBarrierPrograms(t *testing.T) {
 	}
 }
 
+func TestHandleDiscoveredBarrierPairsBypassesSoloFilterByDefault(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	req := &queue.Request{
+		Prog:     p1,
+		ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+	}
+	req.SetBarrier(0x3)
+	if err := req.SetBarrierPrograms([]*prog.Prog{p1, p2}); err != nil {
+		t.Fatal(err)
+	}
+
+	persisted := 0
+	fuzzer := &Fuzzer{
+		Config: &Config{
+			NormalThresholdMicros: 2500,
+			PersistUAFCorpusEntry: func(entry *UAFCorpusEntry) error {
+				persisted++
+				if entry == nil || entry.PairID() == 0 {
+					t.Fatal("expected persisted entry with pair id")
+				}
+				if len(entry.Programs) != 2 {
+					t.Fatalf("persisted entry has %d programs, want 2", len(entry.Programs))
+				}
+				if entry.Source != SourceFuzz {
+					t.Fatalf("persisted source = %v, want SourceFuzz", entry.Source)
+				}
+				return nil
+			},
+		},
+		target: target,
+	}
+	u := &uafMode{
+		fuzzer:  fuzzer,
+		queue:   &queue.PlainQueue{},
+		entries: make(map[string]*barrierSeed),
+		corpus:  newUAFCorpus(10),
+		pairs:   make(map[uint64]struct{}),
+	}
+	fuzzer.uaf = u
+
+	fuzzer.handleDiscoveredBarrierPairs(req, &queue.Result{
+		Executor:         queue.ExecutorID{VM: 1},
+		BarrierGroupID:   42,
+		BarrierGroupSize: 2,
+	}, []*ddrd.MayUAFPair{
+		testMayUAFPair(0x10, 0x20, 0x100, 0x200),
+	}, SourceFuzz)
+
+	if persisted != 1 {
+		t.Fatalf("persist callback called %d times, want 1", persisted)
+	}
+	if got := len(u.entries); got != 1 {
+		t.Fatalf("got %d UAF entries, want 1", got)
+	}
+	if got := u.corpus.GetVarNamePairCount(0x10, 0x20); got != 1 {
+		t.Fatalf("got varname pair count %d, want 1", got)
+	}
+	queued := u.queue.Next()
+	if queued == nil {
+		t.Fatal("expected direct path to enqueue a validation request")
+	}
+	if !queued.Barrier || len(queued.BarrierPrograms) != 2 {
+		t.Fatalf("queued request barrier=%v programs=%d, want barrier with 2 programs",
+			queued.Barrier, len(queued.BarrierPrograms))
+	}
+	if queued.TimingThresholdUs != 2500 {
+		t.Fatalf("queued timing threshold = %d, want 2500", queued.TimingThresholdUs)
+	}
+}
+
 func TestPendingEntriesCompactsSyncedSeeds(t *testing.T) {
 	entry := &UAFCorpusEntry{
 		Pairs: []*ddrd.MayUAFPair{

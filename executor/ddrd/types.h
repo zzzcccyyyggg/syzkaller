@@ -56,6 +56,7 @@ typedef struct {
     bool enable_history;        // 是否启用线程访问历史记录功能
 } AccessContext;
 int access_context_init_from_buffer(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees);
+int access_context_init_from_records(AccessContext* record_ctx, const AccessRecord* records, int input_count, int max_records, int max_frees);
 ThreadAccessHistory* access_context_find_thread(AccessContext* ctx, int tid);
 ThreadAccessHistory* access_context_create_thread_history(AccessContext* record_ctx, int tid);
 bool access_context_check_data_race_validity(AccessContext* record_ctx, const AccessRecord* a, const AccessRecord* b);

@@ -453,9 +453,10 @@ func (u *uafMode) tryPersistSeed(seed *barrierSeed) {
 	seed.synced = true
 }
 
-// handleFilteredPairs handles cross-program pairs after solo filtering.
-// This is called from soloFilterJob after filtering out intra-program pairs.
-func (u *uafMode) handleFilteredPairs(req *queue.Request, res *queue.Result, prog1, prog2 *prog.Prog, pairs []*ddrd.MayUAFPair, source PairSource) {
+// handleDiscoveredPairs records newly discovered May-Race Pairs. In the paper
+// path these are persisted directly from barrier execution; in the legacy solo
+// filter path the input has already been filtered to cross-program pairs.
+func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, prog1, prog2 *prog.Prog, pairs []*ddrd.MayUAFPair, source PairSource) {
 	if u == nil || len(pairs) == 0 || prog1 == nil || prog2 == nil {
 		return
 	}

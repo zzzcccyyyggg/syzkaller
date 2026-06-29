@@ -13,6 +13,7 @@ generate_config.py — 为指定模块生成 fuzz.cfg 和 validate.cfg
 Ablation 变体 (直接生成可用于敏感度实验的配置):
     python3 scripts/generate_config.py --ablation fuzz-no-timing xfs btrfs ptmx dsp
     python3 scripts/generate_config.py --ablation fuzz-no-objlink xfs btrfs ptmx dsp
+    python3 scripts/generate_config.py --throughput-only xfs btrfs ptmx dsp
     python3 scripts/generate_config.py --ablation validate-no-delay xfs btrfs ptmx dsp
     python3 scripts/generate_config.py --ablation validate-no-replay xfs btrfs ptmx dsp
     python3 scripts/generate_config.py --ablation validate-no-backoff xfs btrfs ptmx dsp
@@ -90,6 +91,7 @@ VALIDATE_PORT_OFFSET = 100
 # ---------------------------------------------------------------------------
 FUZZ_EXPERIMENTAL = {
     "uaf_mode": True,
+    "disable_uaf_validate_queue": False,
     "barrier_mode": True,
     "barrier_procs": [0, 1],
     "history_buffer_size": 100,
@@ -97,7 +99,10 @@ FUZZ_EXPERIMENTAL = {
     "new_stack_history": 10,
     "max_stacks_per_varname_pair": 100,
     "normal_threshold_micros": 10000,
-    "enable_timing_exploration": True,
+    "enable_timing_exploration": False,
+    "enable_solo_filter": False,
+    "enable_coverage_triage": False,
+    "enable_affinity_table": False,
     "timing_exploration_queue_size": 500,
     "timing_exploration_ratio": 0.1,
     "delay_min_micros": 10,
@@ -360,6 +365,18 @@ ABLATION_VARIANTS = {
             "enable_timing_exploration": False,
         },
     },
+    "fuzz-throughput": {
+        "description": "Fuzzing throughput comparison with validation and legacy exploration queues disabled",
+        "mode": "fuzz",
+        "suffix": "-throughput",
+        "overrides": {
+            "disable_uaf_validate_queue": True,
+            "enable_timing_exploration": False,
+            "enable_solo_filter": False,
+            "enable_coverage_triage": False,
+            "enable_affinity_table": False,
+        },
+    },
     # --- Validate-side ablations ---
     "validate-site-only": {
         "description": "Use site-only target matching without SN/TID constraints",
@@ -456,6 +473,8 @@ def main():
     parser.add_argument("--list", action="store_true", help="列出可用模块")
     parser.add_argument("--fuzz-only", action="store_true", help="仅生成 fuzz 配置")
     parser.add_argument("--validate-only", action="store_true", help="仅生成 validate 配置")
+    parser.add_argument("--throughput-only", action="store_true",
+                        help="生成 throughput 对比用 fuzz-throughput.cfg")
     parser.add_argument("--vanilla", action="store_true", help="额外生成纯净配置(不含 experimental), 文件名为 *-vanilla.cfg")
     parser.add_argument("--vanilla-only", action="store_true", help="仅生成纯净配置(不含 experimental)")
     parser.add_argument("--ablation", type=str, metavar="VARIANT",
@@ -480,6 +499,15 @@ def main():
         for m in list_available_modules():
             print(f"  {m}")
         return
+
+    if args.throughput_only:
+        if args.ablation:
+            print("ERROR: --throughput-only 不能和 --ablation 同时使用", file=sys.stderr)
+            sys.exit(1)
+        if args.validate_only or args.vanilla or args.vanilla_only:
+            print("ERROR: --throughput-only 不能和 validate/vanilla 生成模式同时使用", file=sys.stderr)
+            sys.exit(1)
+        args.ablation = "fuzz-throughput"
 
     targets = args.modules
     if args.all:

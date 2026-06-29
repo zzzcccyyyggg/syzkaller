@@ -190,10 +190,12 @@ sudo scripts/run_experiment.sh validate --all
   - `dynamic_threshold_min_us=500`
   - `dynamic_threshold_max_us=10000`
   - `dynamic_threshold_eval_sec=30`
-- timing exploration 阈值策略:
-  - 普通 fuzz 请求使用当前动态阈值
-  - Timing Phase 1 使用 `max(当前动态阈值 × 8, widened_threshold_micros)`，当前下界为 `20000us`
-  - Timing Phase 2 回到当前动态阈值，不再固定写死 `10ms`
+- 旧 timing exploration 路径默认关闭:
+  - `enable_timing_exploration=false`
+  - `enable_solo_filter=false`
+  - `enable_coverage_triage=false`
+  - `enable_affinity_table=false`
+  - fuzz 主线只记录轻量 May-Race Pair，并把确认成本交给 validate
 
 对应快捷入口：
 
@@ -209,7 +211,7 @@ sleep 1800
 ```
 
 > `start-safe4-fuzz` / `start-safe4-validate` 在启动前会自动 `--force` 重生成这 4 个模块的配置，
-> 确保最新的 timing exploration / dynamic threshold 设置一定生效，而不是继续复用旧 `fuzz.cfg`。
+> 确保最新的 dynamic threshold 与 legacy exploration 关闭设置一定生效，而不是继续复用旧 `fuzz.cfg`。
 
 > 这一方案默认**不使用 watcher**。如果 `validate` 退出，先查看日志定位原因，
 > 不要再用 `while true; do ... validate ...; sleep 60; done` 之类的后台循环自动补拉，
@@ -315,17 +317,17 @@ sudo scripts/run_experiment.sh --separate-validate-slot validate floppy dsp
 
 ## 2. 实验二: Fuzz 侧敏感度 (Ablation - Fuzz Side)
 
-**目标**: 评估 "资源感知对象链接" 和 "pair-guided 时序探索" 各自的贡献。
+**目标**: 评估 "资源感知对象链接" 的贡献；旧 "pair-guided 时序探索" 只作为历史机制复现实验，不属于论文主线。
 
 **模块**: `xfs btrfs ptmx dsp` (4 模块代表子集)
 
 **变体**:
 | 名称 | 配置后缀 | 说明 |
 |------|----------|------|
-| Full DDRD | (默认) | 所有功能开启 |
-| No Timing | `-no-timing` | 关闭 timing exploration |
+| Full MRPFuzz | (默认) | 论文主线；dynamic threshold 开启，timing/solo/coverage/affinity 关闭 |
+| No Timing | `-no-timing` | 历史兼容口径；当前与默认 fuzz 主线一致 |
 | No ObjLink | `-no-objlink` | 关闭 ObjectLinker V2 |
-| Random | `-random` | baseline 口径；关闭 timing exploration |
+| Random | `-random` | baseline 口径；关闭 timing exploration 与资源感知对象链接 |
 
 **运行**: 每变体 × 每模块 12h fuzz, 3 次独立重复 (预算紧张时先做 2 次)。
 
@@ -431,7 +433,7 @@ done
 **变体**:
 | 名称 | 配置后缀 | 说明 |
 |------|----------|------|
-| Full validator | (默认) | 所有功能开启 |
+| Full validator | (默认) | 论文默认验证策略 |
 | No Delay | `-no-delay` | 关闭 directed delay scheduling |
 | No Replay | `-no-replay` | 关闭 state replay/restoration |
 | No Backoff | `-no-backoff` | 关闭 adaptive backoff |
@@ -732,6 +734,7 @@ python3 scripts/generate_config.py --list-ablations
 python3 scripts/generate_config.py --ablation fuzz-no-timing   --force xfs btrfs ptmx dsp
 python3 scripts/generate_config.py --ablation fuzz-no-objlink  --force xfs btrfs ptmx dsp
 python3 scripts/generate_config.py --ablation fuzz-random      --force xfs btrfs ptmx dsp
+python3 scripts/generate_config.py --throughput-only           --force xfs btrfs ptmx dsp
 
 # 生成 validate-side 变体
 python3 scripts/generate_config.py --ablation validate-no-delay   --force xfs btrfs ptmx dsp
@@ -768,8 +771,12 @@ sudo scripts/run_experiment.sh start --all
 | 开关 | 位置 | 默认 | 作用 |
 |------|------|------|------|
 | `uaf_mode` | experimental | true | 启用 DDRD race 检测 |
+| `disable_uaf_validate_queue` | experimental | false | fuzz+validate 联动保持 false；throughput-only 对比可设 true |
 | `barrier_mode` | experimental | true | 启用 barrier 同步执行 |
-| `enable_timing_exploration` | experimental | true | pair-guided 时序探索 |
+| `enable_timing_exploration` | experimental | false | legacy pair-guided 时序探索，主实验关闭 |
+| `enable_solo_filter` | experimental | false | legacy solo re-execution 过滤，主实验关闭 |
+| `enable_coverage_triage` | experimental | false | legacy pair coverage triage，主实验关闭 |
+| `enable_affinity_table` | experimental | false | legacy affinity feedback，主实验关闭 |
 | `enable_object_linking` | experimental | true (null=true) | 资源感知对象链接 |
 | `random_baseline_mode` | experimental | false | baseline 标记，并强制关闭 timing exploration |
 
@@ -809,7 +816,10 @@ sudo scripts/run_experiment.sh start --all
 
 - `enable_object_linking=false`
 - `random_baseline_mode=false`
-- `enable_timing_exploration=true`
+- `enable_timing_exploration=false`
+- `enable_solo_filter=false`
+- `enable_coverage_triage=false`
+- `enable_affinity_table=false`
 - `no_object_kccwf_namespace=true`
 
 其中 `no_object_kccwf_namespace=true` 会在构造 barrier program group 时，

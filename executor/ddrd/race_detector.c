@@ -10,14 +10,27 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <sys/ioctl.h>
 #include <unistd.h>
 
 #define DDRD_TRACE_BUFFER_SIZE (64ULL * 1024ULL * 1024ULL)
 #define DDRD_MAX_RECORDS 0x10000
 #define DDRD_MAX_UAF_PAIRS 0x200
+#define DDRD_KCCWF_DEVICE_PATH "/dev/kccwf_ctl_dev"
+
+#ifndef _IOWR
+#define _IOWR(type, nr, size) (((type) << 8) | (nr) | (sizeof(size) << 16))
+#endif
+
+#define DDRD_GET_TRACE_RECORDS _IOWR('c', 17, kccwf_trace_read_t)
 
 static void debug(const char* fmt, ...)
 {
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = getenv("SYZ_DDRD_DEBUG") != NULL;
+    if (!enabled)
+        return;
     va_list args;
     va_start(args, fmt);
     fprintf(stderr, "[race_detector]: ");
@@ -32,6 +45,13 @@ void race_detector_init(RaceDetector* detector)
 
     detector->enabled = false;
     detector->trace_fd = -1;
+    detector->trace_buffer = NULL;
+    detector->trace_buffer_size = 0;
+    detector->binary_records = NULL;
+    detector->binary_record_capacity = 0;
+    detector->binary_access_records = NULL;
+    detector->binary_access_capacity = 0;
+    detector->binary_trace_unsupported = false;
 
     detector->context.thread_count = 0;
     detector->context.max_threads = MAX_THREADS;
@@ -104,9 +124,108 @@ void race_detector_cleanup(RaceDetector* detector)
         free(detector->context.thread_histories);
         detector->context.thread_histories = NULL;
     }
+    if (detector->trace_buffer) {
+        free(detector->trace_buffer);
+        detector->trace_buffer = NULL;
+        detector->trace_buffer_size = 0;
+    }
+    if (detector->binary_records) {
+        free(detector->binary_records);
+        detector->binary_records = NULL;
+        detector->binary_record_capacity = 0;
+    }
+    if (detector->binary_access_records) {
+        free(detector->binary_access_records);
+        detector->binary_access_records = NULL;
+        detector->binary_access_capacity = 0;
+    }
 
     detector->enabled = false;
     debug("Race detector cleanup completed\n");
+}
+
+static char* race_detector_trace_buffer(RaceDetector* detector, size_t buffer_size)
+{
+    if (!detector)
+        return NULL;
+    if (detector->trace_buffer && detector->trace_buffer_size >= buffer_size)
+        return detector->trace_buffer;
+    free(detector->trace_buffer);
+    detector->trace_buffer = (char*)malloc(buffer_size);
+    if (!detector->trace_buffer) {
+        detector->trace_buffer_size = 0;
+        return NULL;
+    }
+    detector->trace_buffer_size = buffer_size;
+    return detector->trace_buffer;
+}
+
+static kccwf_trace_record_t* race_detector_binary_records(RaceDetector* detector, size_t record_capacity)
+{
+    if (!detector || record_capacity == 0)
+        return NULL;
+    if (detector->binary_records && detector->binary_record_capacity >= record_capacity)
+        return detector->binary_records;
+    free(detector->binary_records);
+    detector->binary_records = (kccwf_trace_record_t*)malloc(sizeof(kccwf_trace_record_t) * record_capacity);
+    if (!detector->binary_records) {
+        detector->binary_record_capacity = 0;
+        return NULL;
+    }
+    detector->binary_record_capacity = record_capacity;
+    return detector->binary_records;
+}
+
+static AccessRecord* race_detector_binary_access_records(RaceDetector* detector, size_t record_capacity)
+{
+    if (!detector || record_capacity == 0)
+        return NULL;
+    if (detector->binary_access_records && detector->binary_access_capacity >= record_capacity)
+        return detector->binary_access_records;
+    free(detector->binary_access_records);
+    detector->binary_access_records = (AccessRecord*)malloc(sizeof(AccessRecord) * record_capacity);
+    if (!detector->binary_access_records) {
+        detector->binary_access_capacity = 0;
+        return NULL;
+    }
+    detector->binary_access_capacity = record_capacity;
+    return detector->binary_access_records;
+}
+
+static bool race_detector_prepare_context(RaceDetector* detector, int max_records, int max_frees)
+{
+    if (!detector || max_records <= 0 || max_frees <= 0)
+        return false;
+
+    if (!detector->context.records) {
+        detector->context.records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_records);
+        if (!detector->context.records) {
+            debug("Failed to allocate memory for records\n");
+            return false;
+        }
+        debug("Allocated memory for %d access records\n", max_records);
+    }
+
+    if (!detector->context.free_records) {
+        detector->context.free_records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_frees);
+        if (!detector->context.free_records) {
+            debug("Failed to allocate memory for free_records\n");
+            return false;
+        }
+        debug("Allocated memory for %d free records\n", max_frees);
+    }
+
+    if (!detector->context.thread_histories && detector->context.enable_history) {
+        detector->context.thread_histories = (ThreadAccessHistory*)calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
+        if (!detector->context.thread_histories) {
+            debug("Failed to allocate memory for thread_histories\n");
+            return false;
+        }
+        detector->context.max_threads = MAX_THREADS;
+        debug("Allocated memory for %d thread histories\n", MAX_THREADS);
+    }
+
+    return true;
 }
 
 void race_detector_reset(RaceDetector* detector)
@@ -220,21 +339,123 @@ ssize_t race_detector_read_trace_buffer_until_stable(RaceDetector* detector,
     return last_size >= 0 ? last_size : 0;
 }
 
+static char binary_access_type_to_char(uint8_t access_type)
+{
+    switch (access_type) {
+    case KCCWF_TRACE_ACCESS_WRITE:
+        return 'W';
+    case KCCWF_TRACE_ACCESS_FREE:
+        return 'F';
+    case KCCWF_TRACE_ACCESS_READ:
+    default:
+        return 'R';
+    }
+}
+
+static int kccwf_get_trace_records(kccwf_trace_read_t* req)
+{
+    int fd = open(DDRD_KCCWF_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+    if (fd < 0)
+        return -1;
+
+    int ret = ioctl(fd, DDRD_GET_TRACE_RECORDS, req);
+    int saved_errno = errno;
+    close(fd);
+    errno = saved_errno;
+    return ret;
+}
+
+static int race_detector_parse_binary_trace(RaceDetector* detector, int max_records, int max_frees)
+{
+    if (!detector || detector->binary_trace_unsupported)
+        return -1;
+
+    size_t record_capacity = (size_t)max_records + (size_t)max_frees;
+    kccwf_trace_record_t* raw_records = race_detector_binary_records(detector, record_capacity);
+    AccessRecord* access_records = race_detector_binary_access_records(detector, record_capacity);
+    if (!raw_records || !access_records)
+        return -1;
+
+    kccwf_trace_read_t req = {};
+    req.version = KCCWF_TRACE_RECORD_VERSION;
+    req.capacity = (uint32_t)record_capacity;
+    req.record_size = sizeof(kccwf_trace_record_t);
+    req.records = (uint64_t)(uintptr_t)raw_records;
+
+    int ret = kccwf_get_trace_records(&req);
+    if (ret != 0) {
+        if (errno == EINVAL || errno == ENOTTY || errno == ENODEV || errno == ENOENT)
+            detector->binary_trace_unsupported = true;
+        return -1;
+    }
+
+    detector->context.record_count = 0;
+    detector->context.free_count = 0;
+    detector->context.thread_count = 0;
+
+    if (req.count == 0)
+        return 0;
+    if (!race_detector_prepare_context(detector, max_records, max_frees))
+        return 0;
+
+    int converted_count = 0;
+    for (uint32_t i = 0; i < req.count && i < record_capacity; i++) {
+        const kccwf_trace_record_t* src = &raw_records[i];
+        if (src->version != KCCWF_TRACE_RECORD_VERSION)
+            continue;
+
+        AccessRecord* dst = &access_records[converted_count];
+        memset(dst, 0, sizeof(*dst));
+        dst->tid = src->tid;
+        dst->var_name = src->var_name;
+        dst->address = src->var_addr;
+        dst->access_type = binary_access_type_to_char(src->access_type);
+        dst->size = src->size;
+        dst->call_stack_hash = src->call_stack_hash;
+        dst->access_time = src->access_time;
+        dst->sn = src->sn;
+        dst->valid = (dst->tid >= 0 && dst->var_name > 0);
+
+        int lock_count = src->lock_count;
+        if (lock_count > KCCWF_TRACE_MAX_LOCKS)
+            lock_count = KCCWF_TRACE_MAX_LOCKS;
+        for (int j = 0; j < lock_count; j++) {
+            if (src->locks[j].ptr == 0)
+                continue;
+            LockRecord* lock = &dst->held_locks[dst->lock_count++];
+            lock->ptr = src->locks[j].ptr;
+            lock->attr = src->locks[j].attr;
+            lock->valid = true;
+        }
+
+        if (dst->valid)
+            converted_count++;
+    }
+
+    int result = access_context_init_from_records(
+        &detector->context, access_records, converted_count, max_records, max_frees);
+    debug("Parsed %d access records from binary trace (raw=%u, dropped=%u, seq=%llu)\n",
+          result, req.count, req.dropped, (unsigned long long)req.write_seq);
+    return result;
+}
+
 int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, int max_frees)
 {
     if (!detector)
         return 0;
 
+    int binary_result = race_detector_parse_binary_trace(detector, max_records, max_frees);
+    if (binary_result >= 0)
+        return binary_result;
+
     const size_t buffer_size = DDRD_TRACE_BUFFER_SIZE;
-    char* buffer = (char*)malloc(buffer_size);
+    char* buffer = race_detector_trace_buffer(detector, buffer_size);
     if (!buffer)
         return 0;
 
     ssize_t bytes_read = race_detector_read_trace_buffer(detector, buffer, buffer_size);
-    if (bytes_read <= 0) {
-        free(buffer);
+    if (bytes_read <= 0)
         return 0;
-    }
 
     debug("Read %zd bytes from trace buffer, parsing...\n", bytes_read);
 
@@ -242,7 +463,6 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
         detector->context.records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_records);
         if (!detector->context.records) {
             debug("Failed to allocate memory for records\n");
-            free(buffer);
             return 0;
         }
         debug("Allocated memory for %d access records\n", max_records);
@@ -252,7 +472,6 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
         detector->context.free_records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_frees);
         if (!detector->context.free_records) {
             debug("Failed to allocate memory for free_records\n");
-            free(buffer);
             return 0;
         }
         debug("Allocated memory for %d free records\n", max_frees);
@@ -262,7 +481,6 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
         detector->context.thread_histories = (ThreadAccessHistory*)calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
         if (!detector->context.thread_histories) {
             debug("Failed to allocate memory for thread_histories\n");
-            free(buffer);
             return 0;
         }
         detector->context.max_threads = MAX_THREADS;
@@ -271,7 +489,6 @@ int race_detector_parse_trace_buffer(RaceDetector* detector, int max_records, in
 
     int result = access_context_init_from_buffer(&detector->context, buffer, max_records, max_frees);
 
-    free(buffer);
     debug("Parsed %d access records from trace buffer\n", result);
     return result;
 }
@@ -282,8 +499,12 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
     if (!detector)
         return 0;
 
+    int binary_result = race_detector_parse_binary_trace(detector, max_records, max_frees);
+    if (binary_result >= 0)
+        return binary_result;
+
     const size_t buffer_size = DDRD_TRACE_BUFFER_SIZE;
-    char* buffer = (char*)malloc(buffer_size);
+    char* buffer = race_detector_trace_buffer(detector, buffer_size);
     if (!buffer)
         return 0;
 
@@ -294,10 +515,8 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
         3,     // max_stable_checks
         2000   // max_wait_ms
     );
-    if (bytes_read <= 0) {
-        free(buffer);
+    if (bytes_read <= 0)
         return 0;
-    }
 
     debug("Stable read got %zd bytes from trace buffer, parsing...\n", bytes_read);
 
@@ -305,7 +524,6 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
         detector->context.records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_records);
         if (!detector->context.records) {
             debug("Failed to allocate memory for records\n");
-            free(buffer);
             return 0;
         }
         debug("Allocated memory for %d access records\n", max_records);
@@ -315,7 +533,6 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
         detector->context.free_records = (AccessRecord*)malloc(sizeof(AccessRecord) * max_frees);
         if (!detector->context.free_records) {
             debug("Failed to allocate memory for free_records\n");
-            free(buffer);
             return 0;
         }
         debug("Allocated memory for %d free records\n", max_frees);
@@ -325,7 +542,6 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
         detector->context.thread_histories = (ThreadAccessHistory*)calloc(MAX_THREADS, sizeof(ThreadAccessHistory));
         if (!detector->context.thread_histories) {
             debug("Failed to allocate memory for thread_histories\n");
-            free(buffer);
             return 0;
         }
         detector->context.max_threads = MAX_THREADS;
@@ -334,7 +550,6 @@ int race_detector_parse_trace_buffer_stable(RaceDetector* detector, int max_reco
 
     int result = access_context_init_from_buffer(&detector->context, buffer, max_records, max_frees);
 
-    free(buffer);
     debug("Parsed %d access records from trace buffer (stable mode)\n", result);
     return result;
 }
@@ -580,8 +795,11 @@ int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* d
         return 0;
     }
 
-    // 1. 先从 trace 里解析出 AccessRecord，填充 detector->context
-    int parsed_count = race_detector_parse_trace_buffer_stable(detector,
+    // 1. 先从 trace 里解析出 AccessRecord，填充 detector->context.
+    // Barrier collection runs after every member completed and tracing has
+    // already been disabled, so the normal fuzzing path should not wait for
+    // repeated "stable size" polls here.
+    int parsed_count = race_detector_parse_trace_buffer(detector,
         DDRD_MAX_RECORDS, DDRD_MAX_RECORDS / 16);
     if (parsed_count <= 0) {
         debug("Failed to parse trace buffer for combined race analysis\n");
@@ -592,7 +810,7 @@ int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* d
         parsed_count);
 
     // 2. 调用底层的 data race 分析逻辑，拿到 RacePair 列表
-    int max_internal_pairs = DDRD_MAX_RECORDS;
+    int max_internal_pairs = max_uaf_pairs;
     RacePair* race_pairs = (RacePair*)malloc(sizeof(RacePair) * max_internal_pairs);
     if (!race_pairs)
         return 0;

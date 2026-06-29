@@ -63,6 +63,9 @@ AccessRecord access_record_init_from_line(const char* line)
         } else if (strcmp(key, "type") == 0) {
             int type_val = atoi(value);
             record.access_type = (type_val == 1) ? 'W' : (type_val == 2) ? 'F' : 'R';
+        } else if (strcmp(key, "is_write") == 0) {
+            int is_write = atoi(value);
+            record.access_type = (is_write == 2) ? 'F' : is_write ? 'W' : 'R';
         } else if (strcmp(key, "size") == 0) {
             record.size = strtoull(value, NULL, 10);
         } else if (strcmp(key, "call_stack_hash") == 0) {

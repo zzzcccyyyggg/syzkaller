@@ -393,28 +393,34 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 			}()
 		}
 
-		queueStore, err := manager.NewUAFValidateQueueStore(mgr.uafSharedWorkdir, cfg.Target)
-		if err != nil {
-			log.Fatalf("failed to initialize uaf validate queue store: %v", err)
-		}
-		mgr.uafValidateQueue = queueStore
-		defer func() {
-			if err := queueStore.Close(); err != nil {
-				log.Errorf("uaf validate queue store close failed: %v", err)
+		enableValidateQueue := cfg.Experimental.UAFValidate != nil ||
+			(cfg.Experimental.UAFMode && !cfg.Experimental.DisableUAFValidateQueue)
+		if enableValidateQueue {
+			queueStore, err := manager.NewUAFValidateQueueStore(mgr.uafSharedWorkdir, cfg.Target)
+			if err != nil {
+				log.Fatalf("failed to initialize uaf validate queue store: %v", err)
 			}
-		}()
+			mgr.uafValidateQueue = queueStore
+			defer func() {
+				if err := queueStore.Close(); err != nil {
+					log.Errorf("uaf validate queue store close failed: %v", err)
+				}
+			}()
 
-		pairIndex, err := manager.NewRacePairIndexStore(mgr.uafSharedWorkdir)
-		if err != nil {
-			log.Fatalf("failed to initialize race pair index store: %v", err)
-		}
-		mgr.uafPairIndex = pairIndex
-		defer func() {
-			if err := pairIndex.Close(); err != nil {
-				log.Errorf("race pair index store close failed: %v", err)
+			pairIndex, err := manager.NewRacePairIndexStore(mgr.uafSharedWorkdir)
+			if err != nil {
+				log.Fatalf("failed to initialize race pair index store: %v", err)
 			}
-		}()
-		mgr.logRaceValidationStorageState("startup")
+			mgr.uafPairIndex = pairIndex
+			defer func() {
+				if err := pairIndex.Close(); err != nil {
+					log.Errorf("race pair index store close failed: %v", err)
+				}
+			}()
+			mgr.logRaceValidationStorageState("startup")
+		} else {
+			log.Logf(0, "uaf validation queue: disabled for fuzzing-only run")
+		}
 	}
 	if *flagDebug {
 		mgr.cfg.Procs = mgr.cfg.Procs
@@ -1416,6 +1422,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			StateScopeSameInstanceRatio:  mgr.cfg.Experimental.StateScopeSameInstanceRatio,
 			StateScopePartnerSamples:     mgr.cfg.Experimental.StateScopePartnerSamples,
 			EnableCoverageTriage:         mgr.cfg.Experimental.EnableCoverageTriage,
+			EnableSoloFilter:             mgr.cfg.Experimental.EnableSoloFilter,
 			EnableAffinityTable:          mgr.cfg.Experimental.EnableAffinityTable,
 			// Dual-Queue Timing Exploration Configuration
 			EnableTimingExploration:    mgr.cfg.Experimental.EnableTimingExploration,

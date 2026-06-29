@@ -4,6 +4,8 @@
 #include <stdbool.h>
 #include <stdint.h>
 
+#include "kccwf_trace.h"
+
 // 和内核定义保持一致：最多支持两个 testing TID
 #define KCCWF_MAX_TESTING_TID_NUM 0x2
 #define KCCWF_UAF_DELAY_BOTH 0

@@ -281,6 +281,10 @@ type Experimental struct {
 
 	// Configure the UAF validation pipeline.
 	UAFValidate *UAFValidateConfig `json:"uaf_validate,omitempty"`
+	// DisableUAFValidateQueue keeps fuzzing from maintaining the persistent
+	// validation queue/pair-index when no uaf_validate consumer is configured.
+	// uaf_validate mode always enables the queue because it is the consumer input.
+	DisableUAFValidateQueue bool `json:"disable_uaf_validate_queue,omitempty"`
 
 	// Skip duplicate data race reports once they've been observed.
 	// When enabled, syz-manager keeps an in-memory cache of data race signatures
@@ -334,13 +338,19 @@ type Experimental struct {
 	// Deprecated: NoDiscoveryPenalty is no longer used (M1'/M2 removed). Kept for config compatibility.
 	NoDiscoveryPenalty int `json:"no_discovery_penalty,omitempty"`
 
-	// EnableCoverageTriage controls pair-level coverage triage jobs in UAF mode.
-	// Defaults to true when unset. Set to false for clean mechanism audits that
-	// remove legacy feedback costs without changing timing exploration or object linking.
+	// EnableSoloFilter controls the legacy solo re-execution filter in UAF mode.
+	// When enabled, every newly discovered barrier pair is followed by two solo
+	// DDRD executions to filter out intra-program pairs before persistence.
+	// Defaults to false; MRPFuzz's paper path treats May-Race Pairs as the
+	// discovery artifact and leaves confirmation to the validation phase.
+	EnableSoloFilter bool `json:"enable_solo_filter,omitempty"`
+	// EnableCoverageTriage controls legacy pair-level coverage triage jobs in UAF mode.
+	// Defaults to false when unset. Set to true only for legacy feedback
+	// experiments that intentionally pay extra solo-execution cost.
 	EnableCoverageTriage *bool `json:"enable_coverage_triage,omitempty"`
 	// EnableAffinityTable controls the legacy syscall affinity table in UAF mode.
-	// Defaults to true when unset. Set to false when no active scheduler consumes
-	// affinity feedback and the table should not be updated.
+	// Defaults to false in the paper path and is useful only when legacy solo
+	// filtering or coverage triage is explicitly enabled.
 	EnableAffinityTable *bool `json:"enable_affinity_table,omitempty"`
 
 	// StaticInputExploration makes UAF input exploration sample concurrent program

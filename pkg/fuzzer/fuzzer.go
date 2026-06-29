@@ -103,19 +103,28 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		// RandomBaselineMode is now only a baseline marker plus a hard timing-off guard.
 		if cfg.RandomBaselineMode {
 			raceConfig.RandomBaselineMode = true
-			// Keep affinity/object/solo-filter machinery intact for fair throughput comparison.
-			// The config flag only guarantees timing exploration stays disabled.
+			// Baseline marker only; each optional mechanism has its own knob.
 			cfg.EnableTimingExploration = false
-			log.Logf(0, "[RANDOM-BASELINE] Timing exploration DISABLED for baseline run; affinity/object mechanisms remain enabled unless separately overridden")
+			log.Logf(0, "[RANDOM-BASELINE] Timing exploration DISABLED for baseline run")
 		}
 		// EnableObjectLinking: default true, user can disable for ablation
 		if cfg.EnableObjectLinking != nil && !*cfg.EnableObjectLinking {
 			raceConfig.EnableObjectLinking = false
 			log.Logf(0, "[ABLATION] Object-level program linking DISABLED (enable_object_linking=false)")
 		}
-		if cfg.EnableAffinityTable != nil && !*cfg.EnableAffinityTable {
+		if !cfg.EnableSoloFilter {
+			raceConfig.EnableSoloCache = false
+			log.Logf(0, "[CLEAN-AUDIT] Solo filter DISABLED (enable_solo_filter=false); discovered pairs are persisted directly")
+		}
+		coverageTriageEnabled := cfg.EnableCoverageTriage != nil && *cfg.EnableCoverageTriage
+		switch {
+		case cfg.EnableAffinityTable != nil:
+			raceConfig.EnableAffinityTable = *cfg.EnableAffinityTable
+		case !cfg.EnableSoloFilter && !coverageTriageEnabled:
 			raceConfig.EnableAffinityTable = false
-			log.Logf(0, "[CLEAN-AUDIT] Syscall affinity table DISABLED (enable_affinity_table=false)")
+		}
+		if !raceConfig.EnableAffinityTable {
+			log.Logf(0, "[CLEAN-AUDIT] Syscall affinity table DISABLED")
 		}
 		if raceConfig.EnableObjectLinking {
 			objectLinkAttemptRatio := normalizeObjectLinkAttemptRatio(cfg.ObjectLinkAttemptRatio)
@@ -494,15 +503,14 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 				// 检查是否有新的 pairs（通过检查是否被添加到 ddrd store）
 				newPairs := fuzzer.ddrd.AddWithSource(res.Ddrd, ddrd.SourceFuzz)
 				if len(newPairs) > 0 {
-					// 有新 pairs，触发 solo 过滤
-					fuzzer.triggerSoloFilter(req, res, newPairs, SourceFuzz)
+					fuzzer.handleDiscoveredBarrierPairs(req, res, newPairs, SourceFuzz)
 				}
 			}
 		}
 		// 记录执行并检测新覆盖率（pair 级别）
 		newCover := fuzzer.uaf.recordExecution(req, res)
 		if len(newCover) > 0 && len(req.BarrierPrograms) >= 2 {
-			if fuzzer.Config.EnableCoverageTriage == nil || *fuzzer.Config.EnableCoverageTriage {
+			if fuzzer.Config.EnableCoverageTriage != nil && *fuzzer.Config.EnableCoverageTriage {
 				// 有新覆盖率，触发 coverage triage job
 				fuzzer.triggerCoverageTriage(req, res, newCover)
 			}
@@ -653,10 +661,12 @@ type Config struct {
 	StateScopePartnerSamples int
 
 	// EnableCoverageTriage controls pair-level coverage triage jobs in UAF mode.
-	// Nil keeps the historical default of enabled.
+	// Nil keeps the paper/default path disabled.
 	EnableCoverageTriage *bool
+	// EnableSoloFilter controls the legacy solo re-execution filter in UAF mode.
+	EnableSoloFilter bool
 	// EnableAffinityTable controls the legacy syscall affinity table in UAF mode.
-	// Nil keeps the historical default of enabled.
+	// Nil enables it only when a legacy producer (solo filter or coverage triage) is enabled.
 	EnableAffinityTable *bool
 
 	// ======== Dual-Queue Timing Exploration Configuration ========
@@ -1188,17 +1198,16 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 			// NOTE: Do NOT save to normal corpus here.
 			// Programs with syz_delay calls would pollute normal corpus and waste
 			// execution time on usleep during regular fuzzing mutations.
-			// The full program (with delays) is saved to UAF corpus via
-			// triggerSoloFilter → handleFilteredPairs, which preserves Programs,
+			// The full program group is saved to UAF corpus via
+			// handleDiscoveredBarrierPairs, which preserves Programs,
 			// ReplayPlan.DelaysMicros, Pairs, and ReplayHistory.
 
-			// Add validated pairs to the store with timing source and trigger solo filter
+			// Add validated pairs to the store with timing source and persist them.
 			if len(candidatePairs) > 0 {
 				for _, p := range candidatePairs {
 					fuzzer.ddrd.AddPairWithSource(p, ddrd.SourceTiming)
 				}
-				// Trigger solo filter for the new pairs
-				fuzzer.triggerSoloFilter(req, res, candidatePairs, SourceTiming)
+				fuzzer.handleDiscoveredBarrierPairs(req, res, candidatePairs, SourceTiming)
 			}
 
 			// Report success to timing scheduler
@@ -1524,9 +1533,23 @@ func (fuzzer *Fuzzer) chooseStaticInputProgram() *prog.Prog {
 	return fuzzer.staticInputPool.pool[idx].Clone()
 }
 
-// triggerSoloFilter starts a solo filter job to remove non-cross-program pairs.
-// This is called after barrier execution discovers new pairs.
-// The job executes prog1 solo and prog2 solo, then filters out pairs that also appear in solo runs.
+// handleDiscoveredBarrierPairs persists newly discovered barrier pairs. The
+// paper/default path stores May-Race Pairs directly and leaves expensive
+// confirmation to validation. The legacy solo filter can still be enabled for
+// old audits that need intra-program pair filtering.
+func (fuzzer *Fuzzer) handleDiscoveredBarrierPairs(req *queue.Request, res *queue.Result, newPairs []*ddrd.MayUAFPair, source PairSource) {
+	if fuzzer == nil || fuzzer.uaf == nil || req == nil || len(req.BarrierPrograms) < 2 || len(newPairs) == 0 {
+		return
+	}
+	if fuzzer.Config.EnableSoloFilter {
+		fuzzer.triggerSoloFilter(req, res, newPairs, source)
+		return
+	}
+	fuzzer.uaf.handleDiscoveredPairs(req, res, req.BarrierPrograms[0], req.BarrierPrograms[1], newPairs, source)
+}
+
+// triggerSoloFilter starts the legacy solo filter job to remove non-cross-program pairs.
+// It executes prog1 solo and prog2 solo, then filters out pairs that also appear in solo runs.
 func (fuzzer *Fuzzer) triggerSoloFilter(req *queue.Request, res *queue.Result, newPairs []*ddrd.MayUAFPair, source PairSource) {
 	if req == nil || len(req.BarrierPrograms) < 2 || len(newPairs) == 0 {
 		return

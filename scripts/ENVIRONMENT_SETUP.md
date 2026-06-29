@@ -361,7 +361,10 @@ python3 scripts/generate_config.py --list
   "experimental": {
     "barrier_mode": true,
     "uaf_mode": true,
-    "enable_timing_exploration": true,
+    "enable_timing_exploration": false,
+    "enable_solo_filter": false,
+    "enable_coverage_triage": false,
+    "enable_affinity_table": false,
     "enable_object_linking": null
   }
 }
@@ -391,6 +394,7 @@ MODS="xfs btrfs ptmx dsp"
 python3 scripts/generate_config.py --ablation fuzz-no-timing   --force $MODS
 python3 scripts/generate_config.py --ablation fuzz-no-objlink  --force $MODS
 python3 scripts/generate_config.py --ablation fuzz-random      --force $MODS
+python3 scripts/generate_config.py --throughput-only           --force $MODS
 python3 scripts/generate_config.py --ablation validate-no-delay   --force $MODS
 python3 scripts/generate_config.py --ablation validate-no-replay  --force $MODS
 python3 scripts/generate_config.py --ablation validate-no-backoff --force $MODS

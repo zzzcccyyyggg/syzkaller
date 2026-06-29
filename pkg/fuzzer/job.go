@@ -683,7 +683,7 @@ func (job *soloFilterJob) run(fuzzer *Fuzzer) {
 
 		// Save to UAF corpus
 		if fuzzer.uaf != nil {
-			fuzzer.uaf.handleFilteredPairs(job.req, job.res, job.prog1, job.prog2, crossProgramPairs, job.source)
+			fuzzer.uaf.handleDiscoveredPairs(job.req, job.res, job.prog1, job.prog2, crossProgramPairs, job.source)
 			log.Logf(1, "[SOLO-FILTER] saved %d cross-program pairs", len(crossProgramPairs))
 		}
 

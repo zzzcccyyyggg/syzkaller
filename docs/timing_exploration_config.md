@@ -2,7 +2,12 @@
 
 ## Overview
 
-This document describes the configuration options for the dual-queue timing exploration system used in race-guided fuzzing. The system uses two queues:
+This is a legacy configuration guide for reproducing the optional dual-queue
+timing exploration system. Current MRPFuzz paper experiments keep this path
+disabled (`enable_timing_exploration=false`) and use the lightweight May-Race
+Pair discovery path instead.
+
+When explicitly re-enabled for historical comparison, the system uses two queues:
 
 1. **Pair Discovery Queue**: Uses random pairing with normal race detection thresholds to discover new variable name pairs
 2. **Timing Exploration Queue**: Uses widened thresholds and `syz_delay()` mutations to explore timing variations for high-value pairs
@@ -11,7 +16,7 @@ This document describes the configuration options for the dual-queue timing expl
 
 All configuration options are placed in the `experimental` section of your `syz-manager` configuration file (e.g., `config.json`).
 
-### Example Configuration
+### Legacy Reproduction Configuration
 
 ```json
 {

@@ -71,9 +71,24 @@
 
 **行为**：
 - 激活 UAF corpus 管理（收集、存储 DDRD 发现的 race pair）
-- 启用 solo filter（过滤同程序内的 pair，只保留跨程序 pair）
+- 通过 barrier 执行收集 MRP；legacy solo filter 由 `enable_solo_filter` 单独控制，论文主线默认关闭
 - 禁用 smash/hints/fault injection job，避免干扰 barrier 同步
 - 开启 race-guided 选择框架（M1'/M2 等策略受其他开关控制）
+
+### `disable_uaf_validate_queue`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"disable_uaf_validate_queue"` |
+
+在 fuzzing-only 运行中关闭持久化 UAF validate queue 和 race-pair index。该开关只影响 manager 是否额外维护验证队列，不影响 executor 收集 MRP，也不影响 UAF corpus 持久化。
+
+**适用场景**：
+- throughput 对比实验：设为 `true`，避免把调度/验证消费者队列成本混入 fuzzing 生产者吞吐
+- 推荐用 `python3 scripts/generate_config.py --throughput-only ...` 生成 `fuzz-throughput.cfg`
+- fuzz+validate 联动实验：保持 `false`，或在配置了 `uaf_validate` 时由 validate 模式自动启用队列
 
 ### `ddrd_monitor`
 
@@ -628,7 +643,7 @@ random_baseline_mode = true
 }
 ```
 
-### 推荐 Fuzzing 配置（含 Timing Exploration）
+### 推荐 Fuzzing 配置（论文主线）
 
 ```json
 {
@@ -636,7 +651,11 @@ random_baseline_mode = true
     "barrier_mode": true,
     "barrier_procs": [0, 1],
     "uaf_mode": true,
-    "enable_timing_exploration": true,
+    "disable_uaf_validate_queue": false,
+    "enable_timing_exploration": false,
+    "enable_solo_filter": false,
+    "enable_coverage_triage": false,
+    "enable_affinity_table": false,
     "timing_exploration_ratio": 0.1,
     "timing_mutation_strategy": "targeted",
     "skip_duplicate_data_races": true,
@@ -647,7 +666,9 @@ random_baseline_mode = true
 }
 ```
 
-### 全功能 Fuzzing（含 Timing Exploration + Affinity）
+### Legacy Fuzzing 复现（Timing Exploration + Affinity）
+
+以下配置只用于复现旧的 timing exploration/affinity 实验，不属于当前论文主线。
 
 ```json
 {
@@ -683,7 +704,7 @@ random_baseline_mode = true
     "barrier_procs": [0, 1],
     "uaf_mode": true,
     "random_baseline_mode": true,
-    "enable_timing_exploration": true,
+    "enable_timing_exploration": false,
     "timing_exploration_ratio": 0.1,
     "skip_duplicate_data_races": true,
     "history_buffer_size": 1000

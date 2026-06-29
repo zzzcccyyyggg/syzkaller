@@ -1913,8 +1913,8 @@ void execute_call(thread_t* th)
 	int current_tid = syscall(186); // __NR_gettid on x86_64
 	if (flag_collect_ddrd_uaf || flag_collect_ddrd_race) {
 		syscall_context_enter(&g_syscall_context, current_tid, th->call_index, th->call_num);
-		fprintf(stderr, "[M3-TRACK] syscall_context_enter: tid=%d call_idx=%d call_num=%d syscall=%s\n",
-			current_tid, th->call_index, th->call_num, call->name);
+		debug("[M3-TRACK] syscall_context_enter: tid=%d call_idx=%d call_num=%d syscall=%s\n",
+		      current_tid, th->call_index, th->call_num, call->name);
 	}
 #endif
 

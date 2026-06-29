@@ -8,6 +8,7 @@
 #include <string.h>
 
 static void debug(const char* fmt, ...);
+static int compare_access_record_time(const void* lhs, const void* rhs);
 
 int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees)
 {
@@ -47,7 +48,7 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
                         add_access_to_history(thread_history, &current_record);
                 }
 
-                if (current_record.access_type == 'F') {
+                if (current_record.access_type == 'F' && free_count < max_frees) {
                     AccessRecord* free_rec = &record_ctx->free_records[free_count];
                     free_rec->address = current_record.address;
                     free_rec->size = current_record.size;
@@ -59,7 +60,7 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
                     for (int k = 0; k < current_record.lock_count && k < 8; k++)
                         free_rec->held_locks[k] = current_record.held_locks[k];
                     free_count++;
-                } else {
+                } else if (current_record.access_type != 'F' && record_count < max_records) {
                     record_ctx->records[record_count++] = current_record;
                 }
             }
@@ -101,6 +102,11 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
         }
     }
 
+    if (record_count > 1)
+        qsort(record_ctx->records, record_count, sizeof(AccessRecord), compare_access_record_time);
+    if (free_count > 1)
+        qsort(record_ctx->free_records, free_count, sizeof(AccessRecord), compare_access_record_time);
+
     record_ctx->record_count = record_count;
     record_ctx->free_count = free_count;
 
@@ -111,12 +117,24 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 // Default threshold in nanoseconds (10ms, unified with collector)
 #define DEFAULT_TIME_THRESHOLD_NS 10000000
 
+static int compare_access_record_time(const void* lhs, const void* rhs)
+{
+    const AccessRecord* a = (const AccessRecord*)lhs;
+    const AccessRecord* b = (const AccessRecord*)rhs;
+    if (a->access_time < b->access_time)
+        return -1;
+    if (a->access_time > b->access_time)
+        return 1;
+    return 0;
+}
+
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {
     // Convert threshold from microseconds to nanoseconds
     // If threshold_us is 0, use the default 10ms threshold
     const uint64_t TIME_THRESHOLD = (threshold_us > 0) ? (threshold_us * 1000) : DEFAULT_TIME_THRESHOLD_NS;
     const uint64_t FAST_THRESHOLD = TIME_THRESHOLD; // Use same threshold for W-W pairs
+    const uint64_t MAX_THRESHOLD = TIME_THRESHOLD > FAST_THRESHOLD ? TIME_THRESHOLD : FAST_THRESHOLD;
     int pair_count = 0;
 
     debug("[RACE-ANALYZE] Using threshold: %llu ns (%llu us)\n", 
@@ -126,6 +144,10 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
         for (int j = i + 1; j < record_ctx->record_count && pair_count < max_pairs; j++) {
             AccessRecord* a = &record_ctx->records[i];
             AccessRecord* b = &record_ctx->records[j];
+
+            if (b->access_time >= a->access_time &&
+                b->access_time - a->access_time > MAX_THRESHOLD)
+                break;
 
             if (a->tid == b->tid)
                 continue;
@@ -305,10 +327,12 @@ bool access_context_check_data_race_validity(AccessContext* record_ctx, const Ac
 
     for (int i = 0; i < record_ctx->free_count; i++) {
         const AccessRecord* free_rec = &record_ctx->free_records[i];
-        if (free_rec->access_time > min_time && free_rec->access_time < max_time) {
-            if (access_record_addresses_overlap(a, free_rec) || access_record_addresses_overlap(b, free_rec))
-                return false;
-        }
+        if (free_rec->access_time <= min_time)
+            continue;
+        if (free_rec->access_time >= max_time)
+            break;
+        if (access_record_addresses_overlap(a, free_rec) || access_record_addresses_overlap(b, free_rec))
+            return false;
     }
 
     return true;
@@ -321,15 +345,17 @@ bool access_context_check_uaf_validity(AccessContext* record_ctx, const AccessRe
 
     for (int i = 0; i < record_ctx->free_count; i++) {
         const AccessRecord* other_free = &record_ctx->free_records[i];
+        if (other_free->access_time <= free_time)
+            continue;
+        if (other_free->access_time >= use_time)
+            break;
         if (other_free->access_time == free_time &&
             other_free->address == free_op->address &&
             other_free->tid == free_op->tid)
             continue;
 
-        if (other_free->access_time > free_time && other_free->access_time < use_time) {
-            if (access_record_addresses_overlap(other_free, use_access))
-                return false;
-        }
+        if (access_record_addresses_overlap(other_free, use_access))
+            return false;
     }
     return true;
 }
@@ -361,6 +387,11 @@ ThreadAccessHistory* access_context_create_thread_history(AccessContext* record_
 
 static void debug(const char* fmt, ...)
 {
+    static int enabled = -1;
+    if (enabled < 0)
+        enabled = getenv("SYZ_DDRD_DEBUG") != NULL;
+    if (!enabled)
+        return;
     int err = errno;
     fprintf(stderr, "[access_context]: ");
     va_list args;
@@ -369,6 +400,54 @@ static void debug(const char* fmt, ...)
     va_end(args);
     fflush(stderr);
     errno = err;
+}
+
+int access_context_init_from_records(AccessContext* record_ctx, const AccessRecord* records, int input_count, int max_records, int max_frees)
+{
+    if (!record_ctx || !records || input_count <= 0 || max_records <= 0 || max_frees <= 0)
+        return 0;
+
+    int record_count = 0;
+    int free_count = 0;
+
+    record_ctx->thread_count = 0;
+    if (record_ctx->enable_history && record_ctx->thread_histories) {
+        for (int i = 0; i < MAX_THREADS; i++) {
+            record_ctx->thread_histories[i].tid = -1;
+            record_ctx->thread_histories[i].access_count = 0;
+            record_ctx->thread_histories[i].access_index = 0;
+            record_ctx->thread_histories[i].buffer_full = false;
+        }
+    }
+
+    for (int i = 0; i < input_count; i++) {
+        const AccessRecord* current = &records[i];
+        if (!current->valid)
+            continue;
+
+        if (record_ctx->enable_history) {
+            ThreadAccessHistory* thread_history = access_context_find_thread(record_ctx, current->tid);
+            if (!thread_history)
+                thread_history = access_context_create_thread_history(record_ctx, current->tid);
+            if (thread_history)
+                add_access_to_history(thread_history, current);
+        }
+
+        if (current->access_type == 'F' && free_count < max_frees) {
+            record_ctx->free_records[free_count++] = *current;
+        } else if (current->access_type != 'F' && record_count < max_records) {
+            record_ctx->records[record_count++] = *current;
+        }
+    }
+
+    if (record_count > 1)
+        qsort(record_ctx->records, record_count, sizeof(AccessRecord), compare_access_record_time);
+    if (free_count > 1)
+        qsort(record_ctx->free_records, free_count, sizeof(AccessRecord), compare_access_record_time);
+
+    record_ctx->record_count = record_count;
+    record_ctx->free_count = free_count;
+    return record_count;
 }
 
 int access_context_init_from_buffer(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees)

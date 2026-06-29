@@ -1,5 +1,6 @@
 #pragma once
 
+#include "../kccwf_trace.h"
 #include "ddrd.h"
 #include "types.h"
 
@@ -14,6 +15,13 @@ typedef struct {
 	AccessContext context;
 	bool enabled;
 	int trace_fd;
+	char* trace_buffer;
+	size_t trace_buffer_size;
+	kccwf_trace_record_t* binary_records;
+	size_t binary_record_capacity;
+	AccessRecord* binary_access_records;
+	size_t binary_access_capacity;
+	bool binary_trace_unsupported;
 } RaceDetector;
 
 typedef struct {

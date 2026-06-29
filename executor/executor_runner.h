@@ -923,20 +923,22 @@ public:
 			}
 			int set_ret = ukc_set_may_uaf_pair(&pair);
 			target_pair_active_ = set_ret == 0;
-			fprintf(stderr,
-				"[KCCWF_UAF_TARGET_INSTALL] ret=%d fine=%d use=%llu use_stack=%llu use_sn=%d use_range=%d-%d use_tid=%d free=%llu free_stack=%llu free_sn=%d free_range=%d-%d free_tid=%d delay=%d delay_side=%d delay_mode=%d active=%d\n",
-				set_ret, req && req->ukc_use_fine_mode ? 1 : 0,
-				(unsigned long long)pair.use_name,
-				(unsigned long long)pair.use_stack, pair.use_sn,
-				pair.use_sn_min, pair.use_sn_max, pair.use_tid,
-				(unsigned long long)pair.free_name,
-				(unsigned long long)pair.free_stack, pair.free_sn,
-				pair.free_sn_min, pair.free_sn_max, pair.free_tid,
-				pair.use_access_delay_time,
-				pair.target_delay_side,
-				pair.target_delay_mode,
-				target_pair_active_ ? 1 : 0);
-			fflush(stderr);
+			if (flag_debug) {
+				fprintf(stderr,
+					"[KCCWF_UAF_TARGET_INSTALL] ret=%d fine=%d use=%llu use_stack=%llu use_sn=%d use_range=%d-%d use_tid=%d free=%llu free_stack=%llu free_sn=%d free_range=%d-%d free_tid=%d delay=%d delay_side=%d delay_mode=%d active=%d\n",
+					set_ret, req && req->ukc_use_fine_mode ? 1 : 0,
+					(unsigned long long)pair.use_name,
+					(unsigned long long)pair.use_stack, pair.use_sn,
+					pair.use_sn_min, pair.use_sn_max, pair.use_tid,
+					(unsigned long long)pair.free_name,
+					(unsigned long long)pair.free_stack, pair.free_sn,
+					pair.free_sn_min, pair.free_sn_max, pair.free_tid,
+					pair.use_access_delay_time,
+					pair.target_delay_side,
+					pair.target_delay_mode,
+					target_pair_active_ ? 1 : 0);
+				fflush(stderr);
+			}
 			if (!target_pair_active_)
 				ukc_enter_disable_mode();
 		} else if (collect_uaf) {
@@ -991,6 +993,7 @@ public:
 		}
 		debug("ddrd: clearing trace buffer before barrier execution\n");
 		trace_manager_clear(nullptr);
+		ukc_clear_trace_records();
 
 		// Reset detector state
 		if (extended_requested_)
@@ -1023,24 +1026,28 @@ public:
 		syscall_context_init(&merged_ctx);
 
 		if (barrier_procs && proc_count > 0) {
-			fprintf(stderr, "[SHM-READ] runner reading syscall context from %d barrier procs\n", proc_count);
+			if (flag_debug)
+				fprintf(stderr, "[SHM-READ] runner reading syscall context from %d barrier procs\n", proc_count);
 			for (int i = 0; i < proc_count; i++) {
 				if (!barrier_procs[i]) {
-					fprintf(stderr, "[SHM-READ]   proc[%d]: NULL\n", i);
+					if (flag_debug)
+						fprintf(stderr, "[SHM-READ]   proc[%d]: NULL\n", i);
 					continue;
 				}
 				int32_t shm_count = barrier_procs[i]->GetSyscallHistoryCount();
 				const SyscallHistoryRecord* shm_history = barrier_procs[i]->GetSyscallHistory();
-				fprintf(stderr, "[SHM-READ]   proc[%d]: shm_count=%d shm_history=%p\n", i, shm_count, (void*)shm_history);
+				if (flag_debug)
+					fprintf(stderr, "[SHM-READ]   proc[%d]: shm_count=%d shm_history=%p\n", i, shm_count, (void*)shm_history);
 				if (!shm_history || shm_count <= 0)
 					continue;
 
-				// Print first few entries for debugging
-				for (int j = 0; j < shm_count && j < 4; j++) {
-					fprintf(stderr, "[SHM-READ]     entry[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\n",
-						j, shm_history[j].tid, shm_history[j].call_index, shm_history[j].prog_idx,
-						(unsigned long long)shm_history[j].start_time,
-						(unsigned long long)shm_history[j].end_time);
+				if (flag_debug) {
+					for (int j = 0; j < shm_count && j < 4; j++) {
+						fprintf(stderr, "[SHM-READ]     entry[%d]: tid=%d call_idx=%d prog_idx=%d time=[%llu-%llu]\n",
+							j, shm_history[j].tid, shm_history[j].call_index, shm_history[j].prog_idx,
+							(unsigned long long)shm_history[j].start_time,
+							(unsigned long long)shm_history[j].end_time);
+					}
 				}
 
 				// Merge entries into merged_ctx, preserving prog_idx
@@ -1053,7 +1060,8 @@ public:
 					merged_ctx.history[idx].end_time = shm_history[j].end_time;
 				}
 			}
-			fprintf(stderr, "[SHM-MERGE] Total merged syscall context: %d entries\n", merged_ctx.history_count);
+			if (flag_debug)
+				fprintf(stderr, "[SHM-MERGE] Total merged syscall context: %d entries\n", merged_ctx.history_count);
 		}
 
 		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
@@ -1143,15 +1151,17 @@ public:
 		ClearOutput();
 		active_for_group_ = false;
 		bool had_target_pair = target_pair_active_;
-		FILE* kmsg = fopen("/dev/kmsg", "w");
-		fprintf(stderr, "[KCCWF_UAF_TARGET_RESET] active=%d\n",
-			had_target_pair ? 1 : 0);
-		if (kmsg) {
-			fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_RESET] active=%d\n",
+		if (flag_debug) {
+			FILE* kmsg = fopen("/dev/kmsg", "w");
+			fprintf(stderr, "[KCCWF_UAF_TARGET_RESET] active=%d\n",
 				had_target_pair ? 1 : 0);
-			fclose(kmsg);
+			if (kmsg) {
+				fprintf(kmsg, "<4>[KCCWF_UAF_TARGET_RESET] active=%d\n",
+					had_target_pair ? 1 : 0);
+				fclose(kmsg);
+			}
+			fflush(stderr);
 		}
-		fflush(stderr);
 		if (target_pair_active_) {
 			ukc_clear_may_uaf_pair();
 			target_pair_active_ = false;

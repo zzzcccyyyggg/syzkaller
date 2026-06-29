@@ -2,6 +2,7 @@
 #define SYZ_UKC_H
 
 #include <cstdarg>
+#include <cstdlib>
 #include <cstdio>
 #include <errno.h> // errno
 #include <fcntl.h> // open、O_RDWR、O_CLOEXEC
@@ -35,6 +36,9 @@ constexpr char kUkcDevicePath[] = "/dev/kccwf_ctl_dev";
 #ifndef _IOR
 #define _IOR(type, nr, size) (((type) << 8) | (nr) | (sizeof(size) << 16))
 #endif
+#ifndef _IOWR
+#define _IOWR(type, nr, size) (((type) << 8) | (nr) | (sizeof(size) << 16))
+#endif
 
 // 与内核 ctl_dev.h 中定义一一对应
 constexpr unsigned long kUkcTurnOff = _IO('c', 0);
@@ -54,6 +58,8 @@ constexpr unsigned long kUkcSetMayUafPair = _IOW('c', 13, may_uaf_pair_t);
 constexpr unsigned long kUkcClearMayUafPair = _IO('c', 14);
 constexpr unsigned long kUkcStartFineLogMode = _IO('c', 15);
 constexpr unsigned long kUkcStartFineMonitorMode = _IO('c', 16);
+constexpr unsigned long kUkcGetTraceRecords = _IOWR('c', 17, kccwf_trace_read_t);
+constexpr unsigned long kUkcClearTraceRecords = _IO('c', 18);
 
 // 小工具：打开 /dev，失败时打印日志
 static inline int ukc_open_dev()
@@ -191,6 +197,47 @@ static inline void ukc_clear_may_uaf_pair()
 		ukc_print("ukc: failed to CLEAR_MAY_UAF_PAIR (errno=%d)\n", errno);
 
 	close(fd);
+}
+
+static inline bool ukc_optional_debug_enabled()
+{
+	return getenv("SYZ_DDRD_DEBUG") != nullptr;
+}
+
+static inline int ukc_clear_trace_records()
+{
+	int fd = ukc_open_dev();
+	if (fd < 0)
+		return -1;
+
+	int ret = ioctl(fd, kUkcClearTraceRecords);
+	int saved_errno = errno;
+	if (ret != 0 && ukc_optional_debug_enabled())
+		ukc_print("ukc: optional CLEAR_TRACE_RECORDS failed (errno=%d)\n", saved_errno);
+
+	close(fd);
+	errno = saved_errno;
+	return ret;
+}
+
+static inline int ukc_get_trace_records(kccwf_trace_read_t* req)
+{
+	if (!req) {
+		ukc_print("ukc: ukc_get_trace_records: req is NULL\n");
+		return -1;
+	}
+	int fd = ukc_open_dev();
+	if (fd < 0)
+		return -1;
+
+	int ret = ioctl(fd, kUkcGetTraceRecords, req);
+	int saved_errno = errno;
+	if (ret != 0 && ukc_optional_debug_enabled())
+		ukc_print("ukc: optional GET_TRACE_RECORDS failed (errno=%d)\n", saved_errno);
+
+	close(fd);
+	errno = saved_errno;
+	return ret;
 }
 
 // ========== 需要传入结构体参数的命令 ==========
