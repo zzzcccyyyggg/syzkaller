@@ -596,9 +596,21 @@ def call_deepseek(args: argparse.Namespace, api_key: str, system: str, user: str
             resp = requests.post(url, headers=headers, json=payload, timeout=args.timeout_sec)
         resp.raise_for_status()
     except requests.RequestException as exc:
-        raise RuntimeError(f"DeepSeek request failed: {exc}") from exc
+        body = ""
+        if getattr(exc, "response", None) is not None:
+            body = exc.response.text[:500]
+        raise RuntimeError(f"DeepSeek request failed: {exc}; body={body}") from exc
     data = resp.json()
-    return data["choices"][0]["message"]["content"]
+    choice = data["choices"][0]
+    message = choice.get("message") or {}
+    content = message.get("content")
+    if not content:
+        reasoning = message.get("reasoning_content") or ""
+        raise RuntimeError(
+            f"DeepSeek returned empty content finish_reason={choice.get('finish_reason')} "
+            f"reasoning_len={len(reasoning)}"
+        )
+    return content
 
 
 def call_openai_compatible(args: argparse.Namespace, api_key: str, system: str, user: str, provider_name: str) -> str:
