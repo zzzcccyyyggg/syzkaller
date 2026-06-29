@@ -79,6 +79,8 @@ typedef struct {
 	int target_delay_side;
 	int target_delay_mode;
 	bool is_valid;
+	bool use_triggered;
+	bool free_triggered;
 } may_uaf_pair_t;
 
 #endif /* KCCWF_UAPI_H */

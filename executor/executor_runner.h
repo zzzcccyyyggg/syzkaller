@@ -937,6 +937,8 @@ public:
 				pair.target_delay_mode,
 				target_pair_active_ ? 1 : 0);
 			fflush(stderr);
+			if (!target_pair_active_)
+				ukc_enter_disable_mode();
 		} else if (collect_uaf) {
 			ukc_clear_may_uaf_pair();
 			target_pair_active_ = false;
