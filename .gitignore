@@ -26,6 +26,7 @@ executor/syscalls.h
 # vscode
 .vscode
 .claude/
+.secrets/
 .venv/
 
 /build
@@ -52,6 +53,8 @@ tools/syz-validatedb/*.log
 images/
 kernels/
 exp/
+exp-static/
+bin-versions/
 --output-dir/
 batch_repros/
 graph/
@@ -70,3 +73,6 @@ config.tar.gz
 # Experiment output directories
 exp-unified/
 paper/results/
+
+# Local generated backups.
+sys/linux/*.bak-*
