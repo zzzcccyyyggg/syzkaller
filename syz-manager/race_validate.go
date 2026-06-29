@@ -40,7 +40,7 @@ func (r *validationEntryResolver) ResolveValidationEntry(ref *uafvalidate.Valida
 func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	cfg := mgr.cfg.Experimental.UAFValidate
 
-	if (cfg.StreamingLoad || cfg.ContinuousMode) && mgr.uafValidateQueue != nil {
+	if cfg.ContinuousMode && mgr.uafValidateQueue != nil {
 		mgr.runUAFValidateQueueMode(ctx)
 		return
 	}
@@ -254,7 +254,7 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 			}
 			if res.RepeatIndex+1 >= repeatTotal {
 				atomic.AddInt32(&validatorProcessed, 1)
-				if res.Success {
+				if validationResultSucceededForStats(res) {
 					atomic.AddInt32(&validatorSuccess, 1)
 				}
 				if res.Entry != nil {
@@ -1071,12 +1071,12 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 	} else if res.NoStablePairs {
 		log.Logf(0, "uaf validation: no stable pair for %s runtime_pairs=%d",
 			signatureKey, len(res.Pairs))
-	} else if res.Success {
-		confirmed = true
-		log.Logf(0, "uaf validation: confirmed pair %s", signatureKey)
-		log.Logf(0, "uaf validation: stable intersection for %s count=%d", signatureKey, len(res.StablePairs))
+	} else if len(res.StablePairs) > 0 {
+		confirmed = res.VerificationValidatedPairs > 0
+		log.Logf(0, "uaf validation: runtime candidate pair %s", signatureKey)
+		log.Logf(0, "uaf validation: runtime candidate intersection for %s count=%d", signatureKey, len(res.StablePairs))
 		for idx, pair := range res.StablePairs {
-			log.Logf(0, "uaf validation: stable pair %s[%d]: free_access=%016x use_access=%016x free_stack=%016x use_stack=%016x signal=%016x time_diff=%dns free_sn=%d use_sn=%d lock_type=%d use_access_type=%d",
+			log.Logf(0, "uaf validation: runtime candidate pair %s[%d]: free_access=%016x use_access=%016x free_stack=%016x use_stack=%016x signal=%016x time_diff=%dns free_sn=%d use_sn=%d lock_type=%d use_access_type=%d",
 				signatureKey,
 				idx,
 				pair.FreeAccessName,
@@ -1091,6 +1091,18 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 				pair.UseAccessType,
 			)
 		}
+		log.Logf(0, "uaf validation: verify outcome for %s executed=%d skipped=%d skipped_validated=%d validated=%d failed=%d",
+			signatureKey,
+			res.VerificationExecutedPairs,
+			res.VerificationSkippedPairs,
+			res.VerificationSkippedValidatedPairs,
+			res.VerificationValidatedPairs,
+			res.VerificationFailedPairs)
+		if confirmed {
+			log.Logf(0, "uaf validation: target race validated for %s", signatureKey)
+		} else {
+			log.Logf(0, "uaf validation: no target race validated for %s", signatureKey)
+		}
 	} else {
 		log.Logf(0, "uaf validation: pair %s crashed (%s)", signatureKey, res.CrashTitle)
 	}
@@ -1100,6 +1112,16 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 	} else {
 		mgr.statUAFFailed.Add(1)
 	}
+}
+
+func validationResultSucceededForStats(res *uafvalidate.ValidationResult) bool {
+	if res == nil {
+		return false
+	}
+	if res.CollectionOnly {
+		return res.Success
+	}
+	return res.VerificationValidatedPairs > 0
 }
 
 func cloneMayPairs(pairs []ddrd.MayUAFPair) []ddrd.MayUAFPair {
@@ -1197,7 +1219,7 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 			}
 			if res.RepeatIndex+1 >= repeatTotal {
 				atomic.AddInt32(&validatorProcessed, 1)
-				if res.Success {
+				if validationResultSucceededForStats(res) {
 					atomic.AddInt32(&validatorSuccess, 1)
 				}
 			}

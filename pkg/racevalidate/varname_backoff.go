@@ -18,8 +18,6 @@ import (
 const (
 	alphaPrior      = 0.5  // Beta distribution prior α (Jeffrey's prior)
 	betaPrior       = 0.5  // Beta distribution prior β
-	successWeight   = 2.0  // Success weight (successful triggering is strong counter-evidence for backing off)
-	noiseRate       = 0.15 // Assume 15% of failures are noise (e.g. replay/timing mismatch rather than low value)
 	explorationRate = 0.05 // Minimum 5% verification probability
 	maxSkipProb     = 0.90 // Maximum 90% skip probability
 )
@@ -52,26 +50,17 @@ type VarNameBackoffStats struct {
 
 // BackoffScore returns a smoothed score (0.0 - 1.0) describing how strongly
 // past results suggest future verification attempts are likely to be low-yield.
-// It is a scheduling heuristic rather than a true happens-before probability.
+// Successes are handled by the Verified flag (full skip); this formula only
+// tracks failures, matching the paper formula exactly.
 func (s *VarNameBackoffStats) BackoffScore() float64 {
 	if s.TotalAttempts == 0 {
 		return 0.5 // Neutral score when no data is available
 	}
 
-	// If verification has succeeded and never failed, there is no reason to back off.
-	if s.Successes > 0 && s.Failures == 0 {
-		return 0.0
-	}
-
-	// Noise correction: some failures may be due to replay/timing mismatch.
-	effectiveFailures := float64(s.Failures) * (1.0 - noiseRate)
-
-	// Successful triggering is strong counter-evidence for backing off this VarName pair.
-	effectiveSuccesses := float64(s.Successes) * successWeight
-
-	// Beta distribution posterior mean
-	alpha := effectiveFailures + alphaPrior
-	beta := effectiveSuccesses + betaPrior
+	// Beta distribution posterior mean: only failures count here.
+	// Successful verification sets Verified=true and skips all future attempts.
+	alpha := float64(s.Failures) + alphaPrior
+	beta := betaPrior
 
 	return alpha / (alpha + beta)
 }

@@ -101,6 +101,20 @@ type ValidationResult struct {
 	Pairs          []ddrd.MayUAFPair
 	StablePairs    []ddrd.MayUAFPair
 	CollectionOnly bool
+
+	VerificationExecutedPairs         int
+	VerificationSkippedPairs          int
+	VerificationValidatedPairs        int
+	VerificationFailedPairs           int
+	VerificationSkippedValidatedPairs int
+}
+
+type VerificationSummary struct {
+	ExecutedPairs         int
+	SkippedPairs          int
+	ValidatedPairs        int
+	FailedPairs           int
+	SkippedValidatedPairs int
 }
 
 type StageManager struct {
@@ -550,7 +564,12 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 					log.Logf(0, "uafvalidate: collection-only summary key=%s runtime_pairs=%d stable_pairs=%d repeat=%d/%d replay_enabled=%t history=%d",
 						task.key, len(result.Pairs), len(result.StablePairs), task.repeats+1, sm.cfg.RepeatCount, sm.cfg.EnableReplay, len(task.entry.ReplayHistory))
 				} else {
-					sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
+					summary := sm.runVerificationPhaseWithDelays(ctx, task, stablePairsWithDelays)
+					result.VerificationExecutedPairs = summary.ExecutedPairs
+					result.VerificationSkippedPairs = summary.SkippedPairs
+					result.VerificationValidatedPairs = summary.ValidatedPairs
+					result.VerificationFailedPairs = summary.FailedPairs
+					result.VerificationSkippedValidatedPairs = summary.SkippedValidatedPairs
 				}
 			} else {
 				if sm.cfg.TargetVarNamePair != "" {
@@ -2517,7 +2536,7 @@ func logUAFProbeOutput(key, attemptMode string, res *ExecutionResult) {
 	}
 }
 
-func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validationTask, stablePairs []ddrd.MayUAFPair) {
+func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validationTask, stablePairs []ddrd.MayUAFPair) VerificationSummary {
 	matchMode := NormalizeTargetMatchMode(sm.cfg.TargetMatchMode)
 	log.Logf(0, "uafvalidate: starting verification phase for key=%s pairs=%d target_match_mode=%s",
 		task.key, len(stablePairs), matchMode)
@@ -2544,7 +2563,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 
 	for i, pair := range stablePairs {
 		if ctx.Err() != nil {
-			return
+			return VerificationSummary{
+				ExecutedPairs:         executedPairs,
+				SkippedPairs:          skippedDebug + skippedInvalid + skippedValidated + skippedBackoff,
+				ValidatedPairs:        validatedPairs,
+				FailedPairs:           failedPairs,
+				SkippedValidatedPairs: skippedValidated,
+			}
 		}
 
 		fullKey := pairKey(pair)       // Full key (with CallStack)
@@ -2667,10 +2692,8 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		// ========== Update statistics ==========
 		status := "Not Triggerable"
 		statusDetail := ""
-		if execRes.TriggeredCount >= 2 {
-			status = "Stable"
-		} else if execRes.TriggeredCount > 0 {
-			status = "Not Stable"
+		if execRes.TriggeredCount > 0 {
+			status = "Triggered"
 		} else if execRes.Crashed && execRes.CrashTitle != "" {
 			// Crash happened but target pair was not triggered - different race detected
 			statusDetail = " (crashed with different race, target pair not matched)"
@@ -2785,12 +2808,19 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		total, highScore, verified := sm.varNameBackoffStore.Stats()
 		log.Logf(0, "uafvalidate: verification phase complete, VarName backoff stats: total=%d high_score=%d verified=%d", total, highScore, verified)
 	}
+	return VerificationSummary{
+		ExecutedPairs:         executedPairs,
+		SkippedPairs:          skippedPairs,
+		ValidatedPairs:        validatedPairs,
+		FailedPairs:           failedPairs,
+		SkippedValidatedPairs: skippedValidated,
+	}
 }
 
 // runVerificationPhaseWithDelays runs verification using per-pair computed delays:
 // - StartDelayUs (original delay, same as discovery) for barrier start delay
 // - AccessDelayUs (max of original/runtime) for kernel UAF access delay
-func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) {
+func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task *validationTask, stablePairs []StablePairWithDelays) VerificationSummary {
 	debugMode := sm.cfg.TargetVarNamePair != ""
 	matchMode := NormalizeTargetMatchMode(sm.cfg.TargetMatchMode)
 	if debugMode {
@@ -2823,7 +2853,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 	for i, spd := range stablePairs {
 		if ctx.Err() != nil {
-			return
+			return VerificationSummary{
+				ExecutedPairs:         executedPairs,
+				SkippedPairs:          skippedDebug + skippedInvalid + skippedValidated + skippedBackoff,
+				ValidatedPairs:        validatedPairs,
+				FailedPairs:           failedPairs,
+				SkippedValidatedPairs: skippedValidated,
+			}
 		}
 
 		pair := spd.Pair
@@ -2979,10 +3015,8 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 
 		status := "Not Triggerable"
 		statusDetail := ""
-		if execRes.TriggeredCount >= 2 {
-			status = "Stable"
-		} else if execRes.TriggeredCount > 0 {
-			status = "Not Stable"
+		if execRes.TriggeredCount > 0 {
+			status = "Triggered"
 		} else if execRes.Crashed && execRes.CrashTitle != "" {
 			// Crash happened but target pair was not triggered - different race detected
 			statusDetail = " (crashed with different race, target pair not matched)"
@@ -3121,6 +3155,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 	if sm.varNameBackoffStore != nil {
 		total, highScore, verified := sm.varNameBackoffStore.Stats()
 		log.Logf(0, "uafvalidate: verification phase (with delays) complete, VarName backoff stats: total=%d high_score=%d verified=%d", total, highScore, verified)
+	}
+	return VerificationSummary{
+		ExecutedPairs:         executedPairs,
+		SkippedPairs:          skippedPairs,
+		ValidatedPairs:        validatedPairs,
+		FailedPairs:           failedPairs,
+		SkippedValidatedPairs: skippedValidated,
 	}
 }
 
