@@ -39,6 +39,23 @@ def deep_merge_dict(base: dict, override: dict) -> dict:
             merged[key] = value
     return merged
 
+
+EXPERIMENTAL_ALIASES = {
+    "uaf_mode": "race_mode",
+    "disable_uaf_validate_queue": "disable_race_validate_queue",
+    "skip_uaf_activation_restart": "skip_race_activation_restart",
+    "disable_uaf_history": "disable_race_history",
+}
+
+
+def normalize_experimental_aliases(exp: dict) -> None:
+    """Emit current race-mode keys even when old module overrides use uaf_* names."""
+    for old_key, new_key in EXPERIMENTAL_ALIASES.items():
+        if old_key not in exp:
+            continue
+        exp.setdefault(new_key, exp[old_key])
+        del exp[old_key]
+
 # ---------------------------------------------------------------------------
 # 路径常量
 # ---------------------------------------------------------------------------
@@ -90,8 +107,8 @@ VALIDATE_PORT_OFFSET = 100
 # Fuzz 模式的 experimental 默认配置
 # ---------------------------------------------------------------------------
 FUZZ_EXPERIMENTAL = {
-    "uaf_mode": True,
-    "disable_uaf_validate_queue": False,
+    "race_mode": True,
+    "disable_race_validate_queue": False,
     "barrier_mode": True,
     "barrier_procs": [0, 1],
     "history_buffer_size": 100,
@@ -127,7 +144,7 @@ VALIDATE_EXPERIMENTAL = {
     "skip_duplicate_data_races": True,
     "barrier_mode": True,
     "barrier_procs": [0, 1],
-    "uaf_mode": True,
+    "race_mode": True,
     "history_buffer_size": 100,
     "new_varname_pair_history": 100,
     "new_stack_history": 10,
@@ -330,6 +347,7 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
             # 使用默认 fuzz experimental，并允许模块 overrides 做增量覆盖。
             mod_exp = deep_merge_dict(common_exp, mode_exp)
             config["experimental"] = deep_merge_dict(FUZZ_EXPERIMENTAL, mod_exp)
+        normalize_experimental_aliases(config["experimental"])
 
     return config
 
@@ -370,9 +388,9 @@ ABLATION_VARIANTS = {
         "mode": "fuzz",
         "suffix": "-throughput",
         "overrides": {
-            "disable_uaf_validate_queue": True,
-            "skip_uaf_activation_restart": True,
-            "disable_uaf_history": True,
+            "disable_race_validate_queue": True,
+            "skip_race_activation_restart": True,
+            "disable_race_history": True,
             "enable_timing_exploration": False,
             "enable_solo_filter": False,
             "enable_coverage_triage": False,
@@ -454,6 +472,7 @@ def apply_ablation_overrides(config: dict, variant_name: str) -> dict:
                 exp["uaf_validate"][vk] = vv
         else:
             exp[key] = value
+    normalize_experimental_aliases(exp)
 
     return config
 

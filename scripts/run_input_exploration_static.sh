@@ -210,7 +210,7 @@ exp["dynamic_threshold_min_us"] = threshold_us
 exp["dynamic_threshold_max_us"] = threshold_us
 
 # Set all toggles explicitly so the saved config is self-describing.
-exp["uaf_mode"] = True
+exp["race_mode"] = True
 exp["random_baseline_mode"] = False
 exp["enable_timing_exploration"] = True
 exp["enable_object_linking"] = True
@@ -586,7 +586,7 @@ with open(src) as f:
     cfg = json.load(f)
 cfg["workdir"] = workdir
 exp = cfg.setdefault("experimental", {})
-exp["uaf_mode"] = False
+exp["race_mode"] = False
 exp["static_input_exploration"] = False
 exp["static_input_skip_builtin_seeds"] = True
 exp["enable_timing_exploration"] = False
@@ -643,7 +643,7 @@ with open(src) as f:
     cfg = json.load(f)
 cfg["workdir"] = workdir
 exp = cfg.setdefault("experimental", {})
-exp["uaf_mode"] = True
+exp["race_mode"] = True
 exp["static_input_exploration"] = False
 exp["static_input_skip_builtin_seeds"] = True
 exp["enable_timing_exploration"] = False

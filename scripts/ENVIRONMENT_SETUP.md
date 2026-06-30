@@ -360,7 +360,7 @@ python3 scripts/generate_config.py --list
   },
   "experimental": {
     "barrier_mode": true,
-    "uaf_mode": true,
+    "race_mode": true,
     "enable_timing_exploration": false,
     "enable_solo_filter": false,
     "enable_coverage_triage": false,

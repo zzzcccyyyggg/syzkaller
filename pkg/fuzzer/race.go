@@ -228,13 +228,13 @@ func newUAFCorpus(maxStacksPerVarName int) *uafCorpus {
 		varnamesFromFuzz:    make(map[uint64]struct{}),
 		varnamesFromTiming:  make(map[uint64]struct{}),
 	}
-	uc.statSeeds = stat.New("uaf corpus", "Number of UAF seeds managed by the fuzzer (total)",
+	uc.statSeeds = stat.New("uaf corpus", "Number of race seeds managed by the fuzzer (legacy stat name)",
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
 			return len(uc.seeds)
 		})
-	uc.statSeedsWithHist = stat.New("uaf corpus with history", "Number of UAF seeds with replay history",
+	uc.statSeedsWithHist = stat.New("uaf corpus with history", "Number of race seeds with replay history (legacy stat name)",
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
@@ -246,13 +246,13 @@ func newUAFCorpus(maxStacksPerVarName int) *uafCorpus {
 			}
 			return count
 		})
-	uc.statCover = stat.New("uaf coverage", "Source coverage attributed to UAF seeds",
+	uc.statCover = stat.New("uaf coverage", "Source coverage attributed to race seeds (legacy stat name)",
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
 			return len(uc.coverage)
 		})
-	uc.statPairs = stat.New("uaf pairs", "Unique May-UAF pairs discovered",
+	uc.statPairs = stat.New("uaf pairs", "Unique May-Race Pairs discovered (legacy stat name)",
 		stat.Console, stat.Graph("uaf"), func() int {
 			uc.mu.RLock()
 			defer uc.mu.RUnlock()
@@ -382,7 +382,7 @@ func (uc *uafCorpus) recordCoverage(info *flatrpc.ProgInfo) {
 	}
 	raw := collectAllCoverage(info)
 	if len(raw) == 0 {
-		// log.Logf(0, "uaf: recording coverage of size %d from execution", len(raw))
+		// log.Logf(0, "race: recording coverage of size %d from execution", len(raw))
 		return
 	}
 	uc.mu.Lock()
@@ -451,7 +451,7 @@ func (u *uafMode) tryPersistSeed(seed *barrierSeed) {
 		return
 	}
 	if err := u.fuzzer.Config.PersistUAFCorpusEntry(seed.entry); err != nil {
-		u.fuzzer.Logf(0, "uaf: immediate persist failed for seed %016x: %v", seed.entry.PairID(), err)
+		u.fuzzer.Logf(0, "race: immediate persist failed for seed %016x: %v", seed.entry.PairID(), err)
 		return
 	}
 	seed.synced = true
@@ -504,7 +504,7 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 	// NOTE: M2 race yield recording is handled by processCrossProgramPairs in job.go
 	// to avoid double-recording which causes pairs to be filtered out.
 
-	// Create UAF corpus entry with both programs
+	// Create race corpus entry with both programs.
 	programs := []*prog.Prog{prog1.Clone(), prog2.Clone()}
 	barrier := buildBarrierSnapshot(req, res)
 	plan := snapshotReplayPlan(req)
@@ -614,7 +614,7 @@ func (u *uafMode) determineHistoryCount(pairs []*ddrd.MayUAFPair) int {
 		newStackHistory = DefaultNewStackHistory
 	}
 
-	// Default: at least 1 history record for any UAF corpus entry with pairs
+	// Default: at least 1 history record for any race corpus entry with pairs.
 	// This ensures replay is possible even for known pairs
 	maxCount := 1
 	if len(u.timingExplorationCandidates(pairs)) > 0 {
@@ -677,7 +677,7 @@ func (u *uafMode) handleCoverage(req *queue.Request, res *queue.Result, triage m
 	u.mu.Unlock()
 
 	u.enqueueSeed(seed)
-	// u.fuzzer.Logf(0, "uaf: queued coverage seed %s (total=%d)", key, u.count())
+	// u.fuzzer.Logf(0, "race: queued coverage seed %s (total=%d)", key, u.count())
 }
 
 func (u *uafMode) recordExecution(req *queue.Request, res *queue.Result) cover.Cover {
@@ -757,7 +757,7 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 	entry, err := seed.materializeEntry(u.fuzzer.target)
 	if err != nil {
 		if u.fuzzer != nil {
-			u.fuzzer.Logf(0, "uaf: failed to materialize seed entry: %v", err)
+			u.fuzzer.Logf(0, "race: failed to materialize seed entry: %v", err)
 		}
 		return
 	}
@@ -796,7 +796,7 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 		plan := entry.ReplayPlan
 		if !plan.IsZero() {
 			if err := req.SetBarrierStartDelays(plan.DelaysMicros); err != nil {
-				u.fuzzer.Logf(0, "uaf: failed to set barrier delays for seed: %v", err)
+				u.fuzzer.Logf(0, "race: failed to set barrier delays for seed: %v", err)
 			}
 		}
 	}
@@ -827,7 +827,7 @@ func (u *uafMode) pendingEntries() []*UAFCorpusEntry {
 		entry, err := seed.materializeEntry(target)
 		if err != nil || entry == nil {
 			if err != nil && u.fuzzer != nil {
-				u.fuzzer.Logf(0, "uaf: failed to materialize pending seed: %v", err)
+				u.fuzzer.Logf(0, "race: failed to materialize pending seed: %v", err)
 			}
 			continue
 		}
@@ -857,7 +857,7 @@ func (u *uafMode) restore(entries []*UAFCorpusEntry) int {
 		if _, exists := u.entries[key]; exists {
 			continue
 		}
-		// u.fuzzer.Logf(0, "uaf: restoring pair id=%016x free_access=0x%016x use_access=0x%016x free_sn=%d use_sn=%d lock_type=%d access_type=%d",
+		// u.fuzzer.Logf(0, "race: restoring pair id=%016x free_access=0x%016x use_access=0x%016x free_sn=%d use_sn=%d lock_type=%d access_type=%d",
 		// 	id,
 		// 	entry.PairBasicInfo.FreeAccessName,
 		// 	entry.PairBasicInfo.UseAccessName,

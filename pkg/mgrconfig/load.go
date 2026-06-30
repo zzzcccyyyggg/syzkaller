@@ -197,6 +197,7 @@ func Complete(cfg *Config) error {
 	if cfg.FuzzingVMs < 0 {
 		return fmt.Errorf("fuzzing_vms cannot be less than 0")
 	}
+	cfg.normalizeRaceModeAliases()
 
 	var err error
 	cfg.Syscalls, err = ParseEnabledSyscalls(cfg.Target, cfg.EnabledSyscalls, cfg.DisabledSyscalls,
@@ -254,12 +255,35 @@ func (cfg *Config) completeServices() error {
 	return nil
 }
 
-func (cfg *Config) initBarrierMask() error {
-	if cfg.Experimental.StaticInputExploration && !cfg.Experimental.UAFMode {
-		return fmt.Errorf("experimental.static_input_exploration requires uaf_mode to be enabled")
+func (cfg *Config) normalizeRaceModeAliases() {
+	if cfg == nil {
+		return
 	}
-	if cfg.Experimental.UAFMode && !cfg.Experimental.BarrierMode {
-		return fmt.Errorf("experimental.uaf_mode requires barrier_mode to be enabled")
+	exp := &cfg.Experimental
+	if exp.RaceMode || exp.UAFMode {
+		exp.RaceMode = true
+		exp.UAFMode = true
+	}
+	if exp.DisableRaceValidateQueue || exp.DisableUAFValidateQueue {
+		exp.DisableRaceValidateQueue = true
+		exp.DisableUAFValidateQueue = true
+	}
+	if exp.SkipRaceActivationRestart || exp.SkipUAFActivationRestart {
+		exp.SkipRaceActivationRestart = true
+		exp.SkipUAFActivationRestart = true
+	}
+	if exp.DisableRaceHistory || exp.DisableUAFHistory {
+		exp.DisableRaceHistory = true
+		exp.DisableUAFHistory = true
+	}
+}
+
+func (cfg *Config) initBarrierMask() error {
+	if cfg.Experimental.StaticInputExploration && !cfg.Experimental.RaceMode {
+		return fmt.Errorf("experimental.static_input_exploration requires race_mode to be enabled")
+	}
+	if cfg.Experimental.RaceMode && !cfg.Experimental.BarrierMode {
+		return fmt.Errorf("experimental.race_mode requires barrier_mode to be enabled")
 	}
 	if !cfg.Experimental.BarrierMode {
 		cfg.BarrierMask = 0

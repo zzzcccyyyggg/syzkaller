@@ -57,58 +57,58 @@
 
 **示例**：`"barrier_procs": [0, 1]` → proc 0 和 proc 1 参与 barrier 执行
 
-### `uaf_mode`
+### `race_mode`
 
 | 属性 | 值 |
 |------|-----|
 | **类型** | `bool` |
 | **默认值** | `false` |
-| **JSON key** | `"uaf_mode"` |
+| **JSON key** | `"race_mode"` |
 
-启用 UAF（Use-After-Free）导向的 fuzzing 模式。
+启用 DDRD race/barrier fuzzing 模式。旧配置名 `uaf_mode` 仍然兼容，但只作为历史别名保留；论文主线建议统一使用 `race_mode`。
 
 **前置条件**：`barrier_mode` 必须为 `true`
 
 **行为**：
-- 激活 UAF corpus 管理（收集、存储 DDRD 发现的 race pair）
+- 激活 race corpus 管理（收集、存储 DDRD 发现的 race pair）
 - 通过 barrier 执行收集 MRP；legacy solo filter 由 `enable_solo_filter` 单独控制，论文主线默认关闭
 - 禁用 smash/hints/fault injection job，避免干扰 barrier 同步
 - 开启 race-guided 选择框架（M1'/M2 等策略受其他开关控制）
 
-### `disable_uaf_validate_queue`
+### `disable_race_validate_queue`
 
 | 属性 | 值 |
 |------|-----|
 | **类型** | `bool` |
 | **默认值** | `false` |
-| **JSON key** | `"disable_uaf_validate_queue"` |
+| **JSON key** | `"disable_race_validate_queue"` |
 
-在 fuzzing-only 运行中关闭持久化 UAF validate queue 和 race-pair index。该开关只影响 manager 是否额外维护验证队列，不影响 executor 收集 MRP，也不影响 UAF corpus 持久化。
+在 fuzzing-only 运行中关闭持久化 race validate queue 和 race-pair index。旧配置名 `disable_uaf_validate_queue` 仍然兼容。该开关只影响 manager 是否额外维护验证队列，不影响 executor 收集 MRP，也不影响 race corpus 持久化。
 
 **适用场景**：
 - throughput 对比实验：设为 `true`，避免把调度/验证消费者队列成本混入 fuzzing 生产者吞吐
 - 推荐用 `python3 scripts/generate_config.py --throughput-only ...` 生成 `fuzz-throughput.cfg`
 - fuzz+validate 联动实验：保持 `false`，或在配置了 `uaf_validate` 时由 validate 模式自动启用队列
 
-### `skip_uaf_activation_restart`
+### `skip_race_activation_restart`
 
 | 属性 | 值 |
 |------|-----|
 | **类型** | `bool` |
 | **默认值** | `false` |
-| **JSON key** | `"skip_uaf_activation_restart"` |
+| **JSON key** | `"skip_race_activation_restart"` |
 
-跳过 corpus candidate triage 切入 DDRD race fuzzing 时的全 VM 重启。该重启有利于 validation/replay 前获得更干净的内核状态，但 throughput-only 对比会把这次冷启动成本计入 fuzzing 生产者，因此 `fuzz-throughput.cfg` 默认设为 `true`。
+跳过 corpus candidate triage 切入 DDRD race fuzzing 时的全 VM 重启。旧配置名 `skip_uaf_activation_restart` 仍然兼容。该重启有利于 validation/replay 前获得更干净的内核状态，但 throughput-only 对比会把这次冷启动成本计入 fuzzing 生产者，因此 `fuzz-throughput.cfg` 默认设为 `true`。
 
-### `disable_uaf_history`
+### `disable_race_history`
 
 | 属性 | 值 |
 |------|-----|
 | **类型** | `bool` |
 | **默认值** | `false` |
-| **JSON key** | `"disable_uaf_history"` |
+| **JSON key** | `"disable_race_history"` |
 
-关闭每次 barrier 执行后的 per-VM replay history 记录。默认路径会 clone 最近的 program group，用于后续 validate 生命周期回放；throughput-only 对比不消费这部分 replay history，可设为 `true` 降低热路径 program clone 和 ring-buffer 写入成本。
+关闭每次 barrier 执行后的 per-VM replay history 记录。旧配置名 `disable_uaf_history` 仍然兼容。默认路径会 clone 最近的 program group，用于后续 validate 生命周期回放；throughput-only 对比不消费这部分 replay history，可设为 `true` 降低热路径 program clone 和 ring-buffer 写入成本。
 
 ### `ddrd_monitor`
 
@@ -205,7 +205,7 @@ data race 签名缓存的最大条目数。超出时丢弃旧条目。
 每个 VarName pair 最多跟踪的唯一 stack 组合数。达到限制后，该 VarName pair 的新 stack 组合将被忽略。
 
 **双层作用**：
-1. **uafCorpus 层**（默认 20）：控制保存到 UAF corpus 的条目数
+1. **race corpus 层**（默认 20）：控制保存到 race corpus 的条目数
 2. **VarNamePairRegistry 层**（默认 100，内部常量）：控制 race_group 中 timing exploration 和 bandit 的 stack 跟踪数
 
 > 此配置项同时覆盖两个层级的限制值。
@@ -503,7 +503,7 @@ delay 变异策略，控制如何生成 `syz_delay()` 调用。
 
 ## 6. UAF Validate 验证管线配置
 
-验证管线在 `experimental.uaf_validate` 节下配置，用于重放和验证 UAF corpus 中的候选 pair。
+验证管线在 `experimental.uaf_validate` 节下配置，用于重放和验证 race corpus 中的候选 pair。`uaf_validate` 是历史配置名，本轮仅整理 fuzzing 侧命名。
 
 > 详细说明参见 [uaf_validate_config.md](uaf_validate_config.md) 和 [uaf_validate_mode.md](uaf_validate_mode.md)
 
@@ -619,7 +619,7 @@ delay 变异策略，控制如何生成 `syz_delay()` 调用。
 ### 依赖关系
 
 ```
-uaf_mode = true  ──requires──▶  barrier_mode = true  ──requires──▶  barrier_procs (≥2)
+race_mode = true  ──requires──▶  barrier_mode = true  ──requires──▶  barrier_procs (≥2)
 ```
 
 ### 覆盖关系
@@ -651,14 +651,14 @@ random_baseline_mode = true
 
 ## 8. 完整配置示例
 
-### 最小 UAF Fuzzing 配置
+### 最小 Race Fuzzing 配置
 
 ```json
 {
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true
+    "race_mode": true
   }
 }
 ```
@@ -670,8 +670,8 @@ random_baseline_mode = true
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true,
-    "disable_uaf_validate_queue": false,
+    "race_mode": true,
+    "disable_race_validate_queue": false,
     "enable_timing_exploration": false,
     "enable_solo_filter": false,
     "enable_coverage_triage": false,
@@ -695,7 +695,7 @@ random_baseline_mode = true
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true,
+    "race_mode": true,
     "enable_timing_exploration": true,
     "timing_exploration_ratio": 0.1,
     "timing_exploration_queue_size": 500,
@@ -722,7 +722,7 @@ random_baseline_mode = true
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true,
+    "race_mode": true,
     "random_baseline_mode": true,
     "enable_timing_exploration": false,
     "timing_exploration_ratio": 0.1,
@@ -739,7 +739,7 @@ random_baseline_mode = true
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true,
+    "race_mode": true,
     "uaf_validate": {
       "max_concurrent": 4,
       "timeout_seconds": 120,
@@ -764,7 +764,7 @@ random_baseline_mode = true
   "experimental": {
     "barrier_mode": true,
     "barrier_procs": [0, 1],
-    "uaf_mode": true,
+    "race_mode": true,
     "uaf_validate": {
       "max_concurrent": 8,
       "continuous_mode": true,

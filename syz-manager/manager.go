@@ -369,7 +369,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	if cfg.Experimental.SkipDuplicateDataRaces {
 		mgr.reportedDataRaceCombinations = make(map[string]struct{})
 	}
-	if cfg.Experimental.UAFMode || cfg.Experimental.UAFValidate != nil {
+	if cfg.Experimental.RaceMode || cfg.Experimental.UAFValidate != nil {
 		// In streaming_load mode for uaf-validate, skip loading the full database at startup
 		// The streaming reader will load entries directly from the file later
 		validateCfg := cfg.Experimental.UAFValidate
@@ -394,7 +394,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 		}
 
 		enableValidateQueue := cfg.Experimental.UAFValidate != nil ||
-			(cfg.Experimental.UAFMode && !cfg.Experimental.DisableUAFValidateQueue)
+			(cfg.Experimental.RaceMode && !cfg.Experimental.DisableRaceValidateQueue)
 		if enableValidateQueue {
 			queueStore, err := manager.NewUAFValidateQueueStore(mgr.uafSharedWorkdir, cfg.Target)
 			if err != nil {
@@ -419,7 +419,7 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 			}()
 			mgr.logRaceValidationStorageState("startup")
 		} else {
-			log.Logf(0, "uaf validation queue: disabled for fuzzing-only run")
+			log.Logf(0, "race validation queue: disabled for fuzzing-only run")
 		}
 	}
 	if *flagDebug {
@@ -1399,13 +1399,13 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				return !mgr.saturatedCalls[call]
 			},
 			ModeKFuzzTest:                mgr.cfg.Experimental.EnableKFuzzTest,
-			ModeUAF:                      mgr.cfg.Experimental.UAFMode && mgr.mode != ModeStaticCorpusPrepare,
+			ModeUAF:                      mgr.cfg.Experimental.RaceMode && mgr.mode != ModeStaticCorpusPrepare,
 			BarrierMode:                  mgr.cfg.Experimental.BarrierMode,
 			BarrierMask:                  mgr.cfg.BarrierMask,
 			ThreadBarrier:                mgr.cfg.Experimental.ThreadBarrier,
 			ThreadBarrierRatio:           mgr.cfg.Experimental.ThreadBarrierRatio,
 			HistoryBufferSize:            mgr.cfg.Experimental.HistoryBufferSize,
-			DisableUAFHistory:            mgr.cfg.Experimental.DisableUAFHistory,
+			DisableUAFHistory:            mgr.cfg.Experimental.DisableRaceHistory,
 			NewVarNamePairHistory:        mgr.cfg.Experimental.NewVarNamePairHistory,
 			NewStackHistory:              mgr.cfg.Experimental.NewStackHistory,
 			MaxStacksPerVarNamePair:      mgr.cfg.Experimental.MaxStacksPerVarNamePair,
@@ -1454,7 +1454,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 				return nil, fmt.Errorf("static_input_exploration requires a non-empty loaded corpus")
 			}
 			if fuzzerObj.ActivateUAFMode() {
-				log.Logf(0, "uaf: static input exploration enabled; skipping startup candidate triage")
+				log.Logf(0, "race: static input exploration enabled; skipping startup candidate triage")
 			}
 			mgr.enqueueLLMInputSeeds(fuzzerObj)
 			mgr.startLLMInputSeedWatcher(fuzzerObj)
@@ -1772,16 +1772,16 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 			}
 		}
 
-		if mgr.cfg.Experimental.UAFMode && mgr.uafStore != nil {
+		if mgr.cfg.Experimental.RaceMode && mgr.uafStore != nil {
 			entries := fuzzer.PendingUAFCorpusEntries()
 			if len(entries) != 0 {
 				added, queued, err := mgr.persistUAFCorpusEntries(entries)
 				if err != nil {
-					log.Errorf("uaf persistence failed: %v", err)
+					log.Errorf("race persistence failed: %v", err)
 				} else if added != 0 {
-					log.Logf(1, "uaf corpus: stored %d new entries (total=%d)", added, mgr.uafStore.Count())
+					log.Logf(1, "race corpus: stored %d new entries (total=%d)", added, mgr.uafStore.Count())
 					if queued != 0 {
-						log.Logf(1, "uaf validate queue: enqueued %d entries (pending=%d)", queued, mgr.uafValidateQueue.Count())
+						log.Logf(1, "race validate queue: enqueued %d entries (pending=%d)", queued, mgr.uafValidateQueue.Count())
 					}
 				}
 			}
@@ -1790,12 +1790,12 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 		// Update the state machine.
 		if fuzzer.CandidateTriageFinished() {
 			if fuzzer.ActivateUAFMode() {
-				// Restart all VMs to ensure clean kernel state for UAF mode.
+				// Restart all VMs to ensure clean kernel state for race mode.
 				// This is important because corpus triage may have polluted the kernel state.
-				if mgr.cfg.Experimental.SkipUAFActivationRestart {
-					log.Logf(0, "uaf: skipping activation VM restart (skip_uaf_activation_restart=true)")
+				if mgr.cfg.Experimental.SkipRaceActivationRestart {
+					log.Logf(0, "race: skipping activation VM restart (skip_race_activation_restart=true)")
 				} else if mgr.pool != nil {
-					log.Logf(0, "uaf: restarting all VMs for clean kernel state")
+					log.Logf(0, "race: restarting all VMs for clean kernel state")
 					mgr.pool.RestartAll()
 				}
 			}
@@ -1929,7 +1929,7 @@ func (mgr *Manager) persistUAFCorpusEntries(entries []*fuzzer.UAFCorpusEntry) (i
 }
 
 func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
-	if !mgr.cfg.Experimental.UAFMode || mgr.uafStore == nil || fuzzerObj == nil {
+	if !mgr.cfg.Experimental.RaceMode || mgr.uafStore == nil || fuzzerObj == nil {
 		return
 	}
 	const batchSize = 64
@@ -1941,12 +1941,12 @@ func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
 		queued := fuzzerObj.EnqueueUAFCorpus(entries)
 		totalQueued += queued
 		if queued != 0 {
-			log.Logf(1, "uaf corpus: queued %d persisted entries in batch (total=%d)", queued, totalQueued)
+			log.Logf(1, "race corpus: queued %d persisted entries in batch (total=%d)", queued, totalQueued)
 		}
 		return true
 	})
 	if err != nil {
-		log.Errorf("uaf corpus streaming load failed: %v", err)
+		log.Errorf("race corpus streaming load failed: %v", err)
 		return
 	}
 }

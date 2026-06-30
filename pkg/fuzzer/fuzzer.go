@@ -612,7 +612,7 @@ type Config struct {
 	BarrierMask           uint64
 	ThreadBarrier         bool    // Enable thread-barrier mode (intra-object race detection)
 	ThreadBarrierRatio    float64 // Fraction of barrier executions using thread-barrier (default: 0.2)
-	// History buffer configuration for UAF mode
+	// History buffer configuration for race mode.
 	HistoryBufferSize            int // Size of per-VM history buffer (default: 1000)
 	DisableUAFHistory            bool
 	NewVarNamePairHistory        int // Records to save for new VarName pair (default: 1000)
@@ -623,7 +623,7 @@ type Config struct {
 	// A/B Testing
 	RandomBaselineMode bool // Baseline marker; forces timing exploration off but keeps other mechanisms intact
 
-	// StaticInputExploration makes UAF input exploration sample concurrent program
+	// StaticInputExploration makes race input exploration sample concurrent program
 	// groups from a frozen loaded-corpus pool. Normal syzkaller mutation/generation
 	// is left unchanged unless this mode is explicitly enabled.
 	StaticInputExploration bool
@@ -662,12 +662,12 @@ type Config struct {
 	// when selecting a guided partner from the frozen/static input pool.
 	StateScopePartnerSamples int
 
-	// EnableCoverageTriage controls pair-level coverage triage jobs in UAF mode.
+	// EnableCoverageTriage controls pair-level coverage triage jobs in race mode.
 	// Nil keeps the paper/default path disabled.
 	EnableCoverageTriage *bool
-	// EnableSoloFilter controls the legacy solo re-execution filter in UAF mode.
+	// EnableSoloFilter controls the legacy solo re-execution filter in race mode.
 	EnableSoloFilter bool
-	// EnableAffinityTable controls the legacy syscall affinity table in UAF mode.
+	// EnableAffinityTable controls the legacy syscall affinity table in race mode.
 	// Nil enables it only when a legacy producer (solo filter or coverage triage) is enabled.
 	EnableAffinityTable *bool
 
@@ -1200,7 +1200,7 @@ func (fuzzer *Fuzzer) processTimingExplorationResult(req *queue.Request, res *qu
 			// NOTE: Do NOT save to normal corpus here.
 			// Programs with syz_delay calls would pollute normal corpus and waste
 			// execution time on usleep during regular fuzzing mutations.
-			// The full program group is saved to UAF corpus via
+			// The full program group is saved to the race corpus via
 			// handleDiscoveredBarrierPairs, which preserves Programs,
 			// ReplayPlan.DelaysMicros, Pairs, and ReplayHistory.
 
@@ -1806,24 +1806,24 @@ func (fuzzer *Fuzzer) EnqueueBarrierProgramGroups(groups [][]*prog.Prog) int {
 
 func (fuzzer *Fuzzer) ActivateUAFMode() bool {
 	if fuzzer == nil || fuzzer.uaf == nil {
-		log.Logf(2, "[DEBUG-UAF] ActivateUAFMode: fuzzer or uaf is nil")
+		log.Logf(2, "[DEBUG-RACE] ActivateUAFMode: fuzzer or race state is nil")
 		return false
 	}
 	if !fuzzer.uafBootstrapDone.CompareAndSwap(false, true) {
-		log.Logf(2, "[DEBUG-UAF] ActivateUAFMode: already activated")
+		log.Logf(2, "[DEBUG-RACE] ActivateUAFMode: already activated")
 		return false
 	}
-	log.Logf(1, "[DEBUG-UAF] ActivateUAFMode: enabling barrier fuzzing, corpus=%d", len(fuzzer.Config.Corpus.Programs()))
+	log.Logf(1, "[DEBUG-RACE] ActivateUAFMode: enabling barrier fuzzing, corpus=%d", len(fuzzer.Config.Corpus.Programs()))
 	if fuzzer.Config.StaticInputExploration {
-		fuzzer.Logf(1, "uaf: enabling barrier fuzzing with static input exploration")
+		fuzzer.Logf(1, "race: enabling barrier fuzzing with static input exploration")
 	} else {
-		fuzzer.Logf(1, "uaf: enabling barrier fuzzing after corpus triage")
+		fuzzer.Logf(1, "race: enabling barrier fuzzing after corpus triage")
 	}
-	// Clear all history buffers to ensure replay history only contains UAF-mode executions.
+	// Clear all history buffers to ensure replay history only contains race-mode executions.
 	// Executions during corpus triage phase should not be included in replay history.
 	if fuzzer.uaf.historyBuffer != nil {
 		fuzzer.uaf.historyBuffer.ClearAll()
-		fuzzer.Logf(0, "uaf: cleared all VM history buffers on UAF mode activation")
+		fuzzer.Logf(0, "race: cleared all VM history buffers on race mode activation")
 	}
 	return true
 }

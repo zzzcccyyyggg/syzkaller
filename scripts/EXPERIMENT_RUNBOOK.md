@@ -770,8 +770,8 @@ sudo scripts/run_experiment.sh start --all
 ### Fuzz 侧
 | 开关 | 位置 | 默认 | 作用 |
 |------|------|------|------|
-| `uaf_mode` | experimental | true | 启用 DDRD race 检测 |
-| `disable_uaf_validate_queue` | experimental | false | fuzz+validate 联动保持 false；throughput-only 对比可设 true |
+| `race_mode` | experimental | true | 启用 DDRD race 检测；旧 `uaf_mode` 仍兼容 |
+| `disable_race_validate_queue` | experimental | false | fuzz+validate 联动保持 false；throughput-only 对比可设 true |
 | `barrier_mode` | experimental | true | 启用 barrier 同步执行 |
 | `enable_timing_exploration` | experimental | false | legacy pair-guided 时序探索，主实验关闭 |
 | `enable_solo_filter` | experimental | false | legacy solo re-execution 过滤，主实验关闭 |

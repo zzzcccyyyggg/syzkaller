@@ -221,7 +221,7 @@ def update_fuzz_config(
     cfg.setdefault("vm", {})["kernel"] = str(kernel_dir / "bzImage")
     cfg["vm"]["count"] = 4
     exp = cfg.setdefault("experimental", {})
-    exp["uaf_mode"] = True
+    exp["race_mode"] = True
     exp["barrier_mode"] = True
     exp["barrier_procs"] = [0, 1]
     exp["history_buffer_size"] = 100
@@ -273,7 +273,7 @@ def update_validate_config(
     cfg["vm"]["count"] = 8
     exp = cfg.setdefault("experimental", {})
     exp["skip_duplicate_data_races"] = True
-    exp["uaf_mode"] = True
+    exp["race_mode"] = True
     exp["barrier_mode"] = True
     exp["barrier_procs"] = [0, 1]
     exp["history_buffer_size"] = 100

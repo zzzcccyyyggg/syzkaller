@@ -40,7 +40,7 @@ sudo ./bin/syz-manager --config=./test/DDRD/your-config.cfg
     "experimental": {
         "barrier_mode": true,
         "barrier_procs": [0, 1],
-        "uaf_mode": true,
+        "race_mode": true,
         "uaf_validate": {
             "max_concurrent": 4,
             "delay_retry_budget": 2,
@@ -57,8 +57,8 @@ sudo ./bin/syz-manager --config=./test/DDRD/your-config.cfg
 |------|------|
 | `barrier_mode` | 启用 barrier 同步执行模式 |
 | `barrier_procs` | 参与 barrier 的 proc 列表 |
-| `uaf_mode` | 启用 UAF 检测 |
-| `uaf_validate` | 验证阶段配置 |
+| `race_mode` | 启用 DDRD race 检测；旧 `uaf_mode` 仍兼容 |
+| `uaf_validate` | 验证阶段配置，历史命名暂保留 |
 
 ### 输出文件
 

@@ -276,22 +276,39 @@ type Experimental struct {
 	ThreadBarrier      bool    `json:"thread_barrier"`
 	ThreadBarrierRatio float64 `json:"thread_barrier_ratio,omitempty"`
 
-	// Enable the UAF-focused fuzzing mode that prioritizes DDRD results.
-	UAFMode bool `json:"uaf_mode"`
+	// Enable the DDRD race/barrier fuzzing mode that prioritizes MRP results.
+	RaceMode bool `json:"race_mode,omitempty"`
+	// UAFMode is the legacy JSON spelling for RaceMode.
+	// Deprecated: use race_mode.
+	UAFMode bool `json:"uaf_mode,omitempty"`
 
-	// Configure the UAF validation pipeline.
+	// Configure the race validation pipeline.
 	UAFValidate *UAFValidateConfig `json:"uaf_validate,omitempty"`
+	// DisableRaceValidateQueue keeps fuzzing from maintaining the persistent
+	// validation queue/pair-index when no uaf_validate consumer is configured.
+	DisableRaceValidateQueue bool `json:"disable_race_validate_queue,omitempty"`
 	// DisableUAFValidateQueue keeps fuzzing from maintaining the persistent
 	// validation queue/pair-index when no uaf_validate consumer is configured.
 	// uaf_validate mode always enables the queue because it is the consumer input.
+	// Deprecated: use disable_race_validate_queue.
 	DisableUAFValidateQueue bool `json:"disable_uaf_validate_queue,omitempty"`
+	// SkipRaceActivationRestart avoids restarting all VMs when startup candidate
+	// triage hands off to DDRD race fuzzing. This is intended for throughput-only
+	// runs that do not consume clean validation state.
+	SkipRaceActivationRestart bool `json:"skip_race_activation_restart,omitempty"`
 	// SkipUAFActivationRestart avoids restarting all VMs when startup candidate
 	// triage hands off to DDRD race fuzzing. This is intended for throughput-only
 	// runs that do not consume clean validation state.
+	// Deprecated: use skip_race_activation_restart.
 	SkipUAFActivationRestart bool `json:"skip_uaf_activation_restart,omitempty"`
+	// DisableRaceHistory disables per-VM replay-history recording for discovered
+	// race pairs. It removes hot-path program cloning when validation replay
+	// history is not part of the experiment.
+	DisableRaceHistory bool `json:"disable_race_history,omitempty"`
 	// DisableUAFHistory disables per-VM replay-history recording for discovered
 	// race pairs. It removes hot-path program cloning when validation replay
 	// history is not part of the experiment.
+	// Deprecated: use disable_race_history.
 	DisableUAFHistory bool `json:"disable_uaf_history,omitempty"`
 
 	// Skip duplicate data race reports once they've been observed.
@@ -346,25 +363,25 @@ type Experimental struct {
 	// Deprecated: NoDiscoveryPenalty is no longer used (M1'/M2 removed). Kept for config compatibility.
 	NoDiscoveryPenalty int `json:"no_discovery_penalty,omitempty"`
 
-	// EnableSoloFilter controls the legacy solo re-execution filter in UAF mode.
+	// EnableSoloFilter controls the legacy solo re-execution filter in race mode.
 	// When enabled, every newly discovered barrier pair is followed by two solo
 	// DDRD executions to filter out intra-program pairs before persistence.
 	// Defaults to false; MRPFuzz's paper path treats May-Race Pairs as the
 	// discovery artifact and leaves confirmation to the validation phase.
 	EnableSoloFilter bool `json:"enable_solo_filter,omitempty"`
-	// EnableCoverageTriage controls legacy pair-level coverage triage jobs in UAF mode.
+	// EnableCoverageTriage controls legacy pair-level coverage triage jobs in race mode.
 	// Defaults to false when unset. Set to true only for legacy feedback
 	// experiments that intentionally pay extra solo-execution cost.
 	EnableCoverageTriage *bool `json:"enable_coverage_triage,omitempty"`
-	// EnableAffinityTable controls the legacy syscall affinity table in UAF mode.
+	// EnableAffinityTable controls the legacy syscall affinity table in race mode.
 	// Defaults to false in the paper path and is useful only when legacy solo
 	// filtering or coverage triage is explicitly enabled.
 	EnableAffinityTable *bool `json:"enable_affinity_table,omitempty"`
 
-	// StaticInputExploration makes UAF input exploration sample concurrent program
+	// StaticInputExploration makes race input exploration sample concurrent program
 	// groups from the loaded corpus/candidate pool directly. It skips startup
 	// candidate triage and disables normal single-program mutation/generation in
-	// the UAF exploration source.
+	// the race exploration source.
 	StaticInputExploration bool `json:"static_input_exploration,omitempty"`
 	// StaticInputSeed controls deterministic sampling from the static input pool.
 	// Zero uses a fixed default seed.
@@ -374,13 +391,13 @@ type Experimental struct {
 	// prepared shared corpus database.
 	StaticInputSkipBuiltinSeeds bool `json:"static_input_skip_builtin_seeds,omitempty"`
 	// LLMInputSeedDir is an offline-pilot hook: when set, syz-manager loads exact
-	// two-program groups from this directory and enqueues them as high-priority UAF
+	// two-program groups from this directory and enqueues them as high-priority race
 	// barrier requests after static input exploration is activated. Normal fuzzing
 	// is unchanged unless this field is explicitly configured.
 	LLMInputSeedDir string `json:"llm_input_seed_dir,omitempty"`
 	// LLMInputSeedPollSec enables continuous polling of LLMInputSeedDir for new
 	// parser-filtered seed groups. Zero preserves the offline-pilot behavior of
-	// loading the directory only once at UAF activation time.
+	// loading the directory only once at race activation time.
 	LLMInputSeedPollSec int `json:"llm_input_seed_poll_sec,omitempty"`
 	// LLMInputSeedMaxPerPoll limits how many new seed groups are enqueued during
 	// each poll. Zero means no explicit limit.
@@ -394,7 +411,7 @@ type Experimental struct {
 	// EnableObjectLinking enables resource-aware cross-syscall object linking (ObjectLinker V2).
 	// When disabled, concurrent program pairs will not have their object identifiers unified,
 	// which is useful for ablation experiments measuring the contribution of resource-aware
-	// program group generation. Defaults to true when uaf_mode is enabled.
+	// program group generation. Defaults to true when race_mode is enabled.
 	EnableObjectLinking *bool `json:"enable_object_linking,omitempty"`
 	// ObjectLinkAttemptRatio controls how often partner-program generation attempts
 	// ObjectLinker V2 when object linking is enabled. Values in (0,1] are honored;
