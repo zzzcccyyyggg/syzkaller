@@ -800,6 +800,9 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 			}
 		}
 	}
+	if req.Barrier && u.fuzzer != nil && u.fuzzer.Config.RaceExecOnly {
+		u.fuzzer.enableRaceExecCollection(req)
+	}
 	u.queue.Submit(req)
 	if seed.synced || !seed.syncable {
 		seed.releaseEntry()

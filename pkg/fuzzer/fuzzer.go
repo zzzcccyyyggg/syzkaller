@@ -107,6 +107,9 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 			cfg.EnableTimingExploration = false
 			log.Logf(0, "[RANDOM-BASELINE] Timing exploration DISABLED for baseline run")
 		}
+		if cfg.RaceExecOnly {
+			log.Logf(0, "[EXEC-ONLY] Race barrier execution keeps LOG_MODE tracing but skips pair analysis/output")
+		}
 		// EnableObjectLinking: default true, user can disable for ablation
 		if cfg.EnableObjectLinking != nil && !*cfg.EnableObjectLinking {
 			raceConfig.EnableObjectLinking = false
@@ -397,6 +400,9 @@ func (fuzzer *Fuzzer) executeWithFlags(executor queue.Executor, req *queue.Reque
 }
 
 func (fuzzer *Fuzzer) prepare(req *queue.Request, flags ProgFlags, attempt int) {
+	if req != nil && (flags&ProgBarrier != 0 || req.Barrier) {
+		fuzzer.enableRaceExecCollection(req)
+	}
 	req.OnDone(func(req *queue.Request, res *queue.Result) bool {
 		return fuzzer.processResult(req, res, flags, attempt)
 	})
@@ -490,7 +496,16 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 		fuzzer.uaf.clearVMHistory(res.Executor.VM)
 	}
 
-	if fuzzer.uaf != nil && flags == ProgBarrier {
+	if fuzzer.uaf != nil && flags&ProgBarrier != 0 {
+		if fuzzer.Config.RaceExecOnly {
+			newCover := fuzzer.uaf.recordExecution(req, res)
+			if len(newCover) > 0 && len(req.BarrierPrograms) >= 2 {
+				if fuzzer.Config.EnableCoverageTriage != nil && *fuzzer.Config.EnableCoverageTriage {
+					fuzzer.triggerCoverageTriage(req, res, newCover)
+				}
+			}
+			return true
+		}
 		// Check if this is a timing exploration result
 		isTimingExploration := req.IsTimingExploration && req.TimingExplorationInfo != nil
 		if isTimingExploration {
@@ -608,6 +623,7 @@ type Config struct {
 	PatchTest             bool
 	ModeKFuzzTest         bool
 	ModeUAF               bool
+	RaceExecOnly          bool
 	BarrierMode           bool
 	BarrierMask           uint64
 	ThreadBarrier         bool    // Enable thread-barrier mode (intra-object race detection)
@@ -956,7 +972,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 					req.ThreadBarrier = true
 					req.BarrierPrograms = programs
 					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
-					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+					fuzzer.enableRaceExecCollection(req)
 					req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 
 					flags := ProgFlags(ProgBarrier)
@@ -980,7 +996,7 @@ func (fuzzer *Fuzzer) genTimingExploration() *queue.Request {
 				}
 			}
 			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
-			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+			fuzzer.enableRaceExecCollection(req)
 			req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 		}
 	}
@@ -1295,7 +1311,7 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 			req.ThreadBarrier = true
 			req.BarrierPrograms = programs // Preserve for soloFilter
 			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagThreaded
-			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+			fuzzer.enableRaceExecCollection(req)
 			req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
 			fuzzer.Logf(2, "thread-barrier: merged %d+%d calls, async at [%d,%d]",
 				len(programs[0].Calls), len(programs[1].Calls), lastA, lastB)
@@ -1305,13 +1321,26 @@ func (fuzzer *Fuzzer) applyBarrier(req *queue.Request) {
 
 	// Default: multi-process barrier mode
 	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
-	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+	fuzzer.enableRaceExecCollection(req)
 	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 	req.ThreadBarrier = false
 	if err := req.SetBarrierPrograms(programs); err != nil {
 		fuzzer.Logf(0, "failed to assign barrier programs: %v", err)
 		req.SetBarrier(0)
 	}
+}
+
+func (fuzzer *Fuzzer) enableRaceExecCollection(req *queue.Request) {
+	if fuzzer == nil || fuzzer.Config == nil || req == nil {
+		return
+	}
+	if fuzzer.Config.RaceExecOnly {
+		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdUaf
+		req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdRace
+		return
+	}
+	req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+	req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdRace
 }
 
 func (fuzzer *Fuzzer) buildBarrierPrograms(req *queue.Request, mask uint64) []*prog.Prog {
@@ -1787,7 +1816,7 @@ func (fuzzer *Fuzzer) EnqueueBarrierProgramGroups(groups [][]*prog.Prog) int {
 		req.SetBarrier(mask)
 		req.ThreadBarrier = false
 		req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectCover
-		req.ExecOpts.ExecFlags |= flatrpc.ExecFlagCollectDdrdUaf
+		fuzzer.enableRaceExecCollection(req)
 		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagThreaded
 		fuzzer.applyNormalTimingThreshold(req)
 		if err := req.SetBarrierPrograms(programs); err != nil {

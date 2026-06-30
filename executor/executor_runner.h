@@ -845,6 +845,7 @@ public:
 	      available_(false),
 	      warned_unavailable_(false),
 	      extended_requested_(false),
+	      trace_only_requested_(false),
 	      active_for_group_(false),
 	      target_pair_active_(false),
 	      timing_threshold_us_(0)
@@ -861,11 +862,12 @@ public:
 	}
 
 	// Prepare DDRD for a barrier group execution
-	void PrepareForGroup(bool collect_uaf, bool collect_extended, const rpc::ExecRequestRawT* req)
+	void PrepareForGroup(bool collect_uaf, bool collect_extended, bool trace_only, const rpc::ExecRequestRawT* req)
 	{
 		ClearOutput();
 		active_for_group_ = false;
 		extended_requested_ = collect_extended;
+		trace_only_requested_ = trace_only && !collect_uaf && !collect_extended;
 		
 		// Store timing threshold from request (if provided)
 		// This allows timing exploration queue to use widened threshold
@@ -946,9 +948,9 @@ public:
 			target_pair_active_ = false;
 		}
 
-		if (!collect_uaf && !collect_extended) {
-			debug("ddrd: PrepareForGroup early return: no collection requested (collect_uaf=%d collect_extended=%d)\n",
-			      collect_uaf ? 1 : 0, collect_extended ? 1 : 0);
+		if (!collect_uaf && !collect_extended && !trace_only_requested_) {
+			debug("ddrd: PrepareForGroup early return: no collection requested (collect_uaf=%d collect_extended=%d trace_only=%d)\n",
+			      collect_uaf ? 1 : 0, collect_extended ? 1 : 0, trace_only_requested_ ? 1 : 0);
 			return;
 		}
 
@@ -974,11 +976,11 @@ public:
 
 		// Collection phase: use FINE_LOG_MODE for validation, normal LOG_MODE for regular fuzzing
 		// Verification phase (target pair set): mode already set above
-		if (collect_uaf || collect_extended) {
+		if (collect_uaf || collect_extended || trace_only_requested_) {
 			if (!set_pair) {
 				// Collection phase
-				debug("ddrd: PrepareForGroup collection phase: req=%p ukc_use_fine_mode=%d\n",
-				      req, req ? req->ukc_use_fine_mode : -1);
+				debug("ddrd: PrepareForGroup collection phase: req=%p ukc_use_fine_mode=%d trace_only=%d\n",
+				      req, req ? req->ukc_use_fine_mode : -1, trace_only_requested_ ? 1 : 0);
 				if (req && req->ukc_use_fine_mode) {
 					// Validation mode: use FINE_LOG_MODE
 					debug("ddrd: entering FINE_LOG_MODE for validation\n");
@@ -1017,11 +1019,19 @@ public:
 		if (!available_) {
 			ukc_enter_disable_mode();
 			active_for_group_ = false;
+			trace_only_requested_ = false;
 			return;
 		}
 
 		// Switch back to DISABLE mode after collecting
 		ukc_enter_disable_mode();
+		if (trace_only_requested_) {
+			debug("ddrd: exec-only trace collection complete; skipping pair analysis\n");
+			ClearOutput();
+			active_for_group_ = false;
+			trace_only_requested_ = false;
+			return;
+		}
 		debug("ddrd: collecting results\n");
 
 		// Build merged syscall context from all barrier members' shared memory
@@ -1081,6 +1091,7 @@ public:
 		if (count <= 0) {
 			ClearOutput();
 			active_for_group_ = false;
+			trace_only_requested_ = false;
 			return;
 		}
 
@@ -1136,6 +1147,7 @@ public:
 
 		output_.has_results = true;
 		active_for_group_ = false;
+		trace_only_requested_ = false;
 	}
 
 	// Get DDRD output to inject into master's ExecResult
@@ -1153,6 +1165,7 @@ public:
 	{
 		ClearOutput();
 		active_for_group_ = false;
+		trace_only_requested_ = false;
 		bool had_target_pair = target_pair_active_;
 		if (flag_debug) {
 			FILE* kmsg = fopen("/dev/kmsg", "w");
@@ -1267,6 +1280,7 @@ private:
 	bool available_;
 	bool warned_unavailable_;
 	bool extended_requested_;
+	bool trace_only_requested_;
 	bool active_for_group_;
 	bool target_pair_active_;
 	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 10ms)
@@ -1302,7 +1316,7 @@ public:
 	// Solo DDRD collection methods - called by Proc for non-barrier DDRD requests
 	void PrepareSoloDdrd(bool collect_uaf, bool collect_extended, const rpc::ExecRequestRawT* req)
 	{
-		ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, req);
+		ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, false, req);
 	}
 
 	void CollectSoloDdrd(Proc** procs, int count)
@@ -1378,7 +1392,7 @@ public:
 			p->SetSoloDdrdPrepareCallback([this](Proc* proc, const rpc::ExecRequestRawT* req) {
 				bool collect_extended = req && req->exec_opts &&
 					IsSet(req->exec_opts->exec_flags(), rpc::ExecFlag::CollectDdrdExtended);
-				ddrd_controller_.PrepareForGroup(true, collect_extended, req);
+				ddrd_controller_.PrepareForGroup(true, collect_extended, false, req);
 				debug("runner: prepared solo DDRD for proc slot %d req %llu\n",
 				      proc->Id(), req ? static_cast<uint64>(req->id) : 0);
 			});
@@ -1858,6 +1872,7 @@ private:
 #if GOOS_linux
 		// Check if any member requests DDRD and prepare
 		bool collect_uaf = false;
+		bool collect_race = false;
 		bool collect_extended = false;
 		bool has_ukc_pair = false;
 		const rpc::ExecRequestRawT* setup_req = nullptr;
@@ -1871,6 +1886,11 @@ private:
 					collect_uaf = true;
 					setup_req = &(*member);
 				}
+				if (IsSet(flags, rpc::ExecFlag::CollectDdrdRace)) {
+					collect_race = true;
+					if (!setup_req)
+						setup_req = &(*member);
+				}
 				if (IsSet(flags, rpc::ExecFlag::CollectDdrdExtended))
 					collect_extended = true;
 			}
@@ -1880,10 +1900,11 @@ private:
 					setup_req = &(*member);
 			}
 		}
-		if (collect_uaf || collect_extended || has_ukc_pair)
-			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended, setup_req);
-		group.ddrd_active = collect_uaf || collect_extended;
-		group.ukc_active = collect_uaf || collect_extended || has_ukc_pair;
+		if (collect_uaf || collect_race || collect_extended || has_ukc_pair)
+			ddrd_controller_.PrepareForGroup(collect_uaf, collect_extended,
+							 collect_race && !collect_uaf && !collect_extended, setup_req);
+		group.ddrd_active = collect_uaf || collect_race || collect_extended;
+		group.ukc_active = collect_uaf || collect_race || collect_extended || has_ukc_pair;
 #else
 		group.ddrd_active = false;
 		group.ukc_active = false;

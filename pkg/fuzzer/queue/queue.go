@@ -831,6 +831,10 @@ func (do *defaultOpts) Next() *Request {
 	// DisableDdrd的请求不应继承CollectDdrdUaf，防止与正在执行的Solo DDRD冲突
 	if req.DisableDdrd {
 		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdUaf
+		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdRace
+	}
+	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdRace != 0 {
+		req.ExecOpts.ExecFlags &^= flatrpc.ExecFlagCollectDdrdUaf
 	}
 	req.ExecOpts.EnvFlags |= do.opts.EnvFlags
 	req.ExecOpts.SandboxArg = do.opts.SandboxArg

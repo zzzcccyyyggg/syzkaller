@@ -278,6 +278,11 @@ type Experimental struct {
 
 	// Enable the DDRD race/barrier fuzzing mode that prioritizes MRP results.
 	RaceMode bool `json:"race_mode,omitempty"`
+	// RaceExecOnly keeps race/barrier execution and kernel LOG_MODE tracing
+	// enabled, but skips may-race pair analysis/output in the executor. This is
+	// intended for throughput experiments that measure instrumented exec cost
+	// separately from pair post-processing.
+	RaceExecOnly bool `json:"race_exec_only,omitempty"`
 	// UAFMode is the legacy JSON spelling for RaceMode.
 	// Deprecated: use race_mode.
 	UAFMode bool `json:"uaf_mode,omitempty"`
