@@ -63,7 +63,14 @@ SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
 PROJECT_HOME = os.path.dirname(SCRIPT_DIR)
 EXP_DIR = os.path.join(PROJECT_HOME, "exp")
 KERNEL_OUTPUT = os.path.join(PROJECT_HOME, "kernels", "output")
+KERNEL_BUILDS = os.path.join(PROJECT_HOME, "kernels", "builds")
 KERNEL_IMAGES = os.path.join(PROJECT_HOME, "images")
+
+
+def resolve_project_path(path: str) -> str:
+    if os.path.isabs(path):
+        return path
+    return os.path.join(PROJECT_HOME, path)
 
 # ---------------------------------------------------------------------------
 # 默认值 (可被 overrides.json 覆盖)
@@ -277,9 +284,8 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
 
     # kernel_obj 优先使用 builds/ 中的完整构建目录 (含 .o 文件, 符号解析更准确)
     # isolated 模式: builds/<slug>/, shared 模式: builds/x86/
-    kernel_builds = os.path.join(PROJECT_HOME, "kernels", "builds")
-    isolated_build = os.path.join(kernel_builds, artifact_name)
-    shared_build = os.path.join(kernel_builds, "x86")
+    isolated_build = os.path.join(KERNEL_BUILDS, artifact_name)
+    shared_build = os.path.join(KERNEL_BUILDS, "x86")
     if os.path.isdir(isolated_build) and os.path.exists(os.path.join(isolated_build, "vmlinux")):
         kernel_obj = isolated_build
     elif os.path.isdir(shared_build):
@@ -397,6 +403,20 @@ ABLATION_VARIANTS = {
             "enable_affinity_table": False,
         },
     },
+    "fuzz-throughput-binary": {
+        "description": "Fuzzing throughput comparison on binary-trace kernels",
+        "mode": "fuzz",
+        "suffix": "-throughput-binary",
+        "overrides": {
+            "disable_race_validate_queue": True,
+            "skip_race_activation_restart": True,
+            "disable_race_history": True,
+            "enable_timing_exploration": False,
+            "enable_solo_filter": False,
+            "enable_coverage_triage": False,
+            "enable_affinity_table": False,
+        },
+    },
     # --- Validate-side ablations ---
     "validate-site-only": {
         "description": "Use site-only target matching without SN/TID constraints",
@@ -488,6 +508,8 @@ def list_available_modules():
 
 
 def main():
+    global KERNEL_OUTPUT, KERNEL_BUILDS
+
     parser = argparse.ArgumentParser(description="DDRD 配置文件生成器")
     parser.add_argument("modules", nargs="*", help="要生成配置的模块 slug")
     parser.add_argument("--all", action="store_true", help="生成所有模块")
@@ -501,9 +523,18 @@ def main():
     parser.add_argument("--ablation", type=str, metavar="VARIANT",
                         help=f"生成 ablation 变体配置. 可选: {', '.join(sorted(ABLATION_VARIANTS.keys()))}")
     parser.add_argument("--list-ablations", action="store_true", help="列出所有 ablation 变体")
+    parser.add_argument("--kernel-output-dir", type=str,
+                        help="指定 kernels/output 替代目录, 可用相对项目根目录路径")
+    parser.add_argument("--kernel-builds-dir", type=str,
+                        help="指定 kernels/builds 替代目录, 用于 kernel_obj 指向隔离构建目录")
     parser.add_argument("--force", "-f", action="store_true", help="覆盖已存在的配置")
     parser.add_argument("--dry-run", action="store_true", help="仅打印, 不写入文件")
     args = parser.parse_args()
+
+    if args.kernel_output_dir:
+        KERNEL_OUTPUT = resolve_project_path(args.kernel_output_dir)
+    if args.kernel_builds_dir:
+        KERNEL_BUILDS = resolve_project_path(args.kernel_builds_dir)
 
     if args.vanilla and args.vanilla_only:
         print("ERROR: --vanilla 和 --vanilla-only 不能同时使用", file=sys.stderr)
