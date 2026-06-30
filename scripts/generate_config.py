@@ -371,6 +371,8 @@ ABLATION_VARIANTS = {
         "suffix": "-throughput",
         "overrides": {
             "disable_uaf_validate_queue": True,
+            "skip_uaf_activation_restart": True,
+            "disable_uaf_history": True,
             "enable_timing_exploration": False,
             "enable_solo_filter": False,
             "enable_coverage_triage": False,

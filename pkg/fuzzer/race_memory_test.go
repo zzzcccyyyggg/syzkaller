@@ -19,6 +19,27 @@ func testMayUAFPair(freeName, useName, freeStack, useStack uint64) *ddrd.MayUAFP
 	}
 }
 
+func TestNewUAFModeCanDisableHistoryBuffer(t *testing.T) {
+	enabled := newUAFMode(&Fuzzer{Config: &Config{ModeUAF: true}})
+	if enabled == nil || enabled.historyBuffer == nil {
+		t.Fatal("expected default UAF mode to keep replay history enabled")
+	}
+
+	disabled := newUAFMode(&Fuzzer{Config: &Config{
+		ModeUAF:           true,
+		DisableUAFHistory: true,
+	}})
+	if disabled == nil {
+		t.Fatal("expected UAF mode to initialize")
+	}
+	if disabled.historyBuffer != nil {
+		t.Fatal("expected replay history buffer to be disabled")
+	}
+	if disabled.corpus == nil || disabled.entries == nil || disabled.pairs == nil {
+		t.Fatal("expected race corpus bookkeeping to remain enabled")
+	}
+}
+
 func TestUAFCorpusAddSeedPreservesVarnameAndStackTracking(t *testing.T) {
 	uc := newUAFCorpus(2)
 	varID := varnamePairID(0x10, 0x20)

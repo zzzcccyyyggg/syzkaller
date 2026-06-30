@@ -155,68 +155,69 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		}
 		f.raceGroup = NewRaceGroupManager(raceConfig)
 
-		// Initialize Dual-Queue Timing Exploration System
-		timingConfig := DefaultTimingExplorationConfig()
-		// Override with user configuration
 		if cfg.EnableTimingExploration {
+			// Initialize Dual-Queue Timing Exploration System.
+			timingConfig := DefaultTimingExplorationConfig()
 			timingConfig.EnableTimingExploration = true
-		}
-		if cfg.TimingExplorationQueueSize > 0 {
-			timingConfig.TimingExplorationQueueSize = cfg.TimingExplorationQueueSize
-		}
-		if cfg.TimingExplorationRatio > 0 {
-			timingConfig.TimingExplorationRatio = cfg.TimingExplorationRatio
-		}
-		if cfg.DelayMinMicros > 0 {
-			timingConfig.DelayMinMicros = cfg.DelayMinMicros
-		}
-		if cfg.DelayMaxMicros > 0 {
-			timingConfig.DelayMaxMicros = cfg.DelayMaxMicros
-		}
-		if cfg.MaxDelaysPerProgram > 0 {
-			timingConfig.MaxDelaysPerProgram = cfg.MaxDelaysPerProgram
-		}
-		if cfg.TimingMutationStrategy != "" {
-			timingConfig.TimingMutationStrategy = cfg.TimingMutationStrategy
-		}
-		if cfg.WidenedThresholdMicros > 0 {
-			timingConfig.WidenedThresholdMicros = cfg.WidenedThresholdMicros
-		}
-		if cfg.MaxAttemptsPerPair > 0 {
-			timingConfig.MaxAttemptsPerPair = cfg.MaxAttemptsPerPair
-		}
-		if cfg.MaxCorpusCountPerVarName > 0 {
-			timingConfig.MaxCorpusCountPerVarName = cfg.MaxCorpusCountPerVarName
-		}
-		if cfg.SuccessThreshold > 0 {
-			timingConfig.SuccessThreshold = cfg.SuccessThreshold
-		}
-		if cfg.ExecutionsPerAttempt > 0 {
-			timingConfig.ExecutionsPerAttempt = cfg.ExecutionsPerAttempt
-		}
-		f.timingScheduler = NewTimingScheduler(
-			target,
-			timingConfig,
-			f.raceGroup.GetVarPairRegistry(),
-			rnd,
-		)
+			if cfg.TimingExplorationQueueSize > 0 {
+				timingConfig.TimingExplorationQueueSize = cfg.TimingExplorationQueueSize
+			}
+			if cfg.TimingExplorationRatio > 0 {
+				timingConfig.TimingExplorationRatio = cfg.TimingExplorationRatio
+			}
+			if cfg.DelayMinMicros > 0 {
+				timingConfig.DelayMinMicros = cfg.DelayMinMicros
+			}
+			if cfg.DelayMaxMicros > 0 {
+				timingConfig.DelayMaxMicros = cfg.DelayMaxMicros
+			}
+			if cfg.MaxDelaysPerProgram > 0 {
+				timingConfig.MaxDelaysPerProgram = cfg.MaxDelaysPerProgram
+			}
+			if cfg.TimingMutationStrategy != "" {
+				timingConfig.TimingMutationStrategy = cfg.TimingMutationStrategy
+			}
+			if cfg.WidenedThresholdMicros > 0 {
+				timingConfig.WidenedThresholdMicros = cfg.WidenedThresholdMicros
+			}
+			if cfg.MaxAttemptsPerPair > 0 {
+				timingConfig.MaxAttemptsPerPair = cfg.MaxAttemptsPerPair
+			}
+			if cfg.MaxCorpusCountPerVarName > 0 {
+				timingConfig.MaxCorpusCountPerVarName = cfg.MaxCorpusCountPerVarName
+			}
+			if cfg.SuccessThreshold > 0 {
+				timingConfig.SuccessThreshold = cfg.SuccessThreshold
+			}
+			if cfg.ExecutionsPerAttempt > 0 {
+				timingConfig.ExecutionsPerAttempt = cfg.ExecutionsPerAttempt
+			}
+			f.timingScheduler = NewTimingScheduler(
+				target,
+				timingConfig,
+				f.raceGroup.GetVarPairRegistry(),
+				rnd,
+			)
 
-		// Create unified pair evaluator
-		evaluatorConfig := PairEvaluatorConfig{
-			MaxCorpusCountPerVarName: timingConfig.MaxCorpusCountPerVarName,
-			MaxTimingAttemptsPerPair: timingConfig.MaxAttemptsPerPair,
-			MaxStacksPerVarName:      cfg.MaxStacksPerVarNamePair,
-		}
-		f.pairEvaluator = NewPairEvaluator(evaluatorConfig, f.raceGroup.GetVarPairRegistry())
+			// Create unified pair evaluator for timing exploration candidates.
+			evaluatorConfig := PairEvaluatorConfig{
+				MaxCorpusCountPerVarName: timingConfig.MaxCorpusCountPerVarName,
+				MaxTimingAttemptsPerPair: timingConfig.MaxAttemptsPerPair,
+				MaxStacksPerVarName:      cfg.MaxStacksPerVarNamePair,
+			}
+			f.pairEvaluator = NewPairEvaluator(evaluatorConfig, f.raceGroup.GetVarPairRegistry())
 
-		// Set corpus count checker for both scheduler and evaluator
-		if f.uaf != nil {
-			f.timingScheduler.SetCorpusCountChecker(f.uaf.GetVarNamePairCount)
-			f.pairEvaluator.SetCorpusCounter(f.uaf.GetVarNamePairCount)
+			// Set corpus count checker for both scheduler and evaluator.
+			if f.uaf != nil {
+				f.timingScheduler.SetCorpusCountChecker(f.uaf.GetVarNamePairCount)
+				f.pairEvaluator.SetCorpusCounter(f.uaf.GetVarNamePairCount)
+			}
+			log.Logf(0, "[TIMING] Dual-queue timing exploration initialized: queue_size=%d, ratio=%.2f, delays=%d-%dμs, max_corpus_per_varname=%d",
+				timingConfig.TimingExplorationQueueSize, timingConfig.TimingExplorationRatio,
+				timingConfig.DelayMinMicros, timingConfig.DelayMaxMicros, timingConfig.MaxCorpusCountPerVarName)
+		} else {
+			log.Logf(0, "[TIMING] Dual-queue timing exploration DISABLED")
 		}
-		log.Logf(0, "[TIMING] Dual-queue timing exploration initialized: queue_size=%d, ratio=%.2f, delays=%d-%dμs, max_corpus_per_varname=%d",
-			timingConfig.TimingExplorationQueueSize, timingConfig.TimingExplorationRatio,
-			timingConfig.DelayMinMicros, timingConfig.DelayMaxMicros, timingConfig.MaxCorpusCountPerVarName)
 	}
 
 	// Initialize dynamic threshold controller if enabled
@@ -613,6 +614,7 @@ type Config struct {
 	ThreadBarrierRatio    float64 // Fraction of barrier executions using thread-barrier (default: 0.2)
 	// History buffer configuration for UAF mode
 	HistoryBufferSize            int // Size of per-VM history buffer (default: 1000)
+	DisableUAFHistory            bool
 	NewVarNamePairHistory        int // Records to save for new VarName pair (default: 1000)
 	NewStackHistory              int // Records to save for new stack (default: 100)
 	MaxStacksPerVarNamePair      int // Max unique stack pairs per VarName pair (default: 20)
@@ -1678,7 +1680,6 @@ type Candidate struct {
 }
 
 func (fuzzer *Fuzzer) AddCandidates(candidates []Candidate) {
-	fmt.Println("[SYNC-DEBUG] Entered AddCandidates, count=", len(candidates))
 	log.Logf(1, "[DEBUG-CANDIDATES] AddCandidates: adding %d candidates", len(candidates))
 	fuzzer.statCandidates.Add(len(candidates))
 	for _, candidate := range candidates {

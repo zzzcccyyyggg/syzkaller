@@ -285,6 +285,14 @@ type Experimental struct {
 	// validation queue/pair-index when no uaf_validate consumer is configured.
 	// uaf_validate mode always enables the queue because it is the consumer input.
 	DisableUAFValidateQueue bool `json:"disable_uaf_validate_queue,omitempty"`
+	// SkipUAFActivationRestart avoids restarting all VMs when startup candidate
+	// triage hands off to DDRD race fuzzing. This is intended for throughput-only
+	// runs that do not consume clean validation state.
+	SkipUAFActivationRestart bool `json:"skip_uaf_activation_restart,omitempty"`
+	// DisableUAFHistory disables per-VM replay-history recording for discovered
+	// race pairs. It removes hot-path program cloning when validation replay
+	// history is not part of the experiment.
+	DisableUAFHistory bool `json:"disable_uaf_history,omitempty"`
 
 	// Skip duplicate data race reports once they've been observed.
 	// When enabled, syz-manager keeps an in-memory cache of data race signatures

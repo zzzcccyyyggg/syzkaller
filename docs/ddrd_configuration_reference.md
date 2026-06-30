@@ -90,6 +90,26 @@
 - 推荐用 `python3 scripts/generate_config.py --throughput-only ...` 生成 `fuzz-throughput.cfg`
 - fuzz+validate 联动实验：保持 `false`，或在配置了 `uaf_validate` 时由 validate 模式自动启用队列
 
+### `skip_uaf_activation_restart`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"skip_uaf_activation_restart"` |
+
+跳过 corpus candidate triage 切入 DDRD race fuzzing 时的全 VM 重启。该重启有利于 validation/replay 前获得更干净的内核状态，但 throughput-only 对比会把这次冷启动成本计入 fuzzing 生产者，因此 `fuzz-throughput.cfg` 默认设为 `true`。
+
+### `disable_uaf_history`
+
+| 属性 | 值 |
+|------|-----|
+| **类型** | `bool` |
+| **默认值** | `false` |
+| **JSON key** | `"disable_uaf_history"` |
+
+关闭每次 barrier 执行后的 per-VM replay history 记录。默认路径会 clone 最近的 program group，用于后续 validate 生命周期回放；throughput-only 对比不消费这部分 replay history，可设为 `true` 降低热路径 program clone 和 ring-buffer 写入成本。
+
 ### `ddrd_monitor`
 
 | 属性 | 值 |

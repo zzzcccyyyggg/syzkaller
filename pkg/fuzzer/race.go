@@ -190,10 +190,14 @@ func newUAFMode(f *Fuzzer) *uafMode {
 	if f == nil || !f.Config.ModeUAF {
 		return nil
 	}
-	// Use configured history buffer size or default
-	bufferSize := f.Config.HistoryBufferSize
-	if bufferSize <= 0 {
-		bufferSize = DefaultHistoryBufferSize
+	var historyBuffer *VMHistoryBuffers
+	if !f.Config.DisableUAFHistory {
+		// Use configured history buffer size or default.
+		bufferSize := f.Config.HistoryBufferSize
+		if bufferSize <= 0 {
+			bufferSize = DefaultHistoryBufferSize
+		}
+		historyBuffer = NewVMHistoryBuffers(bufferSize)
 	}
 	// Use configured max stacks per varname pair or default
 	maxStacksPerVarName := f.Config.MaxStacksPerVarNamePair
@@ -205,7 +209,7 @@ func newUAFMode(f *Fuzzer) *uafMode {
 		entries:       make(map[string]*barrierSeed),
 		corpus:        newUAFCorpus(maxStacksPerVarName),
 		pairs:         make(map[uint64]struct{}),
-		historyBuffer: NewVMHistoryBuffers(bufferSize),
+		historyBuffer: historyBuffer,
 	}
 }
 
@@ -476,8 +480,6 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 		return
 	}
 
-	timingCandidates := u.timingExplorationCandidates(batch)
-
 	// Determine history count before recording pairs
 	var historyCount int
 	if u.historyBuffer != nil && u.fuzzer.raceGroup != nil {
@@ -489,6 +491,7 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 	// DUAL-QUEUE: Enqueue NEW VarName pairs to Timing Exploration
 	// Skip for thread-barrier entries — they already share address space and don't need timing exploration.
 	if !isThreadBarrier && u.fuzzer.timingScheduler != nil && u.fuzzer.timingScheduler.Config().EnableTimingExploration {
+		timingCandidates := u.timingExplorationCandidates(batch)
 		objectLink := queue.ObjectLinkProvenance{}
 		if req != nil {
 			objectLink = req.ObjectLink

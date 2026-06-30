@@ -1405,6 +1405,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			ThreadBarrier:                mgr.cfg.Experimental.ThreadBarrier,
 			ThreadBarrierRatio:           mgr.cfg.Experimental.ThreadBarrierRatio,
 			HistoryBufferSize:            mgr.cfg.Experimental.HistoryBufferSize,
+			DisableUAFHistory:            mgr.cfg.Experimental.DisableUAFHistory,
 			NewVarNamePairHistory:        mgr.cfg.Experimental.NewVarNamePairHistory,
 			NewStackHistory:              mgr.cfg.Experimental.NewStackHistory,
 			MaxStacksPerVarNamePair:      mgr.cfg.Experimental.MaxStacksPerVarNamePair,
@@ -1791,7 +1792,9 @@ func (mgr *Manager) fuzzerLoop(fuzzer *fuzzer.Fuzzer) {
 			if fuzzer.ActivateUAFMode() {
 				// Restart all VMs to ensure clean kernel state for UAF mode.
 				// This is important because corpus triage may have polluted the kernel state.
-				if mgr.pool != nil {
+				if mgr.cfg.Experimental.SkipUAFActivationRestart {
+					log.Logf(0, "uaf: skipping activation VM restart (skip_uaf_activation_restart=true)")
+				} else if mgr.pool != nil {
 					log.Logf(0, "uaf: restarting all VMs for clean kernel state")
 					mgr.pool.RestartAll()
 				}
