@@ -443,23 +443,10 @@ func (u *uafMode) addPairLocked(pair *ddrd.MayUAFPair) *ddrd.MayUAFPair {
 	return clone
 }
 
-func (u *uafMode) tryPersistSeed(seed *barrierSeed) {
-	if u == nil || seed == nil || seed.synced || !seed.syncable || seed.entry == nil {
-		return
-	}
-	if u.fuzzer == nil || u.fuzzer.Config.PersistUAFCorpusEntry == nil {
-		return
-	}
-	if err := u.fuzzer.Config.PersistUAFCorpusEntry(seed.entry); err != nil {
-		u.fuzzer.Logf(0, "race: immediate persist failed for seed %016x: %v", seed.entry.PairID(), err)
-		return
-	}
-	seed.synced = true
-}
-
 // handleDiscoveredPairs records newly discovered May-Race Pairs. In the paper
-// path these are persisted directly from barrier execution; in the legacy solo
-// filter path the input has already been filtered to cross-program pairs.
+// path these are added to the in-memory race corpus immediately and persisted
+// by the manager's batched corpus loop; in the legacy solo filter path the input
+// has already been filtered to cross-program pairs.
 func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, prog1, prog2 *prog.Prog, pairs []*ddrd.MayUAFPair, source PairSource) {
 	if u == nil || len(pairs) == 0 || prog1 == nil || prog2 == nil {
 		return
@@ -509,8 +496,9 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 	barrier := buildBarrierSnapshot(req, res)
 	plan := snapshotReplayPlan(req)
 
-	// Use newUAFCorpusEntry to properly set PairBasicInfo and other fields
-	entry := newUAFCorpusEntry(prog1, batch, barrier, now)
+	// The full barrier program group is stored below; avoid cloning prog1 into
+	// entry.Prog only to drop it once Programs is populated.
+	entry := newUAFCorpusEntry(nil, batch, barrier, now)
 	entry.Kind = seedKindUAF
 	entry.Programs = programs
 	entry.ReplayPlan = plan.clone()
@@ -559,7 +547,6 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 	}
 	u.entries[key] = seed
 	u.corpus.addSeed(key, entry, source)
-	u.tryPersistSeed(seed)
 	u.mu.Unlock()
 
 	u.enqueueSeed(seed)
@@ -806,9 +793,6 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 	u.queue.Submit(req)
 	if seed.synced || !seed.syncable {
 		seed.releaseEntry()
-	} else {
-		seed.entry = entry
-		seed.compactEntry()
 	}
 }
 
@@ -1173,7 +1157,7 @@ func newUAFCorpusEntry(program *prog.Prog, pairs []*ddrd.MayUAFPair, barrier Bar
 		entry.Pairs = clonePairs(pairs)
 		if len(entry.Pairs) != 0 {
 			entry.PairBasicInfo = *entry.Pairs[0]
-			entry.Signals = cloneSignal(ddrd.FromUAFPairs(entry.Pairs, ddrd.UAFSignalPrioHigh))
+			entry.Signals = ddrd.FromUAFPairs(entry.Pairs, ddrd.UAFSignalPrioHigh)
 			entry.Profile = newUAFPairProfile(entry.Pairs[0])
 		}
 	}

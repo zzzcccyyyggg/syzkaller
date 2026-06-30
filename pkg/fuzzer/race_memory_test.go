@@ -194,11 +194,24 @@ func TestHandleDiscoveredBarrierPairsBypassesSoloFilterByDefault(t *testing.T) {
 		testMayUAFPair(0x10, 0x20, 0x100, 0x200),
 	}, SourceFuzz)
 
-	if persisted != 1 {
-		t.Fatalf("persist callback called %d times, want 1", persisted)
+	if persisted != 0 {
+		t.Fatalf("persist callback called %d times, want 0; persistence should be batched", persisted)
 	}
 	if got := len(u.entries); got != 1 {
 		t.Fatalf("got %d UAF entries, want 1", got)
+	}
+	pending := fuzzer.PendingUAFCorpusEntries()
+	if len(pending) != 1 {
+		t.Fatalf("got %d pending entries, want 1", len(pending))
+	}
+	if pending[0].PairID() == 0 {
+		t.Fatal("expected pending entry with pair id")
+	}
+	if len(pending[0].Programs) != 2 {
+		t.Fatalf("pending entry has %d programs, want 2", len(pending[0].Programs))
+	}
+	if pending[0].Source != SourceFuzz {
+		t.Fatalf("pending source = %v, want SourceFuzz", pending[0].Source)
 	}
 	if got := u.corpus.GetVarNamePairCount(0x10, 0x20); got != 1 {
 		t.Fatalf("got varname pair count %d, want 1", got)
@@ -245,37 +258,6 @@ func TestPendingEntriesCompactsSyncedSeeds(t *testing.T) {
 	}
 	if seed.entry != nil {
 		t.Fatal("expected synced seed entry to be released")
-	}
-}
-
-func TestTryPersistSeedMarksSynced(t *testing.T) {
-	called := 0
-	u := &uafMode{
-		fuzzer: &Fuzzer{
-			Config: &Config{
-				PersistUAFCorpusEntry: func(entry *UAFCorpusEntry) error {
-					called++
-					if entry == nil || entry.PairID() == 0 {
-						t.Fatal("expected non-nil entry with pair id")
-					}
-					return nil
-				},
-			},
-		},
-	}
-	seed := &barrierSeed{
-		entry: &UAFCorpusEntry{
-			PairBasicInfo: *testMayUAFPair(0x10, 0x20, 0x100, 0x200),
-		},
-		syncable: true,
-	}
-
-	u.tryPersistSeed(seed)
-	if called != 1 {
-		t.Fatalf("persist callback called %d times, want 1", called)
-	}
-	if !seed.synced {
-		t.Fatal("expected seed to be marked synced after successful persist")
 	}
 }
 

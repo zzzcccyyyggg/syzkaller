@@ -477,18 +477,23 @@ func (fuzzer *Fuzzer) enqueue(executor queue.Executor, req *queue.Request, flags
 }
 
 func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags ProgFlags, attempt int) bool {
-	// Debug: Log every result processing
-	var signalLen, coverLen int
-	if res != nil && res.Info != nil {
-		for _, call := range res.Info.Calls {
-			if call != nil {
-				signalLen += len(call.Signal)
-				coverLen += len(call.Cover)
+	if log.V(3) {
+		var signalLen, coverLen int
+		var status any = "<nil>"
+		if res != nil && res.Info != nil {
+			status = res.Status
+			for _, call := range res.Info.Calls {
+				if call != nil {
+					signalLen += len(call.Signal)
+					coverLen += len(call.Cover)
+				}
 			}
+		} else if res != nil {
+			status = res.Status
 		}
+		log.Logf(3, "[DEBUG-RESULT] processResult: flags=%d isCandidate=%v isBarrier=%v status=%v signalLen=%d coverLen=%d attempt=%d corpus=%d",
+			flags, flags&progCandidate != 0, flags == ProgBarrier, status, signalLen, coverLen, attempt, len(fuzzer.Config.Corpus.Programs()))
 	}
-	log.Logf(3, "[DEBUG-RESULT] processResult: flags=%d isCandidate=%v isBarrier=%v status=%v signalLen=%d coverLen=%d attempt=%d corpus=%d",
-		flags, flags&progCandidate != 0, flags == ProgBarrier, res.Status, signalLen, coverLen, attempt, len(fuzzer.Config.Corpus.Programs()))
 
 	// Check if VM was restarted and clear its history buffer
 	if res != nil && res.Status == queue.Restarted && fuzzer.uaf != nil {
