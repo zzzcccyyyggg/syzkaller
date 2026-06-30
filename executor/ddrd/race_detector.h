@@ -21,6 +21,7 @@ typedef struct {
 	size_t binary_record_capacity;
 	AccessRecord* binary_access_records;
 	size_t binary_access_capacity;
+	bool binary_trace_supported;
 	bool binary_trace_unsupported;
 } RaceDetector;
 
@@ -94,6 +95,7 @@ void race_detector_init(RaceDetector* detector);
 void race_detector_cleanup(RaceDetector* detector);
 void race_detector_reset(RaceDetector* detector);
 bool race_detector_is_available(RaceDetector* detector);
+bool race_detector_binary_trace_supported(RaceDetector* detector);
 
 ssize_t race_detector_read_trace_buffer(RaceDetector* detector, char* buffer, size_t buffer_size);
 // 持续读取 trace buffer 直到日志稳定（没有新内容出现）

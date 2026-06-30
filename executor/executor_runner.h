@@ -992,8 +992,11 @@ public:
 			// If set_pair is true, we already entered MONITOR or FINE_MONITOR mode above
 		}
 		debug("ddrd: clearing trace buffer before barrier execution\n");
-		trace_manager_clear(nullptr);
-		ukc_clear_trace_records();
+		bool cleared_binary_trace = false;
+		if (race_detector_binary_trace_supported(&detector_))
+			cleared_binary_trace = ukc_clear_trace_records() == 0;
+		if (!cleared_binary_trace)
+			trace_manager_clear(nullptr);
 
 		// Reset detector state
 		if (extended_requested_)

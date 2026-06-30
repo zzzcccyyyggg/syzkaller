@@ -64,11 +64,23 @@ constexpr unsigned long kUkcClearTraceRecords = _IO('c', 18);
 // 小工具：打开 /dev，失败时打印日志
 static inline int ukc_open_dev()
 {
-	int fd = open(kUkcDevicePath, O_RDWR | O_CLOEXEC);
-	if (fd < 0) {
+	static int cached_fd = -1;
+	static pid_t cached_pid = -1;
+	pid_t pid = getpid();
+
+	if (cached_fd >= 0 && cached_pid == pid)
+		return cached_fd;
+	if (cached_fd >= 0) {
+		close(cached_fd);
+		cached_fd = -1;
+	}
+
+	cached_fd = open(kUkcDevicePath, O_RDWR | O_CLOEXEC);
+	cached_pid = pid;
+	if (cached_fd < 0) {
 		ukc_print("ukc: controller init failed (errno=%d)\n", errno);
 	}
-	return fd;
+	return cached_fd;
 }
 
 // ========== 无参数类命令 ==========
@@ -81,8 +93,6 @@ static inline void ukc_turn_off()
 
 	if (ioctl(fd, kUkcTurnOff) != 0)
 		ukc_print("ukc: failed to switch to TURN OFF mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 // Enter disable mode - the safe/idle mode for UKC
@@ -99,8 +109,6 @@ static inline void ukc_enter_log_mode()
 
 	if (ioctl(fd, kUkcStartLog) != 0)
 		ukc_print("ukc: failed to switch to LOG mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_monitor_mode()
@@ -111,8 +119,6 @@ static inline void ukc_enter_monitor_mode()
 
 	if (ioctl(fd, kUkcStartMonitor) != 0)
 		ukc_print("ukc: failed to switch to MONITOR mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_check_sync_phase()
@@ -123,8 +129,6 @@ static inline void ukc_enter_check_sync_phase()
 
 	if (ioctl(fd, kUkcStartCheckSyncPhase) != 0)
 		ukc_print("ukc: failed to switch to CHECK_SYNC phase (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_validate_phase()
@@ -135,8 +139,6 @@ static inline void ukc_enter_validate_phase()
 
 	if (ioctl(fd, kUkcStartValidatePhase) != 0)
 		ukc_print("ukc: failed to switch to VALIDATE phase (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_nolockreproduce_mode()
@@ -147,8 +149,6 @@ static inline void ukc_enter_nolockreproduce_mode()
 
 	if (ioctl(fd, kUkcStartNoLockReproduce) != 0)
 		ukc_print("ukc: failed to switch to NOLOCK REPRODUCE mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_fine_log_mode()
@@ -159,8 +159,6 @@ static inline void ukc_enter_fine_log_mode()
 
 	if (ioctl(fd, kUkcStartFineLogMode) != 0)
 		ukc_print("ukc: failed to switch to FINE_LOG mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_fine_monitor_mode()
@@ -171,8 +169,6 @@ static inline void ukc_enter_fine_monitor_mode()
 
 	if (ioctl(fd, kUkcStartFineMonitorMode) != 0)
 		ukc_print("ukc: failed to switch to FINE_MONITOR mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_enter_onesidedreproduce_mode()
@@ -183,8 +179,6 @@ static inline void ukc_enter_onesidedreproduce_mode()
 
 	if (ioctl(fd, kUkcStartOneSidedReproduce) != 0)
 		ukc_print("ukc: failed to switch to ONESIDED REPRODUCE mode (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline void ukc_clear_may_uaf_pair()
@@ -195,8 +189,6 @@ static inline void ukc_clear_may_uaf_pair()
 
 	if (ioctl(fd, kUkcClearMayUafPair) != 0)
 		ukc_print("ukc: failed to CLEAR_MAY_UAF_PAIR (errno=%d)\n", errno);
-
-	close(fd);
 }
 
 static inline bool ukc_optional_debug_enabled()
@@ -215,7 +207,6 @@ static inline int ukc_clear_trace_records()
 	if (ret != 0 && ukc_optional_debug_enabled())
 		ukc_print("ukc: optional CLEAR_TRACE_RECORDS failed (errno=%d)\n", saved_errno);
 
-	close(fd);
 	errno = saved_errno;
 	return ret;
 }
@@ -235,7 +226,6 @@ static inline int ukc_get_trace_records(kccwf_trace_read_t* req)
 	if (ret != 0 && ukc_optional_debug_enabled())
 		ukc_print("ukc: optional GET_TRACE_RECORDS failed (errno=%d)\n", saved_errno);
 
-	close(fd);
 	errno = saved_errno;
 	return ret;
 }
@@ -256,8 +246,6 @@ static inline int ukc_modify_testing_tid(const kccwf_testing_tids_t* tids)
 	int ret = ioctl(fd, kUkcModifyTestingTid, tids);
 	if (ret != 0)
 		ukc_print("ukc: MODIFY_TESTING_TID failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -278,8 +266,6 @@ static inline int ukc_set_may_race_pairs(const may_race_pair_list_t* list)
 	int ret = ioctl(fd, kUkcSetMayRacePairs, list);
 	if (ret != 0)
 		ukc_print("ukc: SET_MAY_RACE_PAIRS failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -306,8 +292,6 @@ static inline int ukc_get_may_race_pairs(void* buf)
 	int ret = ioctl(fd, kUkcGetMayRacePairs, buf);
 	if (ret != 0)
 		ukc_print("ukc: GET_MAY_RACE_PAIRS failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -325,8 +309,6 @@ static inline int ukc_set_check_phase_info(const check_phase_info_t* info)
 	int ret = ioctl(fd, kUkcSetCheckPhaseInfo, info);
 	if (ret != 0)
 		ukc_print("ukc: SET_CHECK_PHASE_INFO failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -344,8 +326,6 @@ static inline int ukc_set_nolockreproduce_info(const nolockreproduce_info_t* inf
 	int ret = ioctl(fd, kUkcSetNoLockReproduceInfo, info);
 	if (ret != 0)
 		ukc_print("ukc: SET_NOLOCKREPRODUCE_INFO failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -363,8 +343,6 @@ static inline int ukc_set_onesidedreproduce_info(const onesidedreproduce_info_t*
 	int ret = ioctl(fd, kUkcSetOneSidedReproduceInfo, info);
 	if (ret != 0)
 		ukc_print("ukc: SET_ONESIDEDREPRODUCE_INFO failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 
@@ -382,8 +360,6 @@ static inline int ukc_set_may_uaf_pair(const may_uaf_pair_t* pair)
 	int ret = ioctl(fd, kUkcSetMayUafPair, pair);
 	if (ret != 0)
 		ukc_print("ukc: SET_MAY_UAF_PAIR failed (errno=%d)\n", errno);
-
-	close(fd);
 	return ret;
 }
 

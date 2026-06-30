@@ -24,6 +24,10 @@
 
 #define DDRD_GET_TRACE_RECORDS _IOWR('c', 17, kccwf_trace_read_t)
 
+static int kccwf_open_cached_ctl_fd(void);
+static int kccwf_get_trace_records(kccwf_trace_read_t* req);
+static bool race_detector_probe_binary_trace(void);
+
 static void debug(const char* fmt, ...)
 {
     static int enabled = -1;
@@ -51,6 +55,7 @@ void race_detector_init(RaceDetector* detector)
     detector->binary_record_capacity = 0;
     detector->binary_access_records = NULL;
     detector->binary_access_capacity = 0;
+    detector->binary_trace_supported = false;
     detector->binary_trace_unsupported = false;
 
     detector->context.thread_count = 0;
@@ -63,6 +68,13 @@ void race_detector_init(RaceDetector* detector)
     detector->context.enable_history = false;
 
     debug("Initializing race detector...\n");
+
+    detector->binary_trace_supported = race_detector_probe_binary_trace();
+    if (detector->binary_trace_supported) {
+        detector->enabled = true;
+        debug("Race detector initialized with binary trace ioctl\n");
+        return;
+    }
 
     int current_buffer_size = trace_manager_get_buffer_size_kb();
     bool tracing_status = trace_manager_is_enabled();
@@ -254,7 +266,12 @@ bool race_detector_is_available(RaceDetector* detector)
 {
     if (!detector)
         return false;
-    return detector->enabled && detector->trace_fd >= 0;
+    return detector->enabled && (detector->binary_trace_supported || detector->trace_fd >= 0);
+}
+
+bool race_detector_binary_trace_supported(RaceDetector* detector)
+{
+    return detector && detector->binary_trace_supported && !detector->binary_trace_unsupported;
 }
 
 ssize_t race_detector_read_trace_buffer(RaceDetector* detector, char* buffer, size_t buffer_size)
@@ -352,17 +369,49 @@ static char binary_access_type_to_char(uint8_t access_type)
     }
 }
 
+static int kccwf_open_cached_ctl_fd(void)
+{
+    static int cached_fd = -1;
+    static pid_t cached_pid = -1;
+    pid_t pid = getpid();
+
+    if (cached_fd >= 0 && cached_pid == pid)
+        return cached_fd;
+    if (cached_fd >= 0) {
+        close(cached_fd);
+        cached_fd = -1;
+    }
+    cached_fd = open(DDRD_KCCWF_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+    cached_pid = pid;
+    return cached_fd;
+}
+
 static int kccwf_get_trace_records(kccwf_trace_read_t* req)
 {
-    int fd = open(DDRD_KCCWF_DEVICE_PATH, O_RDWR | O_CLOEXEC);
+    int fd = kccwf_open_cached_ctl_fd();
     if (fd < 0)
         return -1;
 
     int ret = ioctl(fd, DDRD_GET_TRACE_RECORDS, req);
     int saved_errno = errno;
-    close(fd);
     errno = saved_errno;
     return ret;
+}
+
+static bool race_detector_probe_binary_trace(void)
+{
+    kccwf_trace_read_t req = {};
+    req.version = KCCWF_TRACE_RECORD_VERSION;
+    req.capacity = 0;
+    req.record_size = sizeof(kccwf_trace_record_t);
+    req.records = 0;
+
+    int ret = kccwf_get_trace_records(&req);
+    if (ret == 0)
+        return true;
+    if (errno != ENOTTY && errno != ENODEV && errno != ENOENT && errno != EINVAL)
+        debug("binary trace probe failed, falling back to tracefs (errno=%d)\n", errno);
+    return false;
 }
 
 static int race_detector_parse_binary_trace(RaceDetector* detector, int max_records, int max_frees)
@@ -386,6 +435,8 @@ static int race_detector_parse_binary_trace(RaceDetector* detector, int max_reco
     if (ret != 0) {
         if (errno == EINVAL || errno == ENOTTY || errno == ENODEV || errno == ENOENT)
             detector->binary_trace_unsupported = true;
+        if (detector->binary_trace_unsupported)
+            detector->binary_trace_supported = false;
         return -1;
     }
 
