@@ -361,7 +361,7 @@ def generate_config(slug: str, mode: str = "fuzz", include_experimental: bool = 
 # ---------------------------------------------------------------------------
 # Ablation variant definitions
 # ---------------------------------------------------------------------------
-# Each variant specifies: (suffix, mode, experimental_overrides)
+# Each variant may specify top-level config_overrides plus experimental overrides.
 ABLATION_VARIANTS = {
     # --- Fuzz-side ablations ---
     "fuzz-no-timing": {
@@ -393,6 +393,9 @@ ABLATION_VARIANTS = {
         "description": "Fuzzing throughput comparison with validation and legacy exploration queues disabled",
         "mode": "fuzz",
         "suffix": "-throughput",
+        "config_overrides": {
+            "vm_running_time": 3600,
+        },
         "overrides": {
             "disable_race_validate_queue": True,
             "skip_race_activation_restart": True,
@@ -407,6 +410,9 @@ ABLATION_VARIANTS = {
         "description": "Fuzzing throughput comparison on binary-trace kernels",
         "mode": "fuzz",
         "suffix": "-throughput-binary",
+        "config_overrides": {
+            "vm_running_time": 3600,
+        },
         "overrides": {
             "disable_race_validate_queue": True,
             "skip_race_activation_restart": True,
@@ -476,6 +482,8 @@ ABLATION_VARIANTS = {
 def apply_ablation_overrides(config: dict, variant_name: str) -> dict:
     """Apply ablation overrides to a generated config."""
     variant = ABLATION_VARIANTS[variant_name]
+    if variant.get("config_overrides"):
+        config = deep_merge_dict(config, variant["config_overrides"])
     overrides = variant["overrides"]
 
     if "experimental" not in config:
