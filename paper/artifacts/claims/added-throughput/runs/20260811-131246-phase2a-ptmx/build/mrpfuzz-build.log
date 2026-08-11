@@ -1,0 +1,19 @@
+Makefile:31: [31mrun command via tools/syz-env for best compatibility, see:[m
+Makefile:32: [31mhttps://github.com/google/syzkaller/blob/master/docs/contributing.md#using-syz-env[m
+go list -f '{{.Stale}}' -ldflags="-s -w -X github.com/google/syzkaller/prog.GitRevision=64c0a99e0ec7b3bd7c9ba861513153b854fc5be1+ -X github.com/google/syzkaller/prog.gitRevisionDate=20260811-131019"  ./sys/syz-sysgen | grep -q false || go install -ldflags="-s -w -X github.com/google/syzkaller/prog.GitRevision=64c0a99e0ec7b3bd7c9ba861513153b854fc5be1+ -X github.com/google/syzkaller/prog.gitRevisionDate=20260811-131019"  ./sys/syz-sysgen
+make .descriptions
+Makefile:31: [31mrun command via tools/syz-env for best compatibility, see:[m
+Makefile:32: [31mhttps://github.com/google/syzkaller/blob/master/docs/contributing.md#using-syz-env[m
+bin/syz-sysgen
+touch .descriptions
+GOOS=linux GOARCH=amd64 go build -ldflags="-s -w -X github.com/google/syzkaller/prog.GitRevision=64c0a99e0ec7b3bd7c9ba861513153b854fc5be1+ -X github.com/google/syzkaller/prog.gitRevisionDate=20260811-131019"  -o ./bin/syz-manager github.com/google/syzkaller/syz-manager
+mkdir -p ./bin/linux_amd64
+g++ -o ./bin/linux_amd64/syz-executor executor/executor.cc \
+	executor/ddrd/access_context.c executor/ddrd/access_history.c \
+	executor/ddrd/access_record.c executor/ddrd/lock.c \
+	executor/ddrd/race_detector.c executor/ddrd/trace_manager.c \
+	executor/ddrd/utils.c \
+	-m64 -O2 -pthread -Wall -Werror -Wparentheses -Wunused-const-variable -Wframe-larger-than=16384 -Wno-stringop-overflow -Wno-array-bounds -Wno-format-overflow -Wno-unused-but-set-variable -Wno-unused-command-line-argument -static-pie -std=c++17 -I. -Iexecutor/_include   -DGOOS_linux=1 -DGOARCH_amd64=1 \
+	-DHOSTGOOS_linux=1 -DGIT_REVISION=\"64c0a99e0ec7b3bd7c9ba861513153b854fc5be1+\"
+/usr/bin/ld: /tmp/ccmOzf8J.o: in function `Connection::Connect(char const*, char const*)':
+executor.cc:(.text._ZN10Connection7ConnectEPKcS1_[_ZN10Connection7ConnectEPKcS1_]+0x114): warning: Using 'gethostbyname' in statically linked applications requires at runtime the shared libraries from the glibc version used for linking

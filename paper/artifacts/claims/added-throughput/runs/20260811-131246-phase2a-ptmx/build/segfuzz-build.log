@@ -1,0 +1,9 @@
+go list -f '{{.Stale}}' ./sys/syz-sysgen | grep -q false || go install ./sys/syz-sysgen
+make .descriptions
+make[1]: '.descriptions' is up to date.
+CGO_ENABLED=1 GOOS=linux GOARCH=amd64 go build "-ldflags=-s -w -X github.com/google/syzkaller/prog.GitRevision=f2e8ee34746e144076130e579295326fe73886e3+ -X 'github.com/google/syzkaller/prog.gitRevisionDate=20260811-114908'" -o ./bin/syz-manager github.com/google/syzkaller/syz-manager
+GOOS=linux GOARCH=amd64 go build "-ldflags=-s -w -X github.com/google/syzkaller/prog.GitRevision=f2e8ee34746e144076130e579295326fe73886e3+ -X 'github.com/google/syzkaller/prog.gitRevisionDate=20260811-114908'" "-tags=syz_target syz_os_linux syz_arch_amd64 " -o ./bin/linux_amd64/syz-fuzzer github.com/google/syzkaller/syz-fuzzer
+mkdir -p ./bin/linux_amd64
+gcc -o ./bin/linux_amd64/syz-executor executor/executor.cc \
+	-m64 -O2 -pthread -Wall -Werror -Wparentheses -Wunused-const-variable -Wframe-larger-than=16384 -static  -DGOOS_linux=1 -DGOARCH_amd64=1 \
+	-DHOSTGOOS_linux=1 -DGIT_REVISION=\"f2e8ee34746e144076130e579295326fe73886e3+\"

@@ -1,0 +1,10 @@
+debug-preflight/
+20260811-131037-phase2a-ptmx/
+*/workdirs/
+*/parallel/workdirs/
+*/parallel/pids/
+*/runner.pid
+*/runner.log
+*/logs/*.log
+*/parallel/logs/*.log
+latest-phase2a

@@ -1,0 +1,18 @@
+{
+  "started_at": "2026-08-11T15:02:12+08:00",
+  "reason": "parallelize remaining Phase 2A cases while preserving exclusive 2-host-CPU lanes",
+  "lanes": [
+    {
+      "case": "mrpfuzz-ptmx-vm4-parallel",
+      "cpuset": "2,3",
+      "source_case": "mrpfuzz-ptmx-vm4"
+    },
+    {
+      "case": "segfuzz-ptmx-vm1-parallel",
+      "cpuset": "4,5",
+      "source_case": "segfuzz-ptmx-vm1"
+    }
+  ],
+  "sequential_runner": "kept only until mrpfuzz-ptmx-vm2 completes; stopper will interrupt before duplicate vm4/segfuzz cases",
+  "caveat": "parallel lanes share host memory/disk/KVM, but each measured case remains pinned to a disjoint 2-CPU cpuset"
+}
