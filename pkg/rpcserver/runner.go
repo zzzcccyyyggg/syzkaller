@@ -125,6 +125,9 @@ func (e *serializationError) Is(target error) bool {
 
 type runnerStats struct {
 	statExecs              *stat.Val
+	statCallsScheduled     *stat.Val
+	statCallsExecuted      *stat.Val
+	statCallsFinished      *stat.Val
 	statExecRetries        *stat.Val
 	statExecutorRestarts   *stat.Val
 	statExecBufferTooSmall *stat.Val
@@ -360,6 +363,9 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 		return fmt.Errorf("got bad proc id %v", proc)
 	}
 	runner.stats.statExecs.Add(1)
+	if prog := ctxProgram(ctx); prog != nil && runner.stats.statCallsScheduled != nil {
+		runner.stats.statCallsScheduled.Add(len(prog.Calls))
+	}
 	if msg.Try == 0 {
 		if msg.WaitDuration != 0 {
 			runner.stats.statNoExecRequests.Add(1)
@@ -373,10 +379,7 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 	var data []byte
 	switch req.Type {
 	case flatrpc.RequestTypeProgram:
-		prog := ctx.program
-		if prog == nil {
-			prog = req.Prog
-		}
+		prog := ctxProgram(ctx)
 		if prog != nil {
 			data = prog.Serialize()
 		}
@@ -412,6 +415,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	delete(runner.requests, msg.Id)
 	delete(runner.executing, msg.Id)
 	runner.prepareProgramResult(ctx, msg)
+	runner.recordProgramCallResult(ctx, msg.Info)
 	analysis := ddrd.FromProgInfo(msg.Info)
 	var barrierID int64
 	if ctx.barrier != nil {
@@ -490,6 +494,40 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	// log.Logf(0, "runner %d: result processing done req=%d proc=%d barrier=%t barrier_id=%d duration=%s", runner.id, msg.Id, msg.Proc, isBarrier, barrierID, time.Since(start))
 	return nil
+}
+
+func ctxProgram(ctx *requestContext) *prog.Prog {
+	if ctx == nil || ctx.req == nil || ctx.req.Type != flatrpc.RequestTypeProgram {
+		return nil
+	}
+	if ctx.program != nil {
+		return ctx.program
+	}
+	return ctx.req.Prog
+}
+
+func (runner *Runner) recordProgramCallResult(ctx *requestContext, info *flatrpc.ProgInfo) {
+	if ctxProgram(ctx) == nil || info == nil {
+		return
+	}
+	executed, finished := 0, 0
+	for _, call := range info.Calls {
+		if call == nil {
+			continue
+		}
+		if call.Flags&flatrpc.CallFlagExecuted != 0 {
+			executed++
+		}
+		if call.Flags&flatrpc.CallFlagFinished != 0 {
+			finished++
+		}
+	}
+	if runner.stats.statCallsExecuted != nil {
+		runner.stats.statCallsExecuted.Add(executed)
+	}
+	if runner.stats.statCallsFinished != nil {
+		runner.stats.statCallsFinished.Add(finished)
+	}
 }
 
 func (runner *Runner) sendRequest(req *queue.Request) error {

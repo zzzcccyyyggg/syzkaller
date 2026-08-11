@@ -112,6 +112,9 @@ type server struct {
 
 type Stats struct {
 	StatExecs            *stat.Val
+	StatCallsScheduled   *stat.Val
+	StatCallsExecuted    *stat.Val
+	StatCallsFinished    *stat.Val
 	StatNumFuzzing       *stat.Val
 	StatVMRestarts       *stat.Val
 	StatModules          *stat.Val
@@ -131,6 +134,18 @@ func NewNamedStats(name string) Stats {
 	return Stats{
 		StatExecs: stat.New("exec total"+suffix, "Total test program executions",
 			stat.Console, stat.Rate{}, stat.Prometheus("syz_exec_total"+name),
+		),
+		StatCallsScheduled: stat.New("calls scheduled"+suffix,
+			"Total syzkaller calls in program executions acknowledged by executor",
+			stat.Console, stat.Rate{}, stat.Prometheus("syz_calls_scheduled"+name),
+		),
+		StatCallsExecuted: stat.New("calls executed"+suffix,
+			"Total syzkaller calls reported with the executor Executed flag",
+			stat.Console, stat.Rate{}, stat.Prometheus("syz_calls_executed"+name),
+		),
+		StatCallsFinished: stat.New("calls finished"+suffix,
+			"Total syzkaller calls reported with the executor Finished flag",
+			stat.Console, stat.Rate{}, stat.Prometheus("syz_calls_finished"+name),
 		),
 		StatNumFuzzing: stat.New("fuzzing VMs"+suffix,
 			"Number of VMs that are currently fuzzing", stat.Graph("fuzzing VMs"),
@@ -215,6 +230,9 @@ func newImpl(cfg *Config, mgr Manager) *server {
 			statExecutorRestarts:   cfg.Stats.StatExecutorRestarts,
 			statExecBufferTooSmall: queue.StatExecBufferTooSmall,
 			statExecs:              cfg.Stats.StatExecs,
+			statCallsScheduled:     cfg.Stats.StatCallsScheduled,
+			statCallsExecuted:      cfg.Stats.StatCallsExecuted,
+			statCallsFinished:      cfg.Stats.StatCallsFinished,
 			statNoExecRequests:     queue.StatNoExecRequests,
 			statNoExecDuration:     queue.StatNoExecDuration,
 		},
