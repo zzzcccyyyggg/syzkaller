@@ -8,3 +8,4 @@ debug-preflight/
 */logs/*.log
 */parallel/logs/*.log
 latest-phase2a
+latest-phase2b
