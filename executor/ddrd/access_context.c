@@ -7,8 +7,16 @@
 #include <stdlib.h>
 #include <string.h>
 
+enum {
+    RACE_PAIR_CANDIDATE_SCAN_MULTIPLIER = 4,
+};
+
 static void debug(const char* fmt, ...);
 static int compare_access_record_time(const void* lhs, const void* rhs);
+static uint64_t rotate_left64_value(uint64_t value, unsigned int shift);
+static uint64_t race_pair_id_from_records(const AccessRecord* first_access, const AccessRecord* second_access);
+static size_t next_power_of_two_size(size_t value);
+static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_size, uint64_t id);
 
 int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees)
 {
@@ -17,6 +25,10 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
 
     int record_count = 0;
     int free_count = 0;
+    bool records_sorted = true;
+    bool frees_sorted = true;
+    uint64_t last_record_time = 0;
+    uint64_t last_free_time = 0;
 
     record_ctx->thread_count = 0;
     if (record_ctx->enable_history && record_ctx->thread_histories) {
@@ -59,8 +71,14 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
                     free_rec->lock_count = current_record.lock_count;
                     for (int k = 0; k < current_record.lock_count && k < 8; k++)
                         free_rec->held_locks[k] = current_record.held_locks[k];
+                    if (free_count > 0 && free_rec->access_time < last_free_time)
+                        frees_sorted = false;
+                    last_free_time = free_rec->access_time;
                     free_count++;
                 } else if (current_record.access_type != 'F' && record_count < max_records) {
+                    if (record_count > 0 && current_record.access_time < last_record_time)
+                        records_sorted = false;
+                    last_record_time = current_record.access_time;
                     record_ctx->records[record_count++] = current_record;
                 }
             }
@@ -96,15 +114,21 @@ int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, i
             free_rec->lock_count = current_record.lock_count;
             for (int k = 0; k < current_record.lock_count && k < 8; k++)
                 free_rec->held_locks[k] = current_record.held_locks[k];
+            if (free_count > 0 && free_rec->access_time < last_free_time)
+                frees_sorted = false;
+            last_free_time = free_rec->access_time;
             free_count++;
         } else if (current_record.access_type != 'F' && record_count < max_records) {
+            if (record_count > 0 && current_record.access_time < last_record_time)
+                records_sorted = false;
+            last_record_time = current_record.access_time;
             record_ctx->records[record_count++] = current_record;
         }
     }
 
-    if (record_count > 1)
+    if (record_count > 1 && !records_sorted)
         qsort(record_ctx->records, record_count, sizeof(AccessRecord), compare_access_record_time);
-    if (free_count > 1)
+    if (free_count > 1 && !frees_sorted)
         qsort(record_ctx->free_records, free_count, sizeof(AccessRecord), compare_access_record_time);
 
     record_ctx->record_count = record_count;
@@ -128,20 +152,87 @@ static int compare_access_record_time(const void* lhs, const void* rhs)
     return 0;
 }
 
+static uint64_t rotate_left64_value(uint64_t value, unsigned int shift)
+{
+    return (value << shift) | (value >> (64 - shift));
+}
+
+static uint64_t race_pair_id_from_records(const AccessRecord* first_access, const AccessRecord* second_access)
+{
+    // Keep this in sync with pkg/ddrd.MayUAFPair.UAFPairID().
+    // The race pipeline currently maps first_access to Use* and second_access
+    // to Free* fields in may_uaf_pair_t.
+    const uint64_t mix_const = 1315423911ULL;
+    uint64_t var_pair_id = second_access->var_name ^ rotate_left64_value(first_access->var_name, 32);
+    uint64_t stack_pair_id = second_access->call_stack_hash ^ rotate_left64_value(first_access->call_stack_hash, 32);
+
+    return var_pair_id ^ rotate_left64_value(stack_pair_id, 17) ^ (stack_pair_id * mix_const);
+}
+
+static size_t next_power_of_two_size(size_t value)
+{
+    size_t result = 1;
+    while (result < value)
+        result <<= 1;
+    return result;
+}
+
+static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_size, uint64_t id)
+{
+    if (!table || !occupied || table_size == 0)
+        return false;
+
+    size_t idx = (size_t)(id * 11400714819323198485ULL) & (table_size - 1);
+    for (size_t probe = 0; probe < table_size; probe++) {
+        uint64_t* slot = &table[(idx + probe) & (table_size - 1)];
+        bool* used = &occupied[(idx + probe) & (table_size - 1)];
+        if (*used && *slot == id)
+            return false;
+        if (!*used) {
+            *slot = id;
+            *used = true;
+            return true;
+        }
+    }
+    return true;
+}
+
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {
+    if (!record_ctx || !pairs || max_pairs <= 0)
+        return 0;
+
     // Convert threshold from microseconds to nanoseconds
     // If threshold_us is 0, use the default 10ms threshold
     const uint64_t TIME_THRESHOLD = (threshold_us > 0) ? (threshold_us * 1000) : DEFAULT_TIME_THRESHOLD_NS;
     const uint64_t FAST_THRESHOLD = TIME_THRESHOLD; // Use same threshold for W-W pairs
     const uint64_t MAX_THRESHOLD = TIME_THRESHOLD > FAST_THRESHOLD ? TIME_THRESHOLD : FAST_THRESHOLD;
     int pair_count = 0;
+    int candidate_count = 0;
+    int max_candidates = max_pairs;
+    uint64_t* seen_pair_ids = NULL;
+    bool* seen_pair_occupied = NULL;
+    size_t seen_pair_capacity = 0;
 
     debug("[RACE-ANALYZE] Using threshold: %llu ns (%llu us)\n", 
           (unsigned long long)TIME_THRESHOLD, (unsigned long long)(TIME_THRESHOLD / 1000));
 
-    for (int i = 0; i < record_ctx->record_count && pair_count < max_pairs; i++) {
-        for (int j = i + 1; j < record_ctx->record_count && pair_count < max_pairs; j++) {
+    if (max_pairs <= 0x1fffffff)
+        max_candidates = max_pairs * RACE_PAIR_CANDIDATE_SCAN_MULTIPLIER;
+    seen_pair_capacity = next_power_of_two_size((size_t)max_pairs * 4);
+    seen_pair_ids = (uint64_t*)calloc(seen_pair_capacity, sizeof(*seen_pair_ids));
+    seen_pair_occupied = (bool*)calloc(seen_pair_capacity, sizeof(*seen_pair_occupied));
+    if (!seen_pair_ids || !seen_pair_occupied) {
+        free(seen_pair_ids);
+        free(seen_pair_occupied);
+        seen_pair_ids = NULL;
+        seen_pair_occupied = NULL;
+    }
+
+    for (int i = 0; i < record_ctx->record_count &&
+         pair_count < max_pairs && candidate_count < max_candidates; i++) {
+        for (int j = i + 1; j < record_ctx->record_count &&
+             pair_count < max_pairs && candidate_count < max_candidates; j++) {
             AccessRecord* a = &record_ctx->records[i];
             AccessRecord* b = &record_ctx->records[j];
 
@@ -171,6 +262,9 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
             LockStatus lock_status = determine_lock_status(a, b);
             if (lock_status == LOCK_SYNC_WITH_COMMON_LOCK)
                 continue;
+
+            candidate_count++;
+
             RacePair* pair = &pairs[pair_count];
             if (a->access_time <= b->access_time) {
                 pair->first = *a;
@@ -179,6 +273,11 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
                 pair->first = *b;
                 pair->second = *a;
             }
+            uint64_t pair_id = race_pair_id_from_records(&pair->first, &pair->second);
+            if (seen_pair_ids &&
+                !insert_seen_pair_id(seen_pair_ids, seen_pair_occupied, seen_pair_capacity, pair_id))
+                continue;
+
             pair->access_time_diff = time_diff;
             pair->trigger_counts = 1;
             pair->lock_status = lock_status;
@@ -225,6 +324,8 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
         }
     }
 
+    free(seen_pair_ids);
+    free(seen_pair_occupied);
     return pair_count;
 }
 
@@ -409,6 +510,10 @@ int access_context_init_from_records(AccessContext* record_ctx, const AccessReco
 
     int record_count = 0;
     int free_count = 0;
+    bool records_sorted = true;
+    bool frees_sorted = true;
+    uint64_t last_record_time = 0;
+    uint64_t last_free_time = 0;
 
     record_ctx->thread_count = 0;
     if (record_ctx->enable_history && record_ctx->thread_histories) {
@@ -434,15 +539,21 @@ int access_context_init_from_records(AccessContext* record_ctx, const AccessReco
         }
 
         if (current->access_type == 'F' && free_count < max_frees) {
+            if (free_count > 0 && current->access_time < last_free_time)
+                frees_sorted = false;
+            last_free_time = current->access_time;
             record_ctx->free_records[free_count++] = *current;
         } else if (current->access_type != 'F' && record_count < max_records) {
+            if (record_count > 0 && current->access_time < last_record_time)
+                records_sorted = false;
+            last_record_time = current->access_time;
             record_ctx->records[record_count++] = *current;
         }
     }
 
-    if (record_count > 1)
+    if (record_count > 1 && !records_sorted)
         qsort(record_ctx->records, record_count, sizeof(AccessRecord), compare_access_record_time);
-    if (free_count > 1)
+    if (free_count > 1 && !frees_sorted)
         qsort(record_ctx->free_records, free_count, sizeof(AccessRecord), compare_access_record_time);
 
     record_ctx->record_count = record_count;
