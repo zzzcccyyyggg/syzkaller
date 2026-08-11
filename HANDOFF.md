@@ -589,7 +589,9 @@ Phase 1 完成条件：两个 QEMU 日志都同时出现 program attempts、sche
 
 Remaining Phase 1 work:
 
-- Phase 1 instrumentation and smoke are complete for MRPFuzz and SegFuzz. Next step is Phase 2: write the fixed-resource throughput experiment spec and run the approved long experiments.
+- Phase 1 instrumentation and smoke are complete for MRPFuzz and SegFuzz.
+- Phase 2 spec exists at `paper/artifacts/claims/added-throughput/SPEC.md` and was pushed in MRPFuzz commit `28ab5ecb11bf9d467fed7cdab5e706a78f925cb2`.
+- Next step: user approval is required before launching the 1h fixed-resource ptmx matrix.
 
 2026-08-11 Phase 1 SegFuzz partial record:
 
