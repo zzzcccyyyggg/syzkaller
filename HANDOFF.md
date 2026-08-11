@@ -589,7 +589,7 @@ Phase 1 完成条件：两个 QEMU 日志都同时出现 program attempts、sche
 
 Remaining Phase 1 work:
 
-- Run a SegFuzz smoke log showing program attempts, scheduled calls, observed executed calls, and finished calls under the same metric definitions.
+- Phase 1 instrumentation and smoke are complete for MRPFuzz and SegFuzz. Next step is Phase 2: write the fixed-resource throughput experiment spec and run the approved long experiments.
 
 2026-08-11 Phase 1 SegFuzz partial record:
 
@@ -607,6 +607,14 @@ Remaining Phase 1 work:
 - Tests: `go test ./syz-fuzzer -run 'TestRecordCallThroughput|TestNeedScheduling'`: pass.
 - Build: `make TARGETOS=linux TARGETARCH=amd64 manager`: pass.
 - Build: `make TARGETOS=linux TARGETARCH=amd64 fuzzer`: pass.
+- Build after smoke setup: `make TARGETOS=linux TARGETARCH=amd64 manager fuzzer executor`: pass. Built revision was `f2e8ee34746e144076130e579295326fe73886e3+`.
+- QEMU smoke without bench: `/home/zzzccc/BASS/segfuzz/tmp/throughput-smoke/20260811-115306-segfuzz-ptmx-call-smoke/manager.log`.
+  Result: ran ptmx fuzzing for 5 minutes through QEMU, reached `executed 2910` in the manager text log, and had no panic/BUG/KASAN/revision mismatch. Plain manager heartbeat logs do not print named stats, although the HTTP UI exposed `calls scheduled`, `calls executed`, and `calls finished`.
+- QEMU smoke with bench: `/home/zzzccc/BASS/segfuzz/tmp/throughput-smoke/20260811-115847-segfuzz-ptmx-call-bench-smoke/`.
+  Command shape: copied `exp/segfuzz-comparison/ptmx/syzkaller.cfg` into an isolated temp workdir, kept 1 VM, ran `syz-manager -config <temp cfg> -bench bench.json` under `timeout --signal=INT --kill-after=30s 4m`.
+  Last bench sample: `exec total=1823`, `calls scheduled=15643`, `calls executed=15628`, `calls finished=15628`, `uptime=152`, `fuzzing=150`, `coverage=3136`, `signal=5390`.
+  Exit code was expected timeout `124`; post-run check found no residual `syz-manager`/QEMU process.
+- Throughput collection decision: for SegFuzz formal experiments, use syzkaller `-bench` output, parsed with `jq -s '.[-1]'`, rather than relying on the manager text heartbeat. This avoids touching `syz-manager/manager.go`, which already has unrelated uncommitted local changes.
 - Full `go test ./pkg/ipc`: blocked by existing executor/KVM/mount environment failures (`EOF`, `mount(tmpfs) failed`, `test_kvm wrong result`).
 - Full `go test ./syz-fuzzer`: blocked by existing target setup issue (`unknown target: test/64 (supported: [linux/amd64])`).
 - SegFuzz worktree still has many pre-existing dirty files and untracked experiment directories; target counter files are clean after commit. Do not reset this repo.
