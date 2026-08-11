@@ -1,6 +1,6 @@
 # MRPFuzz 仓库整理与 throughput 优化交接
 
-更新时间：2026-07-23 Asia/Shanghai
+更新时间：2026-08-11 16:11 Asia/Shanghai
 
 这份文档写给没有任何聊天上下文的新会话。先读这里，再继续动仓库。
 
@@ -24,13 +24,13 @@
 
 ## 2. 当前结论
 
-工程状态：主仓库已有一批 throughput 优化提交并已确认远端存在到 `cd3a126b8`；当前还有两个关键未提交源码改动、未跟踪的本交接文档，以及 dirty nested corpus。
+工程状态：主仓库已经完成并提交 throughput 热路径优化、1h restart 配置修复、MRPFuzz/SegFuzz call-level counter、Phase 2A spec/runner 和 Phase 2A ptmx pilot 产物。当前主仓库唯一已知 dirty 项仍是 nested `corpus`，不要 stage 或 reset。
 
-实验状态：MRPFuzz ptmx 在固定 host CPU 0,1、4 VM、1h restart、binary trace kernel 下，1 小时窗口约 `5.712 program attempts/s`；历史 SegFuzz ptmx 24h 日志约 `2.995 program attempts/s`。表面比值是 `1.91x`，但它既不是 call-level 对比，也不是严格同资源 baseline：历史 SegFuzz 没有确认受同一 host cpuset 约束，MRPFuzz 当前配置还关闭了 validate queue。
+实验状态：Phase 2A ptmx pilot 已跑完并提交。主指标改为 `calls executed/s`。固定每个 measured case 使用独立 2-host-CPU cpuset 后，当前单次结果是：MRPFuzz clean `vm.count=1` 为 `28.70 calls/s`；MRPFuzz `vm.count=4` overall 为 `36.41 calls/s`，但有 15 个 disruptive incidents；SegFuzz `vm.count=1` 为 `69.91 calls/s`，也有 2 个 no-output incidents。因此现有数据不支持 throughput advantage claim，只支持继续优化 MRPFuzz exec/pair hot path。
 
 论文资产状态：当前 Figure 7 一类结果可以追溯到已有 artifact，但包含 12h 映射到 24h、缩放和 visual adjustment；论文 Table 4/5 等结论尚未找到足够明确的 raw-run provenance。整理前只能标记为 `derived/adjusted` 或 `uncertain`，不能标记成原始观测。
 
-健康状态：`engineering-reproducible, publication-uncertain`。现有材料足够继续开发和设计实验，但不够直接写成新的论文结论。
+健康状态：`engineering-reproducible, publication-uncertain`。Phase 2A 数据足够指导下一轮优化和实验设计，但不是 paper-grade 结论。
 
 ## 3. 仓库与分支状态
 
@@ -39,26 +39,33 @@
 ```text
 path: /home/zzzccc/BASS/DDRD-syzkaller
 branch: cleanup/throughput-binary-trace
-HEAD: cd3a126b89175d9ab4c7164baf96aa918fe635fe
+latest Phase 2A artifact commit: d01e0e7a7601b9af6847f549bd4db6d0da0b4ad4
 remote: origin https://github.com/zzzcccyyyggg/syzkaller.git
 ```
 
-`git status --short --branch` 当前为：
+`d01e0e7a7601b9af6847f549bd4db6d0da0b4ad4` 后、提交本交接文档前，`git status --short --branch` 为：
 
 ```text
 ## cleanup/throughput-binary-trace
  m corpus
- M executor/ddrd/access_context.c
- M scripts/generate_config.py
-?? HANDOFF.md
 ```
 
-本地分支没有设置 upstream，但远端存在同名分支，且 `git ls-remote --heads origin cleanup/throughput-binary-trace` 返回同一个 `cd3a126b89175d9ab4c7164baf96aa918fe635fe`。也就是说，`cd3a126b8` 及之前提交已在远端；当前未提交改动不在远端。
+本地分支没有设置 upstream。之前通过 SSH push 过同名远端分支；远端状态以 `git ls-remote --heads git@github.com:zzzcccyyyggg/syzkaller.git cleanup/throughput-binary-trace` 为准。新会话接手时如果远端 SHA 不是最新本地提交，先 push 并核验。
 
 最近关键提交：
 
 ```text
-cd3a126b8 Reduce race corpus hot-path overhead
+d01e0e7a7 experiments: include phase2a throughput configs
+8434ffde6 experiments: record phase2a ptmx throughput run
+64c0a99e0 experiments: add phase2a throughput runner
+77b29f3b8 docs: update throughput experiment handoff
+28ab5ecb1 docs: draft fixed-resource throughput experiment
+c9986a414 docs: record segfuzz throughput smoke
+fd165a0c5 docs: record segfuzz call counter validation
+aefd476ce docs: record call counter validation
+7e1b727e3 rpcserver: add syzkaller call throughput counters
+06f7ebbf9 executor: deduplicate race pairs during analysis
+5fc1c914e scripts: use one hour throughput VM lifetime
 bd07fa95b Add race exec-only throughput mode
 923ff7295 Optimize binary trace executor control path
 2248575cd Add binary trace throughput configs
@@ -231,26 +238,26 @@ enable_affinity_table = false
 
 历史说明：`20260609` paper result lineage 早于这次代码对齐，当时是 backlog-watermark approximation 且 eval 是 120s。它只能作为历史结果保留；新阈值实验必须同时启动 producer 和 consumer，并使用当前 30s controller。
 
-## 5. 当前未提交改动
+## 5. 已提交关键改动
 
 `executor/ddrd/access_context.c`：
 
+- 已提交于 `06f7ebbf9 executor: deduplicate race pairs during analysis`。
 - 对 text parser 和 binary record path 都加入了 sortedness 检测。
 - trace/ring buffer 通常接近有序，因此只在实际乱序时 `qsort`。
 - pair analysis 里加入 C 侧去重，ID 语义对齐 Go 的 `pkg/ddrd.MayUAFPair.UAFPairID()`。
 - 去重表是开放寻址 hash table，容量约 `max_pairs * 4` 的 next power of two。
 - 加入候选扫描上限：`max_candidates = max_pairs * 4`，避免重复太多时为了找 unique 反而无限多扫。
-- 当前 diff stat：`109` 行左右。
 
 这部分风险：
 
-- 还没提交。
-- 需要补一个 C/Go golden test，确认 C 侧 pair ID 和 Go `UAFPairID()` 对字段顺序完全一致。
+- ad-hoc C harness 已覆盖 golden pair ID、重复 pair dedup、unsorted input sorting 和 `pair_id==0` dedup；如果后续继续改 pair ID 字段顺序，仍应补正式 C/Go golden test。
 - 当前 race 输出映射在 `executor/ddrd/race_detector.c` 中是 `use = race_pair->first`、`free = race_pair->second`；C dedup 函数按这个方向生成 ID。不要随便交换字段。
 - pair 数下降不一定是功能下降，因为 C 侧去掉的是重复 pair；正式评估要看 unique MRP/corpus growth，不要只看 raw duplicate pair count。
 
 `scripts/generate_config.py`：
 
+- 已提交于 `5fc1c914e scripts: use one hour throughput VM lifetime`。
 - 对 `fuzz-throughput` 和 `fuzz-throughput-binary` 加了顶层 `config_overrides: {"vm_running_time": 3600}`。
 - `apply_ablation_overrides` 先 merge 顶层 config override，再 merge `experimental` override。
 - 这修复了之前把 `vm_running_time` 放进 `experimental` 后 manager 忽略的问题。
@@ -469,24 +476,38 @@ call-level throughput 是第一类实验的主指标；第二类还必须报告 
 
 ## 7. 当前卡在哪里
 
-没有单一技术故障卡死，真正的阻塞是几个实验前置条件还没有闭合：
+没有单一技术故障卡死，当前主要是实验可信度和 MRPFuzz 性能瓶颈还没有闭合：
 
-- 当前 `access_context.c` 和 `generate_config.py` 已完成 Phase 0 本地验证，尚待提交/推送；`corpus` 仍保持未 stage。
-- 两个工具尚未输出语义一致的 `executed syzkaller calls` counter。历史 `exec total` 只能表示 program attempts，不能回推精确 call 数。
-- SegFuzz 历史 baseline 不是同一次固定二核实验；SegFuzz 工作树本身也有大量既有改动，加入计数器时必须单独建分支或最小 patch，不能清理它的现场。
-- MRPFuzz 当前只有 ptmx 单次 1h run，VM2 曾断连恢复，且该配置关闭 validate queue，只能作为 engineering baseline。
-- throughput 的 microbenchmark 与论文 4-core/16GB end-to-end 资源模型尚未分别写成冻结 spec。
-- threshold controller 的公式匹配论文，但 `P` 与 `C/Q` 的记录单位、共享 state 的并发更新、无 validator 时的退化行为都还没有通过集成验证。
+- Phase 2A 只有 ptmx 单次 pilot，尚无 3-repeat、独占整机资源、跨模块结果，不能写成论文结论。
+- 并行 lane 可以提升采样效率，但当前结果仍共享 host memory/disk/KVM，只能作为 preliminary fixed-cpuset 数据。
+- MRPFuzz `vm.count=4` 虽然 total calls/s 最高，但出现 6 次 lost-connection 和 9 次 RCU-stall；需要 profile/调参判断是资源过载、QEMU/guest stall，还是 MRPFuzz hot path 导致。
+- SegFuzz 在同样 2-host-CPU lane 下 `calls executed/s` 明显高于 MRPFuzz；当前证据不支持“MRPFuzz throughput 更快”的说法。
+- MRPFuzz main bottleneck 仍需定位：可能在 pair analysis、race corpus update、flatbuffer result handling、tracefs/binary trace drain、manager-side synchronization、或者 QEMU guest stall。
+- throughput pilot 当前主指标是 observed executed syzkaller calls/s；unique MRP/s、queue insertion/s、corpus growth/s 还没有统一纳入 `metrics_combined.csv`，无法判断 throughput 与效果之间的 tradeoff。
+- threshold controller 的公式匹配论文，但 `P` 与 `C/Q` 的记录单位、共享 state 并发更新、producer/consumer live integration 还没有通过正式实验验证。
 - 论文原始日志、派生统计、绘图输入和 PDF claim 还没有统一 registry；Table 4/5 等数值的 raw provenance 仍不明确。
-- 内核 cleanup branch 的远端 push 状态未验证，但本地分支是干净的，当前实验可以继续基于明确 SHA 工作。
+- 内核 cleanup branch 的远端 push 状态未验证；本地分支此前是干净的，当前实验可以继续基于明确 SHA 工作。
 
 当前健康结论必须写 `engineering-reproducible, publication-uncertain`，不能写 `healthy` 或 `paper-ready`。
 
 ## 8. 下一步计划
 
-### Phase 0：稳定并提交当前改动
+### 当前下一步：Phase 2B profile 与 repeat
 
-这是新会话首先应完成的工作，期间不要顺手改 throughput counter。
+1. 先把本轮 MRPFuzz 提交 push 到远端，并核验远端 branch SHA。
+2. 基于 `metrics_combined.csv` 扩展派生脚本，把 MRPFuzz 的 `ddrd pairs fuzz`、`ddrd varnames fuzz`、`uaf corpus`（后续应重命名为 race corpus）也解析进统一指标，形成 `calls/s` 与 `unique MRP/s` 的同表对比。
+3. 做 10-20min profile pilot，不先改代码：
+   - MRPFuzz `vm.count=1` clean baseline；
+   - MRPFuzz `vm.count=4` incident reproduction；
+   - SegFuzz `vm.count=1` reference。
+4. profile 优先看 manager CPU 与 executor/race pair hot path：pair analysis、race corpus update、result injection、flatbuffer decode、trace drain、锁竞争、QEMU guest stall。
+5. 根据 profile 只选一个最大开销点做 A/B。目标不是关闭 pair，而是在保留 pair analysis/result injection/corpus 更新的前提下降低每次 exec 的成本。
+6. 并行可用于探索：每个 measured case 给独立 cpuset、独立 workdir、独立 HTTP/VM 端口；但 paper-grade repeat 最好用独占资源或至少把 shared memory/disk/KVM caveat 写入结果。
+7. Phase 2A repeat 至少做 3 次，优先固定两个配置：MRPFuzz clean `vm.count=1` 和当前最高 overall 的 `vm.count=4`，同时复跑 SegFuzz `vm.count=1`。如果 `vm4` 继续 RCU-stall，就把它标为 throughput/稳定性 tradeoff，而不是挑最好一次。
+
+### Phase 0：稳定并提交当前改动（已完成）
+
+以下是历史执行清单和验证记录，用于审计；新会话不需要重复做，除非后续改了相关源码。
 
 1. 不要动 `corpus` DB。
 2. 重新跑：
@@ -538,7 +559,7 @@ Phase 0 closeout:
 - Pushed by SSH to `git@github.com:zzzcccyyyggg/syzkaller.git`.
 - Verified remote branch `cleanup/throughput-binary-trace` at `25bdcf7baacacda2c54409f42da665a04e8cbb89` before starting Phase 1.
 
-### Phase 1：为两个工具加入同语义 call counter
+### Phase 1：为两个工具加入同语义 call counter（已完成）
 
 MRPFuzz 实现点：
 
@@ -587,11 +608,11 @@ Phase 1 完成条件：两个 QEMU 日志都同时出现 program attempts、sche
   Result: two runners connected; heartbeat lines included all four metrics. Last stats line at `2026/08/11 11:41:29` had `exec total=8888`, `calls scheduled=194620`, `calls executed=194588`, `calls finished=194571`, `ddrd pairs fuzz=587`, `ddrd varnames fuzz=515`, `uaf corpus=489`.
   Exit was timeout-triggered `SIGINT`; no panic/BUG/KASAN/revision mismatch found in this successful smoke log.
 
-Remaining Phase 1 work:
+Phase 1 closeout:
 
 - Phase 1 instrumentation and smoke are complete for MRPFuzz and SegFuzz.
 - Phase 2 spec exists at `paper/artifacts/claims/added-throughput/SPEC.md` and was pushed in MRPFuzz commit `28ab5ecb11bf9d467fed7cdab5e706a78f925cb2`.
-- Next step: user approval is required before launching the 1h fixed-resource ptmx matrix.
+- The 1h fixed-resource ptmx matrix was approved and launched as Phase 2A; see the pilot record below.
 
 2026-08-11 Phase 1 SegFuzz partial record:
 
@@ -621,7 +642,47 @@ Remaining Phase 1 work:
 - Full `go test ./syz-fuzzer`: blocked by existing target setup issue (`unknown target: test/64 (supported: [linux/amd64])`).
 - SegFuzz worktree still has many pre-existing dirty files and untracked experiment directories; target counter files are clean after commit. Do not reset this repo.
 
-### Phase 2：冻结并完成固定资源 throughput 实验
+2026-08-11 Phase 2A ptmx pilot record:
+
+- Run id: `20260811-131246-phase2a-ptmx`.
+- Run dir: `paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx`.
+- Spec: `paper/artifacts/claims/added-throughput/SPEC.md`.
+- Runner: `paper/artifacts/claims/added-throughput/run_phase2a.py`.
+- Artifact commits:
+  - `8434ffde6 experiments: record phase2a ptmx throughput run`
+  - `d01e0e7a7 experiments: include phase2a throughput configs`
+- Primary summary: `paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/SUMMARY.md`.
+- Primary metrics: `paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/metrics_combined.csv`.
+- Warm-up: first `600s` discarded; all rates below use post-warmup `uptime` deltas from `-bench` samples.
+- Process status after the run: no residual real `syz-manager`, `qemu-system`, or `run_phase2a` processes.
+
+Execution layout:
+
+| Case | Source | Host cpuset | Note |
+| --- | --- | --- | --- |
+| `mrpfuzz-ptmx-vm1` | sequential runner | `0,1` | completed cleanly |
+| `mrpfuzz-ptmx-vm2` | sequential runner | `0,1` | completed with incidents |
+| `mrpfuzz-ptmx-vm4` | parallel lane | `2,3` | launched as `mrpfuzz-ptmx-vm4-parallel` |
+| `segfuzz-ptmx-vm1` | parallel lane | `4,5` | launched as `segfuzz-ptmx-vm1-parallel` |
+
+Combined result:
+
+| Case | calls executed/s | exec total/s | calls/exec | paper-grade | incidents |
+| --- | ---: | ---: | ---: | --- | ---: |
+| `mrpfuzz-ptmx-vm1` | `28.704861` | `1.363542` | `21.051693` | `True` | `0` |
+| `mrpfuzz-ptmx-vm2` | `20.514894` | `1.645035` | `12.470791` | `False` | `3` |
+| `mrpfuzz-ptmx-vm4` | `36.413406` | `2.913043` | `12.500124` | `False` | `15` |
+| `segfuzz-ptmx-vm1` | `69.906597` | `7.841667` | `8.914763` | `False` | `2` |
+
+Interpretation:
+
+- SegFuzz has the highest observed executed syzkaller-call throughput in this ptmx pilot.
+- MRPFuzz `vm.count=4` improves over `vm.count=1/2` in overall calls/s, but repeated RCU-stall/lost-connection incidents make it non-paper-grade as-is.
+- MRPFuzz `vm.count=1` is the only clean MRPFuzz row.
+- Current data argues for profiling and optimizing MRPFuzz exec/pair hot path before claiming a throughput advantage.
+- Parallel lanes are useful to reduce wall-clock time when each measured case gets an exclusive cpuset. They are still preliminary because lanes share memory, disk, and KVM subsystem.
+
+### Phase 2：冻结并完成固定资源 throughput 实验（进行中）
 
 先建立 `paper/artifacts/claims/added-throughput/SPEC.md`，用户确认 spec 后再启动长实验。至少固定：
 
@@ -880,6 +941,14 @@ paper/archive/tmp-cleanup-20260622/
 MRPFuzz throughput:
 
 ```text
+paper/artifacts/claims/added-throughput/SPEC.md
+paper/artifacts/claims/added-throughput/run_phase2a.py
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/SUMMARY.md
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/metrics_combined.csv
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/bench/
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/configs/
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/parallel/bench/
+paper/artifacts/claims/added-throughput/runs/20260811-131246-phase2a-ptmx/parallel/configs/
 exp/ptmx/logs/throughput-2core-vm4-1h-20260701-105037/
 exp/ptmx/logs/vm-matrix-2core-20260630-234757/
 exp/ptmx/logs/fuzz-throughput-binary-20260630-131941.log
@@ -903,16 +972,15 @@ SegFuzz:
 /home/zzzccc/BASS/segfuzz/exp/segfuzz-mrp-24h/*/workdir/log
 ```
 
-下一阶段计划新增的重点 artifact：
+下一阶段仍需补齐的重点 artifact：
 
 ```text
 paper/artifacts/README.md
 paper/artifacts/MANIFEST.csv
-paper/artifacts/claims/added-throughput/
 paper/artifacts/claims/added-threshold-control/
 ```
 
-这些路径目前只是目标结构，尚未创建。先完成 claim inventory 和 counter definition，再建立目录；不要提前移动 raw data。
+`paper/artifacts/claims/added-throughput/` 已创建并包含 Phase 2A pilot；全局 `README.md`、`MANIFEST.csv` 和 threshold-control claim bundle 尚未补齐。先完成 claim inventory 和 counter definition，再移动或归档 raw data。
 
 Kernel:
 
