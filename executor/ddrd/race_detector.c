@@ -26,6 +26,7 @@
 
 static int kccwf_open_cached_ctl_fd(void);
 static int kccwf_get_trace_records(kccwf_trace_read_t* req);
+static RacePair* race_detector_race_pair_buffer(RaceDetector* detector, size_t pair_capacity);
 static bool race_detector_probe_binary_trace(void);
 
 static void debug(const char* fmt, ...)
@@ -55,6 +56,8 @@ void race_detector_init(RaceDetector* detector)
     detector->binary_record_capacity = 0;
     detector->binary_access_records = NULL;
     detector->binary_access_capacity = 0;
+    detector->race_pairs = NULL;
+    detector->race_pair_capacity = 0;
     detector->binary_trace_supported = false;
     detector->binary_trace_unsupported = false;
 
@@ -151,6 +154,11 @@ void race_detector_cleanup(RaceDetector* detector)
         detector->binary_access_records = NULL;
         detector->binary_access_capacity = 0;
     }
+    if (detector->race_pairs) {
+        free(detector->race_pairs);
+        detector->race_pairs = NULL;
+        detector->race_pair_capacity = 0;
+    }
 
     detector->enabled = false;
     debug("Race detector cleanup completed\n");
@@ -202,6 +210,22 @@ static AccessRecord* race_detector_binary_access_records(RaceDetector* detector,
     }
     detector->binary_access_capacity = record_capacity;
     return detector->binary_access_records;
+}
+
+static RacePair* race_detector_race_pair_buffer(RaceDetector* detector, size_t pair_capacity)
+{
+    if (!detector || pair_capacity == 0)
+        return NULL;
+    if (detector->race_pairs && detector->race_pair_capacity >= pair_capacity)
+        return detector->race_pairs;
+    free(detector->race_pairs);
+    detector->race_pairs = (RacePair*)malloc(sizeof(RacePair) * pair_capacity);
+    if (!detector->race_pairs) {
+        detector->race_pair_capacity = 0;
+        return NULL;
+    }
+    detector->race_pair_capacity = pair_capacity;
+    return detector->race_pairs;
 }
 
 static bool race_detector_prepare_context(RaceDetector* detector, int max_records, int max_frees)
@@ -862,7 +886,7 @@ int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* d
 
     // 2. 调用底层的 data race 分析逻辑，拿到 RacePair 列表
     int max_internal_pairs = max_uaf_pairs;
-    RacePair* race_pairs = (RacePair*)malloc(sizeof(RacePair) * max_internal_pairs);
+    RacePair* race_pairs = race_detector_race_pair_buffer(detector, (size_t)max_internal_pairs);
     if (!race_pairs)
         return 0;
 
@@ -928,8 +952,6 @@ int race_detector_analyze_and_generate_race_infos_with_threshold(RaceDetector* d
         //     (unsigned long long)race_pair->first.access_time,
         //     (unsigned long long)race_pair->second.access_time);
     }
-
-    free(race_pairs);
 
     return basic_count;
 }

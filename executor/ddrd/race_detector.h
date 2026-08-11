@@ -21,6 +21,8 @@ typedef struct {
 	size_t binary_record_capacity;
 	AccessRecord* binary_access_records;
 	size_t binary_access_capacity;
+	RacePair* race_pairs;
+	size_t race_pair_capacity;
 	bool binary_trace_supported;
 	bool binary_trace_unsupported;
 } RaceDetector;

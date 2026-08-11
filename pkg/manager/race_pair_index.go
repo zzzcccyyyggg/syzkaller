@@ -163,7 +163,35 @@ func (store *RacePairIndexStore) ObserveEntry(entry *fuzzer.UAFCorpusEntry, corp
 	if store == nil || entry == nil || corpusRecordID == "" {
 		return nil, nil
 	}
+	return store.ObserveRefs([]RaceCorpusRecordRef{{ID: corpusRecordID, Entry: entry}})
+}
 
+func (store *RacePairIndexStore) ObserveRefs(refs []RaceCorpusRecordRef) ([]*RacePairRecord, error) {
+	if store == nil || len(refs) == 0 {
+		return nil, nil
+	}
+	records := make([]*RacePairRecord, 0, len(refs))
+	err := store.withWriteTxn(func() error {
+		now := time.Now()
+		for _, ref := range refs {
+			if ref.ID == "" || ref.Entry == nil {
+				continue
+			}
+			entryRecords, err := store.observeEntryLocked(ref.Entry, ref.ID, now)
+			if err != nil {
+				return err
+			}
+			records = append(records, entryRecords...)
+		}
+		return nil
+	})
+	if err != nil {
+		return records, err
+	}
+	return records, nil
+}
+
+func (store *RacePairIndexStore) observeEntryLocked(entry *fuzzer.UAFCorpusEntry, corpusRecordID string, now time.Time) ([]*RacePairRecord, error) {
 	pairs := entry.Pairs
 	if len(pairs) == 0 && entry.PairBasicInfo.UAFPairID() != 0 {
 		pairs = []*ddrd.MayUAFPair{&entry.PairBasicInfo}
@@ -173,76 +201,69 @@ func (store *RacePairIndexStore) ObserveEntry(entry *fuzzer.UAFCorpusEntry, corp
 	}
 
 	records := make([]*RacePairRecord, 0, len(pairs))
-	err := store.withWriteTxn(func() error {
-		now := time.Now()
-		for _, pair := range pairs {
-			if pair == nil {
-				continue
+	for _, pair := range pairs {
+		if pair == nil {
+			continue
+		}
+		key := ddrd.RacePairKeyFromUAFPair(pair)
+		if key.IsZero() {
+			continue
+		}
+		pairKey := key.String()
+		rec, err := store.getLocked(pairKey)
+		if err != nil {
+			return records, err
+		}
+		recordChanged := false
+		if rec == nil {
+			pairCopy := *pair
+			rec = &RacePairRecord{
+				PairKey:                 pairKey,
+				VarHash:                 key.VarHash,
+				StackHash:               key.StackHash,
+				PairID:                  pair.UAFPairID(),
+				Pair:                    pairCopy,
+				CorpusRecordIDs:         []string{corpusRecordID},
+				PreferredCorpusRecordID: corpusRecordID,
+				PreferredHistoryRecords: len(entry.ReplayHistory),
+				Source:                  int(entry.Source),
+				Status:                  RacePairDiscovered,
+				DiscoveredAt:            now,
+				UpdatedAt:               now,
 			}
-			key := ddrd.RacePairKeyFromUAFPair(pair)
-			if key.IsZero() {
-				continue
+			recordChanged = true
+		} else {
+			if !containsString(rec.CorpusRecordIDs, corpusRecordID) {
+				rec.CorpusRecordIDs = append(rec.CorpusRecordIDs, corpusRecordID)
+				recordChanged = true
 			}
-			pairKey := key.String()
-			rec, err := store.getLocked(pairKey)
-			if err != nil {
-				return err
-			}
-			recordChanged := false
-			if rec == nil {
-				pairCopy := *pair
-				rec = &RacePairRecord{
-					PairKey:                 pairKey,
-					VarHash:                 key.VarHash,
-					StackHash:               key.StackHash,
-					PairID:                  pair.UAFPairID(),
-					Pair:                    pairCopy,
-					CorpusRecordIDs:         []string{corpusRecordID},
-					PreferredCorpusRecordID: corpusRecordID,
-					PreferredHistoryRecords: len(entry.ReplayHistory),
-					Source:                  int(entry.Source),
-					Status:                  RacePairDiscovered,
-					DiscoveredAt:            now,
-					UpdatedAt:               now,
+			if shouldPreferCorpusRecord(rec.PreferredCorpusRecordID, rec.PreferredHistoryRecords,
+				corpusRecordID, len(entry.ReplayHistory)) {
+				rec.PreferredCorpusRecordID = corpusRecordID
+				rec.PreferredHistoryRecords = len(entry.ReplayHistory)
+				if rec.Status == RacePairProcessed {
+					rec.Status = RacePairDiscovered
 				}
 				recordChanged = true
-			} else {
-				if !containsString(rec.CorpusRecordIDs, corpusRecordID) {
-					rec.CorpusRecordIDs = append(rec.CorpusRecordIDs, corpusRecordID)
-					recordChanged = true
-				}
-				if shouldPreferCorpusRecord(rec.PreferredCorpusRecordID, rec.PreferredHistoryRecords,
-					corpusRecordID, len(entry.ReplayHistory)) {
-					rec.PreferredCorpusRecordID = corpusRecordID
-					rec.PreferredHistoryRecords = len(entry.ReplayHistory)
-					if rec.Status == RacePairProcessed {
-						rec.Status = RacePairDiscovered
-					}
-					recordChanged = true
-				}
-				if rec.PairID == 0 {
-					rec.PairID = pair.UAFPairID()
-					recordChanged = true
-				}
-				if rec.Status == "" {
-					rec.Status = RacePairDiscovered
-					recordChanged = true
-				}
-				if recordChanged {
-					rec.UpdatedAt = now
-				}
+			}
+			if rec.PairID == 0 {
+				rec.PairID = pair.UAFPairID()
+				recordChanged = true
+			}
+			if rec.Status == "" {
+				rec.Status = RacePairDiscovered
+				recordChanged = true
 			}
 			if recordChanged {
-				if err := store.saveLocked(rec); err != nil {
-					return err
-				}
+				rec.UpdatedAt = now
 			}
-			records = append(records, cloneRacePairRecord(rec))
 		}
-		return nil
-	})
-	if err != nil {
-		return records, err
+		if recordChanged {
+			if err := store.saveLocked(rec); err != nil {
+				return records, err
+			}
+		}
+		records = append(records, cloneRacePairRecord(rec))
 	}
 	return records, nil
 }
@@ -264,6 +285,32 @@ func (store *RacePairIndexStore) MarkQueued(pairKey string, seq uint64) error {
 	return store.updateStatus(pairKey, RacePairQueued, func(rec *RacePairRecord, now time.Time) {
 		rec.QueuedAt = now
 		rec.LastQueueSeq = seq
+	})
+}
+
+func (store *RacePairIndexStore) MarkQueuedBatch(queued map[string]uint64) error {
+	if store == nil || len(queued) == 0 {
+		return nil
+	}
+	return store.withWriteTxn(func() error {
+		now := time.Now()
+		for pairKey, seq := range queued {
+			if pairKey == "" {
+				continue
+			}
+			rec, err := store.getLocked(pairKey)
+			if err != nil || rec == nil {
+				return err
+			}
+			rec.Status = RacePairQueued
+			rec.UpdatedAt = now
+			rec.QueuedAt = now
+			rec.LastQueueSeq = seq
+			if err := store.saveLocked(rec); err != nil {
+				return err
+			}
+		}
+		return nil
 	})
 }
 

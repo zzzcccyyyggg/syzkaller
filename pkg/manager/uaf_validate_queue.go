@@ -60,6 +60,13 @@ type UAFValidateQueueStats struct {
 	LatestEnqueuedAt time.Time
 }
 
+type UAFValidateQueueEnqueueResult struct {
+	Key      string
+	Seq      uint64
+	PairKey  string
+	Enqueued bool
+}
+
 type storedValidateQueueItem struct {
 	PairKey        string    `json:"pair_key"`
 	CorpusRecordID string    `json:"corpus_record_id"`
@@ -190,15 +197,48 @@ func (store *UAFValidateQueueStore) Enqueue(entry *fuzzer.UAFCorpusEntry) (strin
 }
 
 func (store *UAFValidateQueueStore) EnqueueRecord(record *RacePairRecord) (string, uint64, bool, error) {
+	results, err := store.EnqueueRecords([]*RacePairRecord{record})
+	if err != nil || len(results) == 0 {
+		return "", 0, false, err
+	}
+	result := results[0]
+	return result.Key, result.Seq, result.Enqueued, nil
+}
+
+func (store *UAFValidateQueueStore) EnqueueRecords(records []*RacePairRecord) ([]UAFValidateQueueEnqueueResult, error) {
+	if store == nil || len(records) == 0 {
+		return nil, nil
+	}
+	results := make([]UAFValidateQueueEnqueueResult, 0, len(records))
+	err := store.withWriteTxn(func() error {
+		for _, record := range records {
+			result, err := store.enqueueRecordLocked(record)
+			if err != nil {
+				return err
+			}
+			if result.Key != "" {
+				results = append(results, result)
+			}
+		}
+		return nil
+	})
+	if err != nil {
+		return results, err
+	}
+	return results, nil
+}
+
+func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord) (UAFValidateQueueEnqueueResult, error) {
+	var result UAFValidateQueueEnqueueResult
 	if store == nil || record == nil || record.PairKey == "" {
-		return "", 0, false, nil
+		return result, nil
 	}
 	corpusID := record.PreferredCorpusRecordID
 	if corpusID == "" && len(record.CorpusRecordIDs) != 0 {
 		corpusID = record.CorpusRecordIDs[0]
 	}
 	if corpusID == "" {
-		return "", 0, false, nil
+		return result, nil
 	}
 	item := storedValidateQueueItem{
 		PairKey:        record.PairKey,
@@ -208,36 +248,42 @@ func (store *UAFValidateQueueStore) EnqueueRecord(record *RacePairRecord) (strin
 	}
 	data, err := json.Marshal(item)
 	if err != nil {
-		return "", 0, false, err
+		return result, err
 	}
 
 	key := record.PairKey
-	var (
-		seq      uint64
-		enqueued bool
-	)
-	err = store.withWriteTxn(func() error {
-		seq = uint64(time.Now().UnixNano())
-		if existingRec, exists := store.db.Records[key]; exists {
-			if len(existingRec.Val) != 0 {
-				var existing storedValidateQueueItem
-				if err := json.Unmarshal(existingRec.Val, &existing); err == nil {
-					if existing.HistoryCount <= item.HistoryCount {
-						seq = existingRec.Seq
-						enqueued = false
-						return nil
-					}
+	seq := store.nextSeqLocked()
+	if existingRec, exists := store.db.Records[key]; exists {
+		if len(existingRec.Val) != 0 {
+			var existing storedValidateQueueItem
+			if err := json.Unmarshal(existingRec.Val, &existing); err == nil {
+				if existing.HistoryCount <= item.HistoryCount {
+					return UAFValidateQueueEnqueueResult{
+						Key:      key,
+						Seq:      existingRec.Seq,
+						PairKey:  record.PairKey,
+						Enqueued: false,
+					}, nil
 				}
 			}
 		}
-		store.db.Save(key, data, seq)
-		enqueued = true
-		return nil
-	})
-	if err != nil {
-		return "", 0, false, err
 	}
-	return key, seq, enqueued, nil
+	store.db.Save(key, data, seq)
+	return UAFValidateQueueEnqueueResult{
+		Key:      key,
+		Seq:      seq,
+		PairKey:  record.PairKey,
+		Enqueued: true,
+	}, nil
+}
+
+func (store *UAFValidateQueueStore) nextSeqLocked() uint64 {
+	seq := uint64(time.Now().UnixNano())
+	if seq <= store.localSuffix {
+		seq = store.localSuffix + 1
+	}
+	store.localSuffix = seq
+	return seq
 }
 
 func (store *UAFValidateQueueStore) EntriesSince(sinceSeq uint64) ([]*QueuedUAFCorpusEntry, uint64, error) {

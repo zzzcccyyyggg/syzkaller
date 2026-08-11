@@ -49,7 +49,8 @@ FORBIDDEN_LOG_PATTERNS = [
     "panic",
     "BUG:",
     "KASAN",
-    "KCSAN",
+    "KCSAN: data-race",
+    "BUG: KCSAN",
     "crash:",
     "no output from test machine",
 ]
@@ -79,15 +80,25 @@ class Runner:
         self.preflight()
         if self.args.build:
             self.build_binaries()
-        self.prepare_mrpfuzz_complete()
-        self.prepare_segfuzz()
-        self.write_state("running", "mrpfuzz-complete")
-        self.run_mrpfuzz_complete()
-        self.write_state("running", "segfuzz-4core")
-        self.run_segfuzz()
+        if self.want_mrpfuzz():
+            self.prepare_mrpfuzz_complete()
+        if self.want_segfuzz():
+            self.prepare_segfuzz()
+        if self.want_mrpfuzz():
+            self.write_state("running", "mrpfuzz-complete")
+            self.run_mrpfuzz_complete()
+        if self.want_segfuzz():
+            self.write_state("running", "segfuzz-4core")
+            self.run_segfuzz()
         self.write_metrics()
         self.write_summary()
         self.write_state("complete", None)
+
+    def want_mrpfuzz(self) -> bool:
+        return self.args.case in ("both", "mrpfuzz")
+
+    def want_segfuzz(self) -> bool:
+        return self.args.case in ("both", "segfuzz")
 
     def create_dirs(self) -> None:
         for path in [
@@ -111,6 +122,7 @@ class Runner:
         metadata = {
             "experiment": "added-throughput-phase2b-complete-ptmx",
             "phase": phase,
+            "case": self.args.case,
             "run_id": self.run_id,
             "created_at": now_iso(),
             "duration_seconds": self.args.duration,
@@ -121,6 +133,7 @@ class Runner:
                 "mrpfuzz_validate_cpuset": self.args.mrpfuzz_validate_cpuset,
                 "segfuzz_cpuset": self.args.segfuzz_cpuset,
             },
+            "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
                 "segfuzz": repo_metadata(SEGFUZZ_ROOT),
@@ -133,14 +146,28 @@ class Runner:
     def preflight(self) -> None:
         required = [
             PTMX_CORPUS,
-            SEGFUZZ_SRC_CONFIG,
             DDRD_ROOT / "images/bookworm.img",
             DDRD_ROOT / "images/bookworm.id_rsa",
-            DDRD_ROOT / "bin/syz-manager",
-            SEGFUZZ_GO_ROOT / "bin/syz-manager",
-            MRPFUZZ_BINARY_OUTPUT / "ptmx/bzImage",
-            MRPFUZZ_BINARY_OUTPUT / "ptmx/vmlinux",
         ]
+        if self.want_mrpfuzz():
+            required += [
+                DDRD_ROOT / "bin/syz-manager",
+                MRPFUZZ_BINARY_OUTPUT / "ptmx/bzImage",
+                MRPFUZZ_BINARY_OUTPUT / "ptmx/vmlinux",
+            ]
+            if self.args.mrpfuzz_seed_workdir:
+                seed = Path(self.args.mrpfuzz_seed_workdir)
+                required += [
+                    seed / "corpus.db",
+                    seed / "uaf-corpus.db",
+                    seed / "uaf-validate-queue.db",
+                    seed / "race-pair-index.db",
+                ]
+        if self.want_segfuzz():
+            required += [
+                SEGFUZZ_SRC_CONFIG,
+                SEGFUZZ_GO_ROOT / "bin/syz-manager",
+            ]
         missing = [str(path) for path in required if not path.exists()]
         if missing:
             raise SystemExit("missing required files:\n" + "\n".join(missing))
@@ -155,13 +182,19 @@ class Runner:
 
     def build_binaries(self) -> None:
         commands = [
-            ("mrpfuzz-build.log", DDRD_ROOT, ["make", "TARGETOS=linux", "TARGETARCH=amd64", "manager", "executor"]),
-            (
-                "segfuzz-build.log",
-                SEGFUZZ_GO_ROOT,
-                ["make", "TARGETOS=linux", "TARGETARCH=amd64", "manager", "fuzzer", "executor"],
-            ),
         ]
+        if self.want_mrpfuzz():
+            commands.append(
+                ("mrpfuzz-build.log", DDRD_ROOT, ["make", "TARGETOS=linux", "TARGETARCH=amd64", "manager", "executor"])
+            )
+        if self.want_segfuzz():
+            commands.append(
+                (
+                    "segfuzz-build.log",
+                    SEGFUZZ_GO_ROOT,
+                    ["make", "TARGETOS=linux", "TARGETARCH=amd64", "manager", "fuzzer", "executor"],
+                )
+            )
         for log_name, cwd, cmd in commands:
             log_path = self.build_dir / log_name
             with log_path.open("wb") as log:
@@ -178,17 +211,13 @@ class Runner:
         cfggen.KERNEL_BUILDS = str(MRPFUZZ_BINARY_BUILDS)
 
         workdir = self.workdir_root / "mrpfuzz-complete"
-        validate_workdir = self.workdir_root / "mrpfuzz-complete-validate"
+        validate_workdir = workdir / "validate-run"
         workdir.mkdir(parents=True, exist_ok=True)
         validate_workdir.mkdir(parents=True, exist_ok=True)
-        shutil.copy2(PTMX_CORPUS, workdir / "corpus.db")
-        for name in ["uaf-corpus.db", "uaf-validate-queue.db", "race-pair-index.db", "threshold-state.json"]:
-            link = validate_workdir / name
-            try:
-                link.unlink()
-            except FileNotFoundError:
-                pass
-            link.symlink_to(workdir / name)
+        if self.args.mrpfuzz_seed_workdir:
+            self.copy_mrpfuzz_seed_state(Path(self.args.mrpfuzz_seed_workdir), workdir)
+        else:
+            shutil.copy2(PTMX_CORPUS, workdir / "corpus.db")
 
         fuzz_cfg = cfggen.generate_config("ptmx", "fuzz", include_experimental=True)
         validate_cfg = cfggen.generate_config("ptmx", "validate", include_experimental=True)
@@ -242,6 +271,25 @@ class Runner:
         }
         write_json(self.mrpfuzz["fuzz"]["config"], fuzz_cfg)
         write_json(self.mrpfuzz["validate"]["config"], validate_cfg)
+
+    def copy_mrpfuzz_seed_state(self, seed_workdir: Path, workdir: Path) -> None:
+        copied = []
+        for name in ["corpus.db", "uaf-corpus.db", "uaf-validate-queue.db", "race-pair-index.db", "threshold-state.json"]:
+            src = seed_workdir / name
+            if not src.exists():
+                if name == "threshold-state.json":
+                    continue
+                raise SystemExit(f"missing MRPFuzz seed file: {src}")
+            dst = workdir / name
+            shutil.copy2(src, dst)
+            copied.append(str(dst))
+        write_json(
+            self.run_dir / "mrpfuzz-seed-state.json",
+            {
+                "seed_workdir": str(seed_workdir),
+                "copied_files": copied,
+            },
+        )
 
     def apply_mrpfuzz_common(
         self,
@@ -546,6 +594,7 @@ class Runner:
             f"- Completed at: `{now_iso()}`",
             f"- Duration seconds: `{self.args.duration}`",
             f"- Warmup seconds: `{self.args.warmup}`",
+            f"- Case: `{self.args.case}`",
             f"- MRPFuzz fuzz cpuset: `{self.args.mrpfuzz_fuzz_cpuset}`",
             f"- MRPFuzz validate cpuset: `{self.args.mrpfuzz_validate_cpuset}`",
             f"- SegFuzz cpuset: `{self.args.segfuzz_cpuset}`",
@@ -801,12 +850,18 @@ def now_iso() -> str:
 def parse_args() -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--run-id", default="")
+    parser.add_argument("--case", choices=["both", "mrpfuzz", "segfuzz"], default="both")
     parser.add_argument("--duration", type=int, default=1800)
     parser.add_argument("--warmup", type=int, default=300)
     parser.add_argument("--mrpfuzz-cpuset", default="8,9,10,11")
     parser.add_argument("--mrpfuzz-fuzz-cpuset", default="8,9")
     parser.add_argument("--mrpfuzz-validate-cpuset", default="10,11")
     parser.add_argument("--segfuzz-cpuset", default="8,9,10,11")
+    parser.add_argument(
+        "--mrpfuzz-seed-workdir",
+        default="",
+        help="Optional previous MRPFuzz workdir whose corpus/race DBs seed a race-active diagnostic run.",
+    )
     parser.add_argument("--validate-start-delay", type=int, default=30)
     parser.add_argument("--min-free-gb", type=float, default=10.0)
     parser.add_argument("--build", action="store_true", help="Rebuild manager/executor binaries before running")

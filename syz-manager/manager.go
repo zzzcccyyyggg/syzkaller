@@ -1448,7 +1448,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			DynamicThresholdEvalSec:   mgr.cfg.Experimental.DynamicThresholdEvalSec,
 			Workdir:                   mgr.cfg.Workdir,
 		}, rnd, mgr.target)
-		mgr.enqueueUAFCorpusSeeds(fuzzerObj)
+		restoredUAFCorpus := mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		if mgr.cfg.Experimental.StaticInputExploration {
 			staticInputs := fuzzerObj.SetStaticInputPool(candidates)
 			if staticInputs == 0 {
@@ -1461,6 +1461,11 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			mgr.startLLMInputSeedWatcher(fuzzerObj)
 		} else {
 			fuzzerObj.AddCandidates(candidates)
+			if restoredUAFCorpus != 0 && mgr.cfg.Experimental.BarrierMode {
+				if fuzzerObj.ActivateUAFMode() {
+					log.Logf(0, "race: activated barrier fuzzing from %d persisted corpus entries", restoredUAFCorpus)
+				}
+			}
 		}
 		mgr.fuzzer.Store(fuzzerObj)
 		mgr.http.Fuzzer.Store(fuzzerObj)
@@ -1893,31 +1898,36 @@ func (mgr *Manager) persistUAFCorpusEntries(entries []*fuzzer.UAFCorpusEntry) (i
 	alreadyPresent := 0
 	skipped := 0
 	if mgr.uafPairIndex != nil {
-		for _, ref := range refs {
-			records, err := mgr.uafPairIndex.ObserveEntry(ref.Entry, ref.ID)
-			if err != nil {
-				return len(refs), queued, err
-			}
-			observed += len(records)
-			if mgr.uafValidateQueue == nil {
-				continue
-			}
+		records, err := mgr.uafPairIndex.ObserveRefs(refs)
+		if err != nil {
+			return len(refs), queued, err
+		}
+		observed += len(records)
+		if mgr.uafValidateQueue != nil {
+			queueRecords := make([]*manager.RacePairRecord, 0, len(records))
 			for _, record := range records {
 				if !mgr.uafPairIndex.ShouldQueue(record) {
 					skipped++
 					continue
 				}
 				queueable++
-				if _, seq, enqueued, err := mgr.uafValidateQueue.EnqueueRecord(record); err != nil {
-					return len(refs), queued, err
-				} else if enqueued {
-					if err := mgr.uafPairIndex.MarkQueued(record.PairKey, seq); err != nil {
-						return len(refs), queued, err
-					}
+				queueRecords = append(queueRecords, record)
+			}
+			queueResults, err := mgr.uafValidateQueue.EnqueueRecords(queueRecords)
+			if err != nil {
+				return len(refs), queued, err
+			}
+			queuedPairs := make(map[string]uint64)
+			for _, result := range queueResults {
+				if result.Enqueued {
+					queuedPairs[result.PairKey] = result.Seq
 					queued++
 				} else {
 					alreadyPresent++
 				}
+			}
+			if err := mgr.uafPairIndex.MarkQueuedBatch(queuedPairs); err != nil {
+				return len(refs), queued, err
 			}
 		}
 	}
@@ -1929,9 +1939,9 @@ func (mgr *Manager) persistUAFCorpusEntries(entries []*fuzzer.UAFCorpusEntry) (i
 	return len(refs), queued, nil
 }
 
-func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
+func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) int {
 	if !mgr.cfg.Experimental.RaceMode || mgr.uafStore == nil || fuzzerObj == nil {
-		return
+		return 0
 	}
 	const batchSize = 64
 	totalQueued := 0
@@ -1948,8 +1958,9 @@ func (mgr *Manager) enqueueUAFCorpusSeeds(fuzzerObj *fuzzer.Fuzzer) {
 	})
 	if err != nil {
 		log.Errorf("race corpus streaming load failed: %v", err)
-		return
+		return totalQueued
 	}
+	return totalQueued
 }
 
 type llmInputSeedRecord struct {

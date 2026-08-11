@@ -16,6 +16,7 @@ static int compare_access_record_time(const void* lhs, const void* rhs);
 static uint64_t rotate_left64_value(uint64_t value, unsigned int shift);
 static uint64_t race_pair_id_from_records(const AccessRecord* first_access, const AccessRecord* second_access);
 static size_t next_power_of_two_size(size_t value);
+static bool seen_pair_id_contains(const uint64_t* table, const bool* occupied, size_t table_size, uint64_t id);
 static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_size, uint64_t id);
 
 int parse_access_records_to_set(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees)
@@ -197,6 +198,22 @@ static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_si
     return true;
 }
 
+static bool seen_pair_id_contains(const uint64_t* table, const bool* occupied, size_t table_size, uint64_t id)
+{
+    if (!table || !occupied || table_size == 0)
+        return false;
+
+    size_t idx = (size_t)(id * 11400714819323198485ULL) & (table_size - 1);
+    for (size_t probe = 0; probe < table_size; probe++) {
+        size_t slot_idx = (idx + probe) & (table_size - 1);
+        if (!occupied[slot_idx])
+            return false;
+        if (table[slot_idx] == id)
+            return true;
+    }
+    return false;
+}
+
 int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, RacePair* pairs, int max_pairs, uint64_t threshold_us)
 {
     if (!record_ctx || !pairs || max_pairs <= 0)
@@ -256,24 +273,29 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
             if (time_diff > threshold)
                 continue;
 
-            if (!access_context_check_data_race_validity(record_ctx, a, b))
+            const AccessRecord* first_access = a;
+            const AccessRecord* second_access = b;
+            if (a->access_time > b->access_time) {
+                first_access = b;
+                second_access = a;
+            }
+            uint64_t pair_id = race_pair_id_from_records(first_access, second_access);
+            if (seen_pair_ids &&
+                seen_pair_id_contains(seen_pair_ids, seen_pair_occupied, seen_pair_capacity, pair_id))
                 continue;
 
             LockStatus lock_status = determine_lock_status(a, b);
             if (lock_status == LOCK_SYNC_WITH_COMMON_LOCK)
                 continue;
 
+            if (!access_context_check_data_race_validity(record_ctx, a, b))
+                continue;
+
             candidate_count++;
 
             RacePair* pair = &pairs[pair_count];
-            if (a->access_time <= b->access_time) {
-                pair->first = *a;
-                pair->second = *b;
-            } else {
-                pair->first = *b;
-                pair->second = *a;
-            }
-            uint64_t pair_id = race_pair_id_from_records(&pair->first, &pair->second);
+            pair->first = *first_access;
+            pair->second = *second_access;
             if (seen_pair_ids &&
                 !insert_seen_pair_id(seen_pair_ids, seen_pair_occupied, seen_pair_capacity, pair_id))
                 continue;

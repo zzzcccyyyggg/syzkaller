@@ -486,6 +486,52 @@ func TestUAFValidateQueueStoreGroupsEntriesByCorpusRecord(t *testing.T) {
 	}
 }
 
+func TestUAFValidateQueueStoreBatchEnqueue(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+
+	store, err := NewUAFValidateQueueStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create queue store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close queue store: %v", cerr)
+		}
+	})
+
+	entryA := testQueueEntry(0x10, 0x20, 0x30, 0x40, time.Unix(0, 1))
+	entryB := testQueueEntry(0x11, 0x21, 0x31, 0x41, time.Unix(0, 2))
+	records, err := store.pairIndex.ObserveRefs([]RaceCorpusRecordRef{
+		{ID: "record-a", Entry: entryA},
+		{ID: "record-b", Entry: entryB},
+	})
+	if err != nil {
+		t.Fatalf("ObserveRefs failed: %v", err)
+	}
+	results, err := store.EnqueueRecords(records)
+	if err != nil {
+		t.Fatalf("EnqueueRecords failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("EnqueueRecords returned %d results, want 2", len(results))
+	}
+	for _, result := range results {
+		if !result.Enqueued || result.Key == "" || result.PairKey == "" || result.Seq == 0 {
+			t.Fatalf("unexpected enqueue result: %+v", result)
+		}
+	}
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Pending != 2 || stats.WithPairKey != 2 || stats.WithCorpusRecord != 2 {
+		t.Fatalf("unexpected queue stats: %+v", stats)
+	}
+}
+
 func observeQueueEntry(t *testing.T, store *UAFValidateQueueStore, entry *fuzzer.UAFCorpusEntry, corpusRecordID string) *RacePairRecord {
 	t.Helper()
 	entry.CorpusRecordID = corpusRecordID

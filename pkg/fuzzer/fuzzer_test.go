@@ -285,6 +285,54 @@ func TestStaticInputExplorationSamplesFrozenPool(t *testing.T) {
 	assert.Zero(t, fuzzer.Config.Corpus.StatProgs.Val(), "static pool must not be inserted into normal corpus")
 }
 
+func TestBarrierCoverageCollectionFollowsCoverageTriage(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	call := target.SyscallMap["syz_test_fuzzer1"]
+	program := &prog.Prog{Target: target, Calls: []*prog.Call{{
+		Meta: call,
+		Args: []prog.Arg{
+			prog.MakeConstArg(call.Args[0].Type, prog.DirIn, 1),
+			prog.MakeConstArg(call.Args[1].Type, prog.DirIn, 2),
+			prog.MakeConstArg(call.Args[2].Type, prog.DirIn, 3),
+		},
+	}}}
+
+	for _, tc := range []struct {
+		name           string
+		coverageTriage bool
+		wantCover      bool
+	}{
+		{name: "disabled"},
+		{name: "enabled", coverageTriage: true, wantCover: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			fuzzer := NewFuzzer(ctx, &Config{
+				Corpus:               corpus.NewCorpus(ctx),
+				Coverage:             true,
+				EnabledCalls:         map[*prog.Syscall]bool{call: true},
+				ModeUAF:              true,
+				BarrierMode:          true,
+				BarrierMask:          0x3,
+				EnableCoverageTriage: &tc.coverageTriage,
+			}, rand.New(rand.NewSource(0)), target)
+			req := &queue.Request{
+				Prog:     program.Clone(),
+				ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+			}
+			fuzzer.applyBarrier(req)
+
+			assert.NotZero(t, req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdUaf)
+			hasCover := req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectCover != 0
+			assert.Equal(t, tc.wantCover, hasCover)
+		})
+	}
+}
+
 func getTestTarget() (*prog.Target, error) {
 	target, err := prog.GetTarget(targets.TestOS, targets.TestArch64Fuzz)
 	if err == nil {

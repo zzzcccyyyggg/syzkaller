@@ -134,6 +134,58 @@ func TestEnqueueSeedFallsBackToBarrierPrograms(t *testing.T) {
 	}
 }
 
+func TestEnqueueSeedPreparesRestoredBarrierForRaceCollection(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	u := &uafMode{
+		fuzzer: &Fuzzer{Config: &Config{
+			ModeUAF:               true,
+			BarrierMode:           true,
+			BarrierMask:           0x3,
+			NormalThresholdMicros: 2500,
+		}},
+		queue: &queue.PlainQueue{},
+	}
+	seed := &barrierSeed{
+		entry: &UAFCorpusEntry{
+			Programs: []*prog.Prog{p1, p2},
+			Barrier:  BarrierSnapshot{Participants: 0x3},
+		},
+		execOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+		synced:   true,
+	}
+
+	u.enqueueSeed(seed)
+	req := u.queue.Next()
+	if req == nil {
+		t.Fatal("expected restored seed to be enqueued")
+	}
+	if !req.Barrier || len(req.BarrierPrograms) != 2 {
+		t.Fatalf("queued request barrier=%v programs=%d, want barrier with 2 programs",
+			req.Barrier, len(req.BarrierPrograms))
+	}
+	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdUaf == 0 {
+		t.Fatal("restored barrier seed must collect DDRD UAF pairs")
+	}
+	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdRace != 0 {
+		t.Fatal("restored UAF barrier seed must not use race-only collection")
+	}
+	if req.TimingThresholdUs != 2500 {
+		t.Fatalf("queued timing threshold = %d, want 2500", req.TimingThresholdUs)
+	}
+}
+
 func TestHandleDiscoveredBarrierPairsBypassesSoloFilterByDefault(t *testing.T) {
 	target, err := getTestTarget()
 	if err != nil {

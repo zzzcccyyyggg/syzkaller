@@ -787,8 +787,13 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 			}
 		}
 	}
-	if req.Barrier && u.fuzzer != nil && u.fuzzer.Config.RaceExecOnly {
-		u.fuzzer.enableRaceExecCollection(req)
+	if u.fuzzer != nil {
+		flags := ProgFlags(0)
+		if req.Barrier {
+			flags |= ProgBarrier
+			u.fuzzer.enableBarrierCoverage(req)
+		}
+		u.fuzzer.prepare(req, flags, 0)
 	}
 	u.queue.Submit(req)
 	if seed.synced || !seed.syncable {

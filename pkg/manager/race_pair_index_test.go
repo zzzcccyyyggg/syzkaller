@@ -79,6 +79,45 @@ func TestRacePairIndexStoreTracksPairStateByHash(t *testing.T) {
 	}
 }
 
+func TestRacePairIndexStoreBatchObserveAndMarkQueued(t *testing.T) {
+	store, err := NewRacePairIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create pair index: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close pair index: %v", cerr)
+		}
+	})
+
+	entryA := testRacePairIndexEntry(0x10, 0x20, 0x30, 0x40, time.Unix(0, 1))
+	entryB := testRacePairIndexEntry(0x11, 0x21, 0x31, 0x41, time.Unix(0, 2))
+	records, err := store.ObserveRefs([]RaceCorpusRecordRef{
+		{ID: "corpus-a", Entry: entryA},
+		{ID: "corpus-b", Entry: entryB},
+	})
+	if err != nil {
+		t.Fatalf("ObserveRefs failed: %v", err)
+	}
+	if len(records) != 2 {
+		t.Fatalf("ObserveRefs returned %d records, want 2", len(records))
+	}
+	queued := make(map[string]uint64)
+	for i, record := range records {
+		queued[record.PairKey] = uint64(100 + i)
+	}
+	if err := store.MarkQueuedBatch(queued); err != nil {
+		t.Fatalf("MarkQueuedBatch failed: %v", err)
+	}
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Total != 2 || stats.Queued != 2 || stats.MaxQueueSeq != 101 {
+		t.Fatalf("unexpected batch stats: %+v", stats)
+	}
+}
+
 func TestRacePairIndexStoreReloadPreventsStateRegression(t *testing.T) {
 	workdir := t.TempDir()
 
@@ -347,5 +386,19 @@ func TestRacePairIndexStoreConcurrentWritersPreservePreferredRecord(t *testing.T
 	}
 	if stats.Total != 1 || stats.WithCorpus != 1 || stats.WithHistory != 1 {
 		t.Fatalf("unexpected stats after concurrent writers: %+v", stats)
+	}
+}
+
+func testRacePairIndexEntry(freeName, useName, freeStack, useStack uint64, ts time.Time) *fuzzer.UAFCorpusEntry {
+	pair := ddrd.MayUAFPair{
+		FreeAccessName: freeName,
+		UseAccessName:  useName,
+		FreeCallStack:  freeStack,
+		UseCallStack:   useStack,
+	}
+	return &fuzzer.UAFCorpusEntry{
+		PairBasicInfo: pair,
+		Pairs:         []*ddrd.MayUAFPair{&pair},
+		Timestamp:     ts,
 	}
 }
