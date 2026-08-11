@@ -589,8 +589,27 @@ Phase 1 完成条件：两个 QEMU 日志都同时出现 program attempts、sche
 
 Remaining Phase 1 work:
 
-- Add equivalent call counters to `/home/zzzccc/BASS/segfuzz` on a protected branch/minimal diff.
 - Run a SegFuzz smoke log showing program attempts, scheduled calls, observed executed calls, and finished calls under the same metric definitions.
+
+2026-08-11 Phase 1 SegFuzz partial record:
+
+- Branch: `/home/zzzccc/BASS/segfuzz` on `cleanup/throughput-call-counters`.
+- Commit: `f2e8ee34746e144076130e579295326fe73886e3 fuzzer: add syzkaller call throughput counters`.
+- Pushed to `myrepo/cleanup/throughput-call-counters` and verified remote SHA `f2e8ee34746e144076130e579295326fe73886e3`.
+- Touched only:
+  `gotools/src/github.com/google/segfuzz/pkg/ipc/ipc.go`,
+  `gotools/src/github.com/google/segfuzz/pkg/ipc/throughput_test.go`,
+  `gotools/src/github.com/google/segfuzz/syz-fuzzer/fuzzer.go`,
+  `gotools/src/github.com/google/segfuzz/syz-fuzzer/proc.go`,
+  `gotools/src/github.com/google/segfuzz/syz-fuzzer/proc_test.go`.
+- Added SegFuzz stats with the same names and definitions: `calls scheduled`, `calls executed`, `calls finished`; kept `exec total` unchanged.
+- Tests: `go test ./pkg/ipc -run TestNoteExecAttemptCountsProgramCalls`: pass.
+- Tests: `go test ./syz-fuzzer -run 'TestRecordCallThroughput|TestNeedScheduling'`: pass.
+- Build: `make TARGETOS=linux TARGETARCH=amd64 manager`: pass.
+- Build: `make TARGETOS=linux TARGETARCH=amd64 fuzzer`: pass.
+- Full `go test ./pkg/ipc`: blocked by existing executor/KVM/mount environment failures (`EOF`, `mount(tmpfs) failed`, `test_kvm wrong result`).
+- Full `go test ./syz-fuzzer`: blocked by existing target setup issue (`unknown target: test/64 (supported: [linux/amd64])`).
+- SegFuzz worktree still has many pre-existing dirty files and untracked experiment directories; target counter files are clean after commit. Do not reset this repo.
 
 ### Phase 2：冻结并完成固定资源 throughput 实验
 
