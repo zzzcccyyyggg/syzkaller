@@ -1,6 +1,7 @@
 package fuzzer
 
 import (
+	"math/rand"
 	"testing"
 	"time"
 
@@ -130,7 +131,10 @@ func TestEnqueueSeedFallsBackToBarrierPrograms(t *testing.T) {
 		t.Fatal("expected seed enqueue to fall back to first barrier program")
 	}
 	if seed.entry != nil {
-		t.Fatal("expected non-syncable seed entry to be released after enqueue")
+		t.Fatal("expected non-syncable seed entry to be compacted after enqueue")
+	}
+	if seed.entryBlob == nil {
+		t.Fatal("expected compacted seed blob to remain available")
 	}
 }
 
@@ -183,6 +187,71 @@ func TestEnqueueSeedPreparesRestoredBarrierForRaceCollection(t *testing.T) {
 	}
 	if req.TimingThresholdUs != 2500 {
 		t.Fatalf("queued timing threshold = %d, want 2500", req.TimingThresholdUs)
+	}
+}
+
+func TestSampleBarrierRequestUsesCompactedSyncedSeed(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	fuzzer := &Fuzzer{
+		Config: &Config{
+			ModeUAF:               true,
+			BarrierMode:           true,
+			BarrierMask:           0x3,
+			NormalThresholdMicros: 2500,
+		},
+		target: target,
+	}
+	seed := &barrierSeed{
+		entry: &UAFCorpusEntry{
+			Programs: []*prog.Prog{p1, p2},
+			Barrier:  BarrierSnapshot{Participants: 0x3},
+			ReplayHistory: []*BarrierExecutionRecord{
+				{Timestamp: time.Now(), Programs: []*prog.Prog{p1, p2}},
+			},
+		},
+		execOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+		syncable: true,
+		synced:   true,
+	}
+	seed.compactEntry()
+	if seed.entry != nil || seed.entryBlob == nil {
+		t.Fatal("expected seed to be stored as compact blob")
+	}
+	if len(seed.entryBlob.ReplayHistory) != 0 {
+		t.Fatal("fuzz fallback blob should not keep replay history")
+	}
+
+	u := &uafMode{
+		fuzzer:  fuzzer,
+		entries: map[string]*barrierSeed{"seed": seed},
+	}
+	fuzzer.uaf = u
+
+	req := u.sampleBarrierRequest(rand.New(rand.NewSource(1)))
+	if req == nil {
+		t.Fatal("expected compacted seed to produce a barrier request")
+	}
+	if !req.Barrier || len(req.BarrierPrograms) != 2 {
+		t.Fatalf("sampled request barrier=%v programs=%d, want barrier with 2 programs",
+			req.Barrier, len(req.BarrierPrograms))
+	}
+	if req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdUaf == 0 {
+		t.Fatal("sampled race corpus barrier must collect DDRD UAF pairs")
+	}
+	if req.TimingThresholdUs != 2500 {
+		t.Fatalf("sampled timing threshold = %d, want 2500", req.TimingThresholdUs)
 	}
 }
 
@@ -309,7 +378,10 @@ func TestPendingEntriesCompactsSyncedSeeds(t *testing.T) {
 		t.Fatal("expected seed to be marked synced")
 	}
 	if seed.entry != nil {
-		t.Fatal("expected synced seed entry to be released")
+		t.Fatal("expected synced seed entry to be compacted")
+	}
+	if seed.entryBlob == nil {
+		t.Fatal("expected compacted seed blob to remain available")
 	}
 }
 

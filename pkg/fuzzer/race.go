@@ -5,6 +5,7 @@ import (
 	"encoding/binary"
 	"fmt"
 	"math/bits"
+	"math/rand"
 	"sort"
 	"sync"
 	"time"
@@ -741,15 +742,33 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 	if u == nil || u.queue == nil || seed == nil {
 		return
 	}
-	entry, err := seed.materializeEntry(u.fuzzer.target)
+	req, err := u.requestFromSeed(seed)
 	if err != nil {
 		if u.fuzzer != nil {
 			u.fuzzer.Logf(0, "race: failed to materialize seed entry: %v", err)
 		}
 		return
 	}
-	if entry == nil {
+	if req == nil {
 		return
+	}
+	u.queue.Submit(req)
+	if seed.synced || !seed.syncable {
+		seed.compactEntry()
+	}
+}
+
+func (u *uafMode) requestFromSeed(seed *barrierSeed) (*queue.Request, error) {
+	if u == nil || seed == nil {
+		return nil, nil
+	}
+	var target *prog.Target
+	if u.fuzzer != nil {
+		target = u.fuzzer.target
+	}
+	entry, err := seed.materializeEntry(target)
+	if err != nil || entry == nil {
+		return nil, err
 	}
 	var baseProg *prog.Prog
 	switch {
@@ -758,13 +777,13 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 	case len(entry.Programs) != 0 && entry.Programs[0] != nil:
 		baseProg = entry.Programs[0].Clone()
 	default:
-		return
+		return nil, nil
 	}
 	req := &queue.Request{
 		Prog:     baseProg,
 		ExecOpts: seed.execOpts,
 	}
-	if entry.Source != SourceTiming {
+	if u.fuzzer != nil && entry.Source != SourceTiming {
 		u.fuzzer.applyNormalTimingThreshold(req)
 	}
 	if barrier := entry.Barrier; barrier.Participants != 0 {
@@ -795,10 +814,43 @@ func (u *uafMode) enqueueSeed(seed *barrierSeed) {
 		}
 		u.fuzzer.prepare(req, flags, 0)
 	}
-	u.queue.Submit(req)
-	if seed.synced || !seed.syncable {
-		seed.releaseEntry()
+	return req, nil
+}
+
+const raceCorpusSampleAttempts = 8
+
+func (u *uafMode) sampleBarrierRequest(rnd *rand.Rand) *queue.Request {
+	if u == nil || rnd == nil {
+		return nil
 	}
+	u.mu.Lock()
+	defer u.mu.Unlock()
+	if len(u.entries) == 0 {
+		return nil
+	}
+	attempts := raceCorpusSampleAttempts
+	if attempts > len(u.entries) {
+		attempts = len(u.entries)
+	}
+	for attempt := 0; attempt < attempts; attempt++ {
+		idx := rnd.Intn(len(u.entries))
+		i := 0
+		for _, seed := range u.entries {
+			if i != idx {
+				i++
+				continue
+			}
+			req, err := u.requestFromSeed(seed)
+			if err == nil && req != nil && req.Barrier && len(req.BarrierPrograms) >= 2 {
+				if u.fuzzer != nil {
+					req.Stat = u.fuzzer.statExecFuzz
+				}
+				return req
+			}
+			break
+		}
+	}
+	return nil
 }
 
 func (u *uafMode) pendingEntries() []*UAFCorpusEntry {
@@ -825,7 +877,7 @@ func (u *uafMode) pendingEntries() []*UAFCorpusEntry {
 		}
 		seed.synced = true
 		pending = append(pending, entry.clone())
-		seed.releaseEntry()
+		seed.compactEntry()
 	}
 	return pending
 }
@@ -989,7 +1041,7 @@ func seedDeserializeReplayHistory(target *prog.Target, records []serializedBarri
 	return history, nil
 }
 
-func newSerializedSeedEntry(entry *UAFCorpusEntry) *serializedSeedEntry {
+func newSerializedSeedEntry(entry *UAFCorpusEntry, includeReplayHistory bool) *serializedSeedEntry {
 	if entry == nil {
 		return nil
 	}
@@ -1003,9 +1055,11 @@ func newSerializedSeedEntry(entry *UAFCorpusEntry) *serializedSeedEntry {
 		Timestamp:      entry.Timestamp,
 		Kind:           entry.Kind,
 		Source:         entry.Source,
-		ReplayHistory:  seedSerializeReplayHistory(entry.ReplayHistory),
 		AsyncMode:      entry.AsyncMode,
 		AsyncRaceCalls: entry.AsyncRaceCalls,
+	}
+	if includeReplayHistory {
+		blob.ReplayHistory = seedSerializeReplayHistory(entry.ReplayHistory)
 	}
 	if entry.Prog != nil && (len(entry.Programs) == 0 || entry.AsyncMode) {
 		blob.Program = append([]byte(nil), entry.Prog.Serialize()...)
@@ -1090,7 +1144,7 @@ func (seed *barrierSeed) compactEntry() {
 	if seed == nil || seed.entry == nil || seed.entryBlob != nil {
 		return
 	}
-	seed.entryBlob = newSerializedSeedEntry(seed.entry)
+	seed.entryBlob = newSerializedSeedEntry(seed.entry, false)
 	seed.entry = nil
 }
 

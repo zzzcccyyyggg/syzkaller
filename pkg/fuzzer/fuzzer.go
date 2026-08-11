@@ -812,6 +812,13 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		return fuzzer.genStaticInputBarrierRequest()
 	}
 
+	rnd := fuzzer.rand()
+	if uafReady && corpusLen == 0 {
+		if req := fuzzer.uaf.sampleBarrierRequest(rnd); req != nil {
+			return req
+		}
+	}
+
 	// Either generate a new input or mutate an existing one.
 	mutateRate := 0.95
 	// log.Logf(0, "corpus length: %d", len(fuzzer.Config.Corpus.Programs()))
@@ -824,7 +831,6 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 		mutateRate = 0.5
 	}
 	var req *queue.Request
-	rnd := fuzzer.rand()
 	if rnd.Float64() < mutateRate {
 		req = mutateProgRequest(fuzzer, rnd)
 	}
