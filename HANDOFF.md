@@ -532,10 +532,11 @@ Phase 0 source commits:
 - `06f7ebbf9 executor: deduplicate race pairs during analysis`
 - `5fc1c914e scripts: use one hour throughput VM lifetime`
 
-Pending Phase 0 closeout:
+Phase 0 closeout:
 
-- Commit this handoff update without staging `corpus`.
-- Push `cleanup/throughput-binary-trace`; record final remote branch SHA in the session summary.
+- Phase 0 handoff commit: `25bdcf7ba docs: record throughput phase zero validation`.
+- Pushed by SSH to `git@github.com:zzzcccyyyggg/syzkaller.git`.
+- Verified remote branch `cleanup/throughput-binary-trace` at `25bdcf7baacacda2c54409f42da665a04e8cbb89` before starting Phase 1.
 
 ### Phase 1：为两个工具加入同语义 call counter
 
@@ -572,6 +573,24 @@ SegFuzz 对齐点：
 4. 指标名和定义在两个仓库完全一致；若要排除 `syz_*` pseudo-call，额外增加分类计数，不能改变总计语义。
 
 Phase 1 完成条件：两个 QEMU 日志都同时出现 program attempts、scheduled、observed executed、finished，且 synthetic test 和手工样例一致。
+
+2026-08-11 Phase 1 MRPFuzz partial record:
+
+- Commit: `7e1b727e3 rpcserver: add syzkaller call throughput counters`.
+- Added MRPFuzz stats: `calls scheduled`, `calls executed`, `calls finished`; kept `exec total` unchanged as program attempts.
+- Unit test: `go test ./pkg/rpcserver -run 'TestRunnerCallStats|TestNew|TestCheckRevisions'`: pass. Synthetic coverage includes retry, unexecuted call, executed call, finished call, blocked call, nil result, and non-program request.
+- Full `go test ./pkg/rpcserver`: blocked by existing GCC 11 executor test build issue: `no_sanitize_coverage attribute directive ignored [-Werror=attributes]`; same failure mode as Phase 0 `pkg/fuzzer`.
+- Build: `make TARGETOS=linux TARGETARCH=amd64 manager`: pass.
+- Build: `make TARGETOS=linux TARGETARCH=amd64 executor`: pass after rebuilding executor to match manager dirty GitRevision. A first smoke attempt failed fast with manager/executor revision mismatch because executor had not been rebuilt after Phase 1 Go changes.
+- QEMU smoke: `./scripts/run_fuzz.sh start --config-suffix throughput-binary -t 3m ptmx`.
+  Log: `exp/ptmx/logs/fuzz-throughput-binary-20260811-113835.log`.
+  Result: two runners connected; heartbeat lines included all four metrics. Last stats line at `2026/08/11 11:41:29` had `exec total=8888`, `calls scheduled=194620`, `calls executed=194588`, `calls finished=194571`, `ddrd pairs fuzz=587`, `ddrd varnames fuzz=515`, `uaf corpus=489`.
+  Exit was timeout-triggered `SIGINT`; no panic/BUG/KASAN/revision mismatch found in this successful smoke log.
+
+Remaining Phase 1 work:
+
+- Add equivalent call counters to `/home/zzzccc/BASS/segfuzz` on a protected branch/minimal diff.
+- Run a SegFuzz smoke log showing program attempts, scheduled calls, observed executed calls, and finished calls under the same metric definitions.
 
 ### Phase 2：冻结并完成固定资源 throughput 实验
 
