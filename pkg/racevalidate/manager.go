@@ -1780,7 +1780,7 @@ func logSNDriftSummary(task *validationTask, stablePairs []StablePairWithDelays,
 			if ok {
 				originField = fmt.Sprintf("free:%d use:%d", original.FreeSN, original.UseSN)
 			}
-			log.Logf(0, "uafvalidate: sn-drift pair key=%s vnkey=%s observed=%d/%d ref_sn=(free:%d use:%d) origin_sn=(%s) observed_sn=(free:%d-%d use:%d-%d) delta_from_ref=(free:%s use:%s) ref_tid=(free:%d use:%d) observed_tid=(free:%s use:%s) tid_exact=%t recommend_half_window=%d",
+			log.Logf(1, "uafvalidate: sn-drift pair key=%s vnkey=%s observed=%d/%d ref_sn=(free:%d use:%d) origin_sn=(%s) observed_sn=(free:%d-%d use:%d-%d) delta_from_ref=(free:%s use:%s) ref_tid=(free:%d use:%d) observed_tid=(free:%s use:%s) tid_exact=%t recommend_half_window=%d",
 				task.key, VarNamePairKey(&pair), samples.Count, expectedRepeats,
 				pair.FreeSN, pair.UseSN, originField, samples.FreeMin, samples.FreeMax, samples.UseMin, samples.UseMax,
 				formatSNDeltaRange(freeLow, freeHigh, freeOK), formatSNDeltaRange(useLow, useHigh, useOK),
@@ -2531,7 +2531,7 @@ func logUAFProbeOutput(key, attemptMode string, res *ExecutionResult) {
 			continue
 		}
 		if strings.Contains(line, "UAF_TARGET") || strings.Contains(line, "UAF pair") {
-			log.Logf(0, "uafvalidate: kernel target trace key=%s mode=%s %s", key, attemptMode, line)
+			log.Logf(1, "uafvalidate: kernel target trace key=%s mode=%s %s", key, attemptMode, line)
 		}
 	}
 }
@@ -2578,13 +2578,13 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		// ========== Layer 1: Exact match skip ==========
 		if sm.isInvalid(fullKey) {
 			skippedInvalid++
-			log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+			log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
 
 		if sm.isValidated(fullKey) {
 			skippedValidated++
-			log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+			log.Logf(1, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 			continue
 		}
 
@@ -2593,7 +2593,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 			skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 			if skip {
 				skippedBackoff++
-				log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
+				log.Logf(1, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
 					i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 				continue
 			}
@@ -2604,7 +2604,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		// ========== Execute verification ==========
-		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x",
+		log.Logf(1, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x",
 			i+1, len(stablePairs), task.key,
 			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack)
 
@@ -2636,7 +2636,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 				TargetDelayMode:       sm.cfg.TargetDelayMode,
 				TargetDelayModeKernel: TargetDelayModeID(sm.cfg.TargetDelayMode),
 			}
-			log.Logf(0, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
+			log.Logf(1, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
 				task.key, attemptMode, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
 				pairCopy.FreeSN, pairCopy.UseSN, pairCopy.FreeSNMin, pairCopy.FreeSNMax,
 				pairCopy.UseSNMin, pairCopy.UseSNMax, pairCopy.FreeTid, pairCopy.UseTid)
@@ -2655,7 +2655,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 				break
 			}
 			nextMode := attempts[attemptIndex+1].mode
-			log.Logf(0, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
+			log.Logf(1, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
 				attemptMode, task.key, vnKey, nextMode)
 		}
 
@@ -2700,7 +2700,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		}
 
 		totalAttempts := targetMatchAttemptsForLog(req, attemptRuns)
-		log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
+		log.Logf(1, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
 			execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
 			matchMode, attemptMode)
 
@@ -2790,7 +2790,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		if sm.varNameBackoffStore != nil {
 			sm.varNameBackoffStore.RecordFailure(&pair)
 			stats := sm.varNameBackoffStore.GetByPair(&pair)
-			log.Logf(0, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
+			log.Logf(1, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
 				vnKey, stats.BackoffScore(), stats.SkipProbability())
 		}
 	}
@@ -2881,13 +2881,13 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			// ========== Layer 1: Exact match skip ==========
 			if sm.isInvalid(fullKey) {
 				skippedInvalid++
-				log.Logf(0, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
+				log.Logf(1, "uafvalidate: L1 skip (exact) pair %d/%d key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
 			if sm.isValidated(fullKey) {
 				skippedValidated++
-				log.Logf(0, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
+				log.Logf(1, "uafvalidate: skipping validated pair %d/%d for key=%s", i+1, len(stablePairs), task.key)
 				continue
 			}
 
@@ -2896,7 +2896,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				skip, prob, stats := sm.varNameBackoffStore.ShouldSkip(&pair, rand.Float64)
 				if skip {
 					skippedBackoff++
-					log.Logf(0, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
+					log.Logf(1, "uafvalidate: L2 skip (backoff) pair %d/%d vnkey=%s score=%.2f prob=%.2f failures=%d successes=%d",
 						i+1, len(stablePairs), vnKey, stats.BackoffScore(), prob, stats.Failures, stats.Successes)
 					continue
 				}
@@ -2919,7 +2919,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		actualAccessDelayUs := verificationAccessDelayUs(spd.AccessDelayUs, sm.cfg)
 
 		// ========== Execute verification ==========
-		log.Logf(0, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus access_delay=%dus",
+		log.Logf(1, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus access_delay=%dus",
 			i+1, len(stablePairs), task.key,
 			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack,
 			actualStartDelayUs, actualAccessDelayUs)
@@ -2953,7 +2953,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				TargetDelayMode:       sm.cfg.TargetDelayMode,
 				TargetDelayModeKernel: TargetDelayModeID(sm.cfg.TargetDelayMode),
 			}
-			log.Logf(0, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
+			log.Logf(1, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
 				task.key, attemptMode, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
 				pairCopy.FreeSN, pairCopy.UseSN, pairCopy.FreeSNMin, pairCopy.FreeSNMax,
 				pairCopy.UseSNMin, pairCopy.UseSNMax, pairCopy.FreeTid, pairCopy.UseTid)
@@ -2972,7 +2972,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				break
 			}
 			nextMode := attempts[attemptIndex+1].mode
-			log.Logf(0, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
+			log.Logf(1, "uafvalidate: target match mode %s missed for key=%s vnkey=%s; retrying %s fallback",
 				attemptMode, task.key, vnKey, nextMode)
 		}
 
@@ -3023,11 +3023,11 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		}
 
 		if sm.cfg.VerifyDelaySweep && sm.cfg.VerifyDelaySteps > 1 {
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d (delay_sweep) status=%s%s target_match_mode=%s final_attempt_mode=%s",
+			log.Logf(1, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d (delay_sweep) status=%s%s target_match_mode=%s final_attempt_mode=%s",
 				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
 				matchMode, attemptMode)
 		} else {
-			log.Logf(0, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
+			log.Logf(1, "uafvalidate: verification run finished duration=%s crashed=%t%s triggered=%d/%d observed_target=%d status=%s%s target_match_mode=%s final_attempt_mode=%s",
 				execRes.Duration, execRes.Crashed, crashInfo, execRes.TriggeredCount, totalAttempts, execRes.ObservedTargetCount, status, statusDetail,
 				matchMode, attemptMode)
 		}
@@ -3138,7 +3138,7 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		if sm.varNameBackoffStore != nil {
 			sm.varNameBackoffStore.RecordFailure(&pair)
 			stats := sm.varNameBackoffStore.GetByPair(&pair)
-			log.Logf(0, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
+			log.Logf(1, "uafvalidate: pair failed verification, backoff score updated: vnkey=%s new_score=%.2f skip_prob=%.2f",
 				vnKey, stats.BackoffScore(), stats.SkipProbability())
 		}
 	}

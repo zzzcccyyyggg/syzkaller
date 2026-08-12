@@ -846,7 +846,7 @@ func (pool *snapshotVMPool) createNewVMWithSnapshot(ctx context.Context, index i
 
 func (pool *snapshotVMPool) restoreFromSnapshot(ctx context.Context, index int, state *snapshotVMState) (uafvalidate.Executor, error) {
 	restoreStart := time.Now()
-	log.Logf(0, "uafvalidate: vm %d restoring from snapshot '%s' with image '%s' (cold restart with -loadvm)", index, state.snapshotName, state.imagePath)
+	log.Logf(1, "uafvalidate: vm %d restoring from snapshot '%s' with image '%s' (cold restart with -loadvm)", index, state.snapshotName, state.imagePath)
 
 	// Cold restart approach: close the current VM and create a new one with -loadvm flag
 	// This is much faster than booting and then calling loadvm via QMP
@@ -869,7 +869,7 @@ func (pool *snapshotVMPool) restoreFromSnapshot(ctx context.Context, index int, 
 	if err != nil {
 		return nil, fmt.Errorf("failed to create VM with snapshot restore: %w", err)
 	}
-	log.Logf(0, "uafvalidate: vm %d CreateWithSnapshotAndImage took %v", index, time.Since(startTime))
+	log.Logf(1, "uafvalidate: vm %d CreateWithSnapshotAndImage took %v", index, time.Since(startTime))
 
 	// Step 3: Setup executor using cached binary paths (skip SCP copy)
 	execStart := time.Now()
@@ -892,7 +892,7 @@ func (pool *snapshotVMPool) restoreFromSnapshot(ctx context.Context, index int, 
 	// Update state with new VM instance
 	state.vm = vmInst
 
-	log.Logf(0, "uafvalidate: vm %d restored from snapshot successfully (total time: %v)", index, time.Since(restoreStart))
+	log.Logf(1, "uafvalidate: vm %d restored from snapshot successfully (total time: %v)", index, time.Since(restoreStart))
 
 	return &snapshotExecutorAdapter{
 		ExecutorAdapter: uafvalidate.NewExecutorAdapter(execInst, pool.cfg),
@@ -1076,7 +1076,7 @@ func (mgr *Manager) handleValidationResult(res *uafvalidate.ValidationResult) {
 		log.Logf(0, "uaf validation: runtime candidate pair %s", signatureKey)
 		log.Logf(0, "uaf validation: runtime candidate intersection for %s count=%d", signatureKey, len(res.StablePairs))
 		for idx, pair := range res.StablePairs {
-			log.Logf(0, "uaf validation: runtime candidate pair %s[%d]: free_access=%016x use_access=%016x free_stack=%016x use_stack=%016x signal=%016x time_diff=%dns free_sn=%d use_sn=%d lock_type=%d use_access_type=%d",
+			log.Logf(1, "uaf validation: runtime candidate pair %s[%d]: free_access=%016x use_access=%016x free_stack=%016x use_stack=%016x signal=%016x time_diff=%dns free_sn=%d use_sn=%d lock_type=%d use_access_type=%d",
 				signatureKey,
 				idx,
 				pair.FreeAccessName,

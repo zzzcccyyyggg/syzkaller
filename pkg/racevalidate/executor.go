@@ -1199,7 +1199,7 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 		return nil, fmt.Errorf("no valid barrier requests in batch")
 	}
 
-	log.Logf(0, "uafvalidate: vm=%d executing batch of %d barrier requests", vmIndex, len(queueReqs))
+	log.Logf(1, "uafvalidate: vm=%d executing batch of %d barrier requests", vmIndex, len(queueReqs))
 
 	// Create multi-request manager
 	manager := newMultiRequestManager(&cfgCopy, queueReqs, e.cfg.Debug, e.cfg)
@@ -1430,7 +1430,7 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 		}
 	}
 
-	log.Logf(0, "uafvalidate: vm=%d batch completed %d requests in %s", vmIndex, len(results), time.Since(start))
+	log.Logf(1, "uafvalidate: vm=%d batch completed %d requests in %s", vmIndex, len(results), time.Since(start))
 	return results, nil
 }
 
