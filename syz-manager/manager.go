@@ -503,6 +503,9 @@ func RunManager(mode *Mode, cfg *mgrconfig.Config) {
 	mgr.pool = vm.NewDispatcher(mgr.vmPool, mgr.fuzzerInstance)
 	mgr.http.Pool = mgr.pool
 	reproVMs := max(0, mgr.vmPool.Count()-mgr.cfg.FuzzingVMs)
+	if !mgr.cfg.Reproduce {
+		reproVMs = 0
+	}
 	mgr.reproLoop = manager.NewReproLoop(mgr, reproVMs, mgr.cfg.DashboardOnlyRepro)
 	mgr.http.ReproLoop = mgr.reproLoop
 	mgr.http.TogglePause = mgr.pool.TogglePause
@@ -2087,7 +2090,9 @@ func (mgr *Manager) setPhaseLocked(newPhase int) {
 	}
 	if newPhase == phaseTriagedHub {
 		// Start reproductions.
-		go mgr.reproLoop.Loop(vm.ShutdownCtx())
+		if mgr.cfg.Reproduce {
+			go mgr.reproLoop.Loop(vm.ShutdownCtx())
+		}
 	}
 	mgr.phase = newPhase
 }
@@ -2198,6 +2203,9 @@ func (mgr *Manager) dashboardReporter() {
 
 func (mgr *Manager) dashboardReproTasks() {
 	for range time.NewTicker(20 * time.Minute).C {
+		if !mgr.cfg.Reproduce {
+			continue
+		}
 		if !mgr.reproLoop.CanReproMore() {
 			// We don't need reproducers at the moment.
 			continue

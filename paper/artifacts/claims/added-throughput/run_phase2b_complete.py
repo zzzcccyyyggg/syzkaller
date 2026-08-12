@@ -138,6 +138,7 @@ class Runner:
             },
             "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
             "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
+            "stall_timeout_seconds": self.args.stall_timeout,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
                 "segfuzz": repo_metadata(SEGFUZZ_ROOT),
@@ -312,6 +313,7 @@ class Runner:
         cfg["sshkey"] = str(DDRD_ROOT / "images/bookworm.id_rsa")
         cfg["procs"] = procs
         cfg["reproduce"] = False
+        cfg["fuzzing_vms"] = vm_count
         vm_cfg = cfg.setdefault("vm", {})
         vm_cfg["count"] = vm_count
         vm_cfg["cpu"] = vm_cpu
@@ -334,6 +336,7 @@ class Runner:
         cfg["procs"] = self.args.segfuzz_procs
         cfg["reproduce"] = False
         cfg["vm"]["count"] = 1
+        cfg["fuzzing_vms"] = 1
         cfg["vm"]["cpu"] = vm_cpu
         cfg["vm"]["mem"] = 4096
         self.segfuzz = {
@@ -424,6 +427,7 @@ class Runner:
     ) -> None:
         start = time.monotonic()
         last_tick = 0.0
+        watchdog = ProgressWatchdog(self.args.stall_timeout, "calls executed")
         while True:
             elapsed = time.monotonic() - start
             if elapsed >= duration:
@@ -431,6 +435,13 @@ class Runner:
             if should_tick(elapsed, last_tick):
                 self.record_mrpfuzz_tick(label, elapsed, sample_path, final=False)
                 last_tick = elapsed
+            stall_reason = watchdog.check(self.mrpfuzz["fuzz"]["bench"])
+            if stall_reason:
+                self.write_state("failed-stalled", label)
+                self.stop_process(fuzz_proc)
+                self.stop_process(validate_proc)
+                self.record_mrpfuzz_tick(label, time.monotonic() - start, sample_path, final=True)
+                raise SystemExit(f"{label}: {stall_reason}")
             if fuzz_proc.poll() is not None or validate_proc.poll() is not None:
                 break
             time.sleep(10)
@@ -449,6 +460,7 @@ class Runner:
     ) -> None:
         start = time.monotonic()
         last_tick = 0.0
+        watchdog = ProgressWatchdog(self.args.stall_timeout, "calls executed")
         while True:
             elapsed = time.monotonic() - start
             if elapsed >= duration:
@@ -456,6 +468,12 @@ class Runner:
             if should_tick(elapsed, last_tick):
                 self.record_single_tick(label, elapsed, sample_path, log_path, bench_path, proc, final=False)
                 last_tick = elapsed
+            stall_reason = watchdog.check(bench_path)
+            if stall_reason:
+                self.write_state("failed-stalled", label)
+                self.stop_process(proc)
+                self.record_single_tick(label, time.monotonic() - start, sample_path, log_path, bench_path, proc, final=True)
+                raise SystemExit(f"{label}: {stall_reason}")
             if proc.poll() is not None:
                 break
             time.sleep(10)
@@ -677,6 +695,33 @@ def segfuzz_vm_cpu(args: argparse.Namespace) -> int:
         return args.segfuzz_vm_cpu
     count = cpuset_cpu_count(args.segfuzz_cpuset)
     return count if count > 0 else 1
+
+
+class ProgressWatchdog:
+    def __init__(self, timeout: int, stat: str) -> None:
+        self.timeout = timeout
+        self.stat = stat
+        self.last_value: float | None = None
+        self.last_progress = time.monotonic()
+        self.started = False
+
+    def check(self, bench_path: Path) -> str | None:
+        if self.timeout <= 0:
+            return None
+        bench = latest_bench(bench_path)
+        stats = pick_stats(bench)
+        value = stats.get(self.stat)
+        now = time.monotonic()
+        if not isinstance(value, (int, float)):
+            return None
+        if self.last_value is None or value > self.last_value:
+            self.last_value = float(value)
+            self.last_progress = now
+            self.started = True
+            return None
+        if self.started and now-self.last_progress >= self.timeout:
+            return f"{self.stat} stalled at {value} for {self.timeout}s"
+        return None
 
 
 def should_tick(elapsed: float, last_tick: float) -> bool:
@@ -926,6 +971,7 @@ def parse_args() -> argparse.Namespace:
         help="Optional previous MRPFuzz workdir whose corpus/race DBs seed a race-active diagnostic run.",
     )
     parser.add_argument("--validate-start-delay", type=int, default=30)
+    parser.add_argument("--stall-timeout", type=int, default=180, help="Abort a case if calls executed does not increase for this many seconds; 0 disables.")
     parser.add_argument("--min-free-gb", type=float, default=10.0)
     parser.add_argument("--build", action="store_true", help="Rebuild manager/executor binaries before running")
     return parser.parse_args()
