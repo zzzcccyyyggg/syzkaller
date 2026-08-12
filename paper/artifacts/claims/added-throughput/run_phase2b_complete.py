@@ -336,7 +336,6 @@ class Runner:
         cfg["procs"] = self.args.segfuzz_procs
         cfg["reproduce"] = False
         cfg["vm"]["count"] = 1
-        cfg["fuzzing_vms"] = 1
         cfg["vm"]["cpu"] = vm_cpu
         cfg["vm"]["mem"] = 4096
         self.segfuzz = {
