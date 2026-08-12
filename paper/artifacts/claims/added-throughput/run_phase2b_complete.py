@@ -88,7 +88,7 @@ class Runner:
             self.write_state("running", "mrpfuzz-complete")
             self.run_mrpfuzz_complete()
         if self.want_segfuzz():
-            self.write_state("running", "segfuzz-4core")
+            self.write_state("running", self.segfuzz["name"])
             self.run_segfuzz()
         self.write_metrics()
         self.write_summary()
@@ -132,6 +132,8 @@ class Runner:
                 "mrpfuzz_fuzz_cpuset": self.args.mrpfuzz_fuzz_cpuset,
                 "mrpfuzz_validate_cpuset": self.args.mrpfuzz_validate_cpuset,
                 "segfuzz_cpuset": self.args.segfuzz_cpuset,
+                "segfuzz_vm_cpu": segfuzz_vm_cpu(self.args),
+                "segfuzz_procs": self.args.segfuzz_procs,
             },
             "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
             "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
@@ -319,23 +321,25 @@ class Runner:
         cfg["vmlinux"] = str(MRPFUZZ_BINARY_OUTPUT / "ptmx/vmlinux")
 
     def prepare_segfuzz(self) -> None:
-        workdir = self.workdir_root / "segfuzz-4core"
+        vm_cpu = segfuzz_vm_cpu(self.args)
+        name = f"segfuzz-{vm_cpu}core"
+        workdir = self.workdir_root / name
         workdir.mkdir(parents=True, exist_ok=True)
         shutil.copy2(PTMX_CORPUS, workdir / "corpus.db")
         with SEGFUZZ_SRC_CONFIG.open() as f:
             cfg = json.load(f)
         cfg["workdir"] = str(workdir)
         cfg["http"] = "127.0.0.1:64311"
-        cfg["procs"] = 1
+        cfg["procs"] = self.args.segfuzz_procs
         cfg["reproduce"] = False
         cfg["vm"]["count"] = 1
-        cfg["vm"]["cpu"] = 4
+        cfg["vm"]["cpu"] = vm_cpu
         cfg["vm"]["mem"] = 4096
         self.segfuzz = {
-            "name": "segfuzz-4core",
-            "config": self.config_dir / "segfuzz-4core.cfg",
-            "log": self.log_dir / "segfuzz-4core.log",
-            "bench": self.bench_dir / "segfuzz-4core.json",
+            "name": name,
+            "config": self.config_dir / f"{name}.cfg",
+            "log": self.log_dir / f"{name}.log",
+            "bench": self.bench_dir / f"{name}.json",
             "workdir": workdir,
             "cpuset": self.args.segfuzz_cpuset,
         }
@@ -377,14 +381,14 @@ class Runner:
         proc = self.start_process(cmd, SEGFUZZ_GO_ROOT, case["log"])
         case["pid"] = proc.pid
         self.monitor_single(
-            "segfuzz-4core",
+            case["name"],
             proc,
             duration=self.args.duration,
-            sample_path=self.samples_dir / "segfuzz-4core.jsonl",
+            sample_path=self.samples_dir / f"{case['name']}.jsonl",
             log_path=case["log"],
             bench_path=case["bench"],
         )
-        self.metrics_rows.append(self.compute_bench_metrics("segfuzz-4core", "segfuzz", case["bench"]))
+        self.metrics_rows.append(self.compute_bench_metrics(case["name"], "segfuzz", case["bench"]))
         self.write_metrics()
 
     def start_process(self, cmd: list[str], cwd: Path, log_path: Path) -> subprocess.Popen[bytes]:
@@ -600,6 +604,8 @@ class Runner:
             f"- MRPFuzz fuzz cpuset: `{self.args.mrpfuzz_fuzz_cpuset}`",
             f"- MRPFuzz validate cpuset: `{self.args.mrpfuzz_validate_cpuset}`",
             f"- SegFuzz cpuset: `{self.args.segfuzz_cpuset}`",
+            f"- SegFuzz VM CPUs: `{segfuzz_vm_cpu(self.args)}`",
+            f"- SegFuzz procs: `{self.args.segfuzz_procs}`",
             f"- Metrics: `{self.metrics_path}`",
             "",
             "This is a diagnostic run. Treat results as preliminary until repeated.",
@@ -650,6 +656,31 @@ def manager_cmd(
         cmd += ["-mode", mode]
     cmd += ["-config", str(config), "-bench", str(bench)]
     return cmd
+
+
+def cpuset_cpu_count(cpuset: str) -> int:
+    count = 0
+    for part in cpuset.split(","):
+        part = part.strip()
+        if not part:
+            continue
+        if "-" in part:
+            start_s, end_s = part.split("-", 1)
+            start, end = int(start_s), int(end_s)
+            if end < start:
+                raise ValueError(f"invalid cpuset range: {part}")
+            count += end - start + 1
+        else:
+            int(part)
+            count += 1
+    return count
+
+
+def segfuzz_vm_cpu(args: argparse.Namespace) -> int:
+    if args.segfuzz_vm_cpu > 0:
+        return args.segfuzz_vm_cpu
+    count = cpuset_cpu_count(args.segfuzz_cpuset)
+    return count if count > 0 else 1
 
 
 def should_tick(elapsed: float, last_tick: float) -> bool:
@@ -859,6 +890,8 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mrpfuzz-fuzz-cpuset", default="8,9")
     parser.add_argument("--mrpfuzz-validate-cpuset", default="10,11")
     parser.add_argument("--segfuzz-cpuset", default="8,9,10,11")
+    parser.add_argument("--segfuzz-vm-cpu", type=int, default=0, help="SegFuzz VM CPUs; default is the cpuset CPU count.")
+    parser.add_argument("--segfuzz-procs", type=int, default=1)
     parser.add_argument("--mrpfuzz-max-pairs-per-task", type=int, default=32)
     parser.add_argument(
         "--mrpfuzz-seed-workdir",
