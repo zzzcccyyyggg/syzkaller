@@ -134,6 +134,7 @@ class Runner:
                 "segfuzz_cpuset": self.args.segfuzz_cpuset,
             },
             "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
+            "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
                 "segfuzz": repo_metadata(SEGFUZZ_ROOT),
@@ -249,6 +250,7 @@ class Runner:
         uaf_validate["continue_after_hb"] = True
         uaf_validate.setdefault("max_batch_timeout_seconds", 600)
         uaf_validate.setdefault("idle_reload_seconds", 10)
+        uaf_validate["max_pairs_per_task"] = self.args.mrpfuzz_max_pairs_per_task
         validate_cfg["vm_running_time"] = 3600
 
         self.mrpfuzz = {
@@ -857,6 +859,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mrpfuzz-fuzz-cpuset", default="8,9")
     parser.add_argument("--mrpfuzz-validate-cpuset", default="10,11")
     parser.add_argument("--segfuzz-cpuset", default="8,9,10,11")
+    parser.add_argument("--mrpfuzz-max-pairs-per-task", type=int, default=32)
     parser.add_argument(
         "--mrpfuzz-seed-workdir",
         default="",

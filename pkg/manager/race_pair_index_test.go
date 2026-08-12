@@ -118,6 +118,63 @@ func TestRacePairIndexStoreBatchObserveAndMarkQueued(t *testing.T) {
 	}
 }
 
+func TestRacePairIndexStoreBatchProcessingAndProcessed(t *testing.T) {
+	store, err := NewRacePairIndexStore(t.TempDir())
+	if err != nil {
+		t.Fatalf("failed to create pair index: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close pair index: %v", cerr)
+		}
+	})
+
+	entryA := testRacePairIndexEntry(0x20, 0x30, 0x40, 0x50, time.Unix(0, 1))
+	entryB := testRacePairIndexEntry(0x21, 0x31, 0x41, 0x51, time.Unix(0, 2))
+	records, err := store.ObserveRefs([]RaceCorpusRecordRef{
+		{ID: "corpus-a", Entry: entryA},
+		{ID: "corpus-b", Entry: entryB},
+	})
+	if err != nil {
+		t.Fatalf("ObserveRefs failed: %v", err)
+	}
+	var keys []string
+	for _, record := range records {
+		keys = append(keys, record.PairKey)
+	}
+	if err := store.MarkProcessingBatch(append(keys, keys[0])); err != nil {
+		t.Fatalf("MarkProcessingBatch failed: %v", err)
+	}
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Processing != 2 {
+		t.Fatalf("processing stats = %+v, want 2 processing", stats)
+	}
+	for _, key := range keys {
+		record, err := store.Get(key)
+		if err != nil {
+			t.Fatalf("Get %s failed: %v", key, err)
+		}
+		if record.ValidateAttempts != 1 {
+			t.Fatalf("ValidateAttempts for %s = %d, want 1", key, record.ValidateAttempts)
+		}
+	}
+
+	store.MarkPairValidated(*entryA.Pairs[0], nil)
+	if err := store.MarkProcessedBatch(keys); err != nil {
+		t.Fatalf("MarkProcessedBatch failed: %v", err)
+	}
+	stats, err = store.Stats()
+	if err != nil {
+		t.Fatalf("Stats after processed failed: %v", err)
+	}
+	if stats.Validated != 1 || stats.Processed != 1 {
+		t.Fatalf("final stats = %+v, want one validated and one processed", stats)
+	}
+}
+
 func TestRacePairIndexStoreReloadPreventsStateRegression(t *testing.T) {
 	workdir := t.TempDir()
 

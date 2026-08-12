@@ -259,16 +259,14 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 				}
 				if res.Entry != nil {
 					if mgr.uafPairIndex != nil {
-						for _, pairKey := range validationPairKeys(res.Entry) {
-							if err := mgr.uafPairIndex.MarkProcessed(pairKey); err != nil {
-								log.Errorf("uaf validation queue: failed to mark processed %s: %v", pairKey, err)
-							}
+						pairKeys := validationPairKeys(res.Entry)
+						if err := mgr.uafPairIndex.MarkProcessedBatch(pairKeys); err != nil {
+							log.Errorf("uaf validation queue: failed to mark %d pairs processed: %v", len(pairKeys), err)
 						}
 					}
-					for _, queueKey := range validationQueueKeys(res.Entry) {
-						if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
-							log.Errorf("uaf validation queue: failed to ack %s: %v", queueKey, err)
-						}
+					queueKeys := validationQueueKeys(res.Entry)
+					if err := mgr.uafValidateQueue.AckBatch(queueKeys); err != nil {
+						log.Errorf("uaf validation queue: failed to ack %d queue entries: %v", len(queueKeys), err)
 					}
 				}
 			}
@@ -374,6 +372,12 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 	if err != nil {
 		return sinceSeq, 0, 0, err
 	}
+	rawGroups := len(groups)
+	maxPairsPerTask := 0
+	if cfg := mgr.cfg.Experimental.UAFValidate; cfg != nil {
+		maxPairsPerTask = cfg.MaxPairsPerTask
+	}
+	groups = manager.SplitQueuedUAFCorpusGroups(groups, maxPairsPerTask)
 
 	accepted := 0
 	acked := 0
@@ -381,6 +385,11 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 	skipped := 0
 	maxHistory := 0
 	groupedPairs := 0
+	reader := manager.NewStreamingUAFCorpusReader(filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db"), mgr.target)
+	corpusCache := make(map[string]*fuzzer.UAFCorpusEntry, rawGroups)
+	var processingPairKeys []string
+	var processedPairKeys []string
+	var ackQueueKeys []string
 	for _, group := range groups {
 		if group == nil || group.CorpusRecordID == "" || len(group.Items) == 0 {
 			malformed++
@@ -390,68 +399,80 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 		if group.HistoryCount > maxHistory {
 			maxHistory = group.HistoryCount
 		}
-		entry, materializeErr := mgr.materializeValidationGroup(group)
+		entry, materializeErr := mgr.materializeValidationGroup(group, reader, corpusCache)
 		if materializeErr != nil {
+			mgr.flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys)
 			return sinceSeq, accepted, acked, materializeErr
 		}
 		if entry == nil {
 			malformed++
-			for _, queueKey := range group.QueueKeys {
-				if queueKey == "" {
-					continue
-				}
-				if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
-					log.Errorf("uaf validation queue: failed to ack malformed item %s: %v", queueKey, err)
-				} else {
-					acked++
-				}
-			}
+			queueKeys := dedupeStrings(group.QueueKeys)
+			ackQueueKeys = append(ackQueueKeys, queueKeys...)
+			acked += len(queueKeys)
 			continue
 		}
 		if stage.Enqueue(entry) {
-			if mgr.uafPairIndex != nil {
-				for _, pairKey := range group.PairKeys {
-					if err := mgr.uafPairIndex.MarkProcessing(pairKey); err != nil {
-						log.Errorf("uaf validation queue: failed to mark processing %s: %v", pairKey, err)
-					}
-				}
-			}
+			processingPairKeys = append(processingPairKeys, group.PairKeys...)
 			accepted++
 			continue
 		}
 		skipped++
-		if mgr.uafPairIndex != nil {
-			for _, pairKey := range group.PairKeys {
-				if err := mgr.uafPairIndex.MarkProcessed(pairKey); err != nil {
-					log.Errorf("uaf validation queue: failed to mark skipped pair %s processed: %v", pairKey, err)
-				}
-			}
-		}
-		for _, queueKey := range group.QueueKeys {
-			if err := mgr.uafValidateQueue.Ack(queueKey); err != nil {
-				log.Errorf("uaf validation queue: failed to ack skipped item %s: %v", queueKey, err)
-			} else {
-				acked++
-			}
-		}
+		processedPairKeys = append(processedPairKeys, group.PairKeys...)
+		queueKeys := dedupeStrings(group.QueueKeys)
+		ackQueueKeys = append(ackQueueKeys, queueKeys...)
+		acked += len(queueKeys)
 	}
+	mgr.flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys)
 	if len(groups) != 0 {
-		log.Logf(1, "uaf validation queue: loaded groups=%d grouped_pairs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
-			len(groups), groupedPairs, accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
+		log.Logf(0, "uaf validation queue: loaded groups=%d raw_groups=%d max_pairs_per_task=%d grouped_pairs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
+			len(groups), rawGroups, maxPairsPerTask, groupedPairs, accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
 	}
 
 	return maxSeq, accepted, acked, nil
 }
 
-func (mgr *Manager) materializeValidationGroup(group *manager.QueuedUAFCorpusGroup) (*fuzzer.UAFCorpusEntry, error) {
+func (mgr *Manager) flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys []string) {
+	if mgr == nil {
+		return
+	}
+	if mgr.uafPairIndex != nil {
+		if err := mgr.uafPairIndex.MarkProcessingBatch(processingPairKeys); err != nil {
+			log.Errorf("uaf validation queue: failed to mark %d pairs processing: %v", len(processingPairKeys), err)
+		}
+		if err := mgr.uafPairIndex.MarkProcessedBatch(processedPairKeys); err != nil {
+			log.Errorf("uaf validation queue: failed to mark %d skipped pairs processed: %v", len(processedPairKeys), err)
+		}
+	}
+	if mgr.uafValidateQueue != nil {
+		if err := mgr.uafValidateQueue.AckBatch(ackQueueKeys); err != nil {
+			log.Errorf("uaf validation queue: failed to ack %d queue entries: %v", len(ackQueueKeys), err)
+		}
+	}
+}
+
+func (mgr *Manager) materializeValidationGroup(group *manager.QueuedUAFCorpusGroup,
+	reader *manager.StreamingUAFCorpusReader, corpusCache map[string]*fuzzer.UAFCorpusEntry) (*fuzzer.UAFCorpusEntry, error) {
 	if mgr == nil || group == nil || group.CorpusRecordID == "" {
 		return nil, nil
 	}
-	reader := manager.NewStreamingUAFCorpusReader(filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db"), mgr.target)
-	entry, _, err := reader.LoadEntryByKey(group.CorpusRecordID, nil)
-	if err != nil {
-		return nil, err
+	if reader == nil {
+		reader = manager.NewStreamingUAFCorpusReader(filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db"), mgr.target)
 	}
+	base, cached := corpusCache[group.CorpusRecordID]
+	if !cached {
+		var err error
+		base, _, err = reader.LoadEntryByKey(group.CorpusRecordID, nil)
+		if err != nil {
+			return nil, err
+		}
+		if corpusCache != nil {
+			corpusCache[group.CorpusRecordID] = base
+		}
+	}
+	if base == nil {
+		return nil, nil
+	}
+	entry := base.Clone()
 	if entry == nil {
 		return nil, nil
 	}

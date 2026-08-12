@@ -315,28 +315,22 @@ func (store *RacePairIndexStore) MarkQueuedBatch(queued map[string]uint64) error
 }
 
 func (store *RacePairIndexStore) MarkProcessing(pairKey string) error {
-	return store.updateStatus(pairKey, RacePairProcessing, func(rec *RacePairRecord, now time.Time) {
+	return store.MarkProcessingBatch([]string{pairKey})
+}
+
+func (store *RacePairIndexStore) MarkProcessingBatch(pairKeys []string) error {
+	return store.updateStatusBatch(pairKeys, RacePairProcessing, false, func(rec *RacePairRecord, now time.Time) {
 		rec.ValidateAttempts++
 	})
 }
 
 func (store *RacePairIndexStore) MarkProcessed(pairKey string) error {
-	if store == nil || pairKey == "" {
-		return nil
-	}
-	return store.withWriteTxn(func() error {
-		rec, err := store.getLocked(pairKey)
-		if err != nil || rec == nil {
-			return err
-		}
-		if rec.Status == RacePairValidated || rec.Status == RacePairInvalid {
-			return nil
-		}
-		now := time.Now()
-		rec.Status = RacePairProcessed
-		rec.UpdatedAt = now
+	return store.MarkProcessedBatch([]string{pairKey})
+}
+
+func (store *RacePairIndexStore) MarkProcessedBatch(pairKeys []string) error {
+	return store.updateStatusBatch(pairKeys, RacePairProcessed, true, func(rec *RacePairRecord, now time.Time) {
 		rec.LastProcessedAt = now
-		return store.saveLocked(rec)
 	})
 }
 
@@ -362,21 +356,42 @@ func (store *RacePairIndexStore) updatePairStatus(pair *ddrd.MayUAFPair, status 
 }
 
 func (store *RacePairIndexStore) updateStatus(pairKey string, status RacePairStatus, update func(*RacePairRecord, time.Time)) error {
-	if store == nil || pairKey == "" {
+	return store.updateStatusBatch([]string{pairKey}, status, false, update)
+}
+
+func (store *RacePairIndexStore) updateStatusBatch(pairKeys []string, status RacePairStatus, keepFinal bool,
+	update func(*RacePairRecord, time.Time)) error {
+	if store == nil || len(pairKeys) == 0 {
 		return nil
 	}
 	return store.withWriteTxn(func() error {
-		rec, err := store.getLocked(pairKey)
-		if err != nil || rec == nil {
-			return err
-		}
 		now := time.Now()
-		rec.Status = status
-		rec.UpdatedAt = now
-		if update != nil {
-			update(rec, now)
+		seen := make(map[string]struct{}, len(pairKeys))
+		for _, pairKey := range pairKeys {
+			if pairKey == "" {
+				continue
+			}
+			if _, ok := seen[pairKey]; ok {
+				continue
+			}
+			seen[pairKey] = struct{}{}
+			rec, err := store.getLocked(pairKey)
+			if err != nil || rec == nil {
+				return err
+			}
+			if keepFinal && (rec.Status == RacePairValidated || rec.Status == RacePairInvalid) {
+				continue
+			}
+			rec.Status = status
+			rec.UpdatedAt = now
+			if update != nil {
+				update(rec, now)
+			}
+			if err := store.saveLocked(rec); err != nil {
+				return err
+			}
 		}
-		return store.saveLocked(rec)
+		return nil
 	})
 }
 

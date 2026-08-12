@@ -788,10 +788,7 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		}
 	}
 
-	key := entryKey
-	if clone.CorpusRecordID != "" && (len(clone.ValidateQueueKeys) != 0 || clone.ValidateQueueKey != "") {
-		key = "corpus-" + clone.CorpusRecordID
-	}
+	key := validationTaskKey(entryKey, clone)
 	sm.mu.Lock()
 	defer sm.mu.Unlock()
 	if sm.closed {
@@ -828,6 +825,29 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 	sm.pending[key] = task
 	sm.seenKeys[key] = struct{}{}
 	return task
+}
+
+func validationTaskKey(entryKey string, entry *fuzzer.UAFCorpusEntry) string {
+	if entry == nil || entry.CorpusRecordID == "" {
+		return entryKey
+	}
+	queueKey := firstValidationQueueKey(entry)
+	if queueKey == "" {
+		return entryKey
+	}
+	return fmt.Sprintf("corpus-%s-queue-%d-%s", entry.CorpusRecordID, entry.ValidateQueueSeq, queueKey)
+}
+
+func firstValidationQueueKey(entry *fuzzer.UAFCorpusEntry) string {
+	if entry == nil {
+		return ""
+	}
+	for _, key := range entry.ValidateQueueKeys {
+		if key != "" {
+			return key
+		}
+	}
+	return entry.ValidateQueueKey
 }
 
 func (sm *StageManager) prepareTaskRef(ref *ValidationEntryRef) *validationTask {

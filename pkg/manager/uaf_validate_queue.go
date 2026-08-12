@@ -410,18 +410,7 @@ func (store *UAFValidateQueueStore) EntriesSinceGroupedByCorpus(sinceSeq uint64)
 		if item == nil {
 			continue
 		}
-		group.Items = append(group.Items, item)
-		group.QueueKeys = append(group.QueueKeys, item.Key)
-		group.PairKeys = append(group.PairKeys, item.PairKey)
-		if item.Pair.UAFPairID() != 0 {
-			group.Pairs = append(group.Pairs, item.Pair)
-		}
-		if item.HistoryCount > group.HistoryCount {
-			group.HistoryCount = item.HistoryCount
-		}
-		if group.FirstSeq == 0 || item.Seq < group.FirstSeq {
-			group.FirstSeq = item.Seq
-		}
+		appendQueuedGroupItem(group, item)
 	}
 
 	groups := make([]*QueuedUAFCorpusGroup, 0, len(order))
@@ -435,12 +424,93 @@ func (store *UAFValidateQueueStore) EntriesSinceGroupedByCorpus(sinceSeq uint64)
 	return groups, maxSeq, nil
 }
 
+// SplitQueuedUAFCorpusGroups bounds how much pair work one materialized corpus
+// task can carry. It preserves the original queue order and keeps each queue key
+// in exactly one returned group so callers can ack completed chunks precisely.
+func SplitQueuedUAFCorpusGroups(groups []*QueuedUAFCorpusGroup, maxPairs int) []*QueuedUAFCorpusGroup {
+	if maxPairs <= 0 || len(groups) == 0 {
+		return groups
+	}
+
+	result := make([]*QueuedUAFCorpusGroup, 0, len(groups))
+	for _, group := range groups {
+		if group == nil || len(group.PairKeys) <= maxPairs {
+			result = append(result, group)
+			continue
+		}
+
+		var chunk *QueuedUAFCorpusGroup
+		chunkPairs := 0
+		flush := func() {
+			if chunk == nil || len(chunk.Items) == 0 {
+				return
+			}
+			result = append(result, chunk)
+			chunk = nil
+			chunkPairs = 0
+		}
+		for _, item := range group.Items {
+			if item == nil {
+				continue
+			}
+			itemPairs := 0
+			if item.PairKey != "" {
+				itemPairs = 1
+			}
+			if chunk != nil && chunkPairs > 0 && itemPairs > 0 && chunkPairs+itemPairs > maxPairs {
+				flush()
+			}
+			if chunk == nil {
+				chunk = &QueuedUAFCorpusGroup{
+					CorpusRecordID: group.CorpusRecordID,
+				}
+			}
+			appendQueuedGroupItem(chunk, item)
+			chunkPairs += itemPairs
+		}
+		flush()
+	}
+	return result
+}
+
+func appendQueuedGroupItem(group *QueuedUAFCorpusGroup, item *QueuedUAFCorpusEntry) {
+	if group == nil || item == nil {
+		return
+	}
+	group.Items = append(group.Items, item)
+	group.QueueKeys = append(group.QueueKeys, item.Key)
+	group.PairKeys = append(group.PairKeys, item.PairKey)
+	if item.Pair.UAFPairID() != 0 {
+		group.Pairs = append(group.Pairs, item.Pair)
+	}
+	if item.HistoryCount > group.HistoryCount {
+		group.HistoryCount = item.HistoryCount
+	}
+	if group.FirstSeq == 0 || item.Seq < group.FirstSeq {
+		group.FirstSeq = item.Seq
+	}
+}
+
 func (store *UAFValidateQueueStore) Ack(key string) error {
-	if store == nil || key == "" {
+	return store.AckBatch([]string{key})
+}
+
+func (store *UAFValidateQueueStore) AckBatch(keys []string) error {
+	if store == nil || len(keys) == 0 {
 		return nil
 	}
 	return store.withWriteTxn(func() error {
-		store.db.Delete(key)
+		seen := make(map[string]struct{}, len(keys))
+		for _, key := range keys {
+			if key == "" {
+				continue
+			}
+			if _, ok := seen[key]; ok {
+				continue
+			}
+			seen[key] = struct{}{}
+			store.db.Delete(key)
+		}
 		return nil
 	})
 }

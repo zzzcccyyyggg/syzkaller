@@ -1,6 +1,7 @@
 package manager
 
 import (
+	"fmt"
 	"sync"
 	"testing"
 	"time"
@@ -486,6 +487,54 @@ func TestUAFValidateQueueStoreGroupsEntriesByCorpusRecord(t *testing.T) {
 	}
 }
 
+func TestSplitQueuedUAFCorpusGroupsByPairLimit(t *testing.T) {
+	group := &QueuedUAFCorpusGroup{CorpusRecordID: "record-shared"}
+	for i := 0; i < 5; i++ {
+		pair := ddrd.MayUAFPair{
+			Signal:         uint64(i + 1),
+			FreeAccessName: uint64(0x10 + i),
+			UseAccessName:  uint64(0x20 + i),
+			FreeCallStack:  uint64(0x30 + i),
+			UseCallStack:   uint64(0x40 + i),
+		}
+		appendQueuedGroupItem(group, &QueuedUAFCorpusEntry{
+			Key:            fmt.Sprintf("queue-%d", i),
+			Seq:            uint64(i + 1),
+			PairKey:        fmt.Sprintf("pair-%d", i),
+			CorpusRecordID: "record-shared",
+			Pair:           pair,
+			HistoryCount:   i + 1,
+		})
+	}
+
+	chunks := SplitQueuedUAFCorpusGroups([]*QueuedUAFCorpusGroup{group}, 2)
+	if len(chunks) != 3 {
+		t.Fatalf("expected 3 chunks, got %d", len(chunks))
+	}
+	wantSizes := []int{2, 2, 1}
+	wantFirstSeqs := []uint64{1, 3, 5}
+	var gotQueueKeys []string
+	for i, chunk := range chunks {
+		if chunk.CorpusRecordID != "record-shared" {
+			t.Fatalf("chunk %d corpus id = %q", i, chunk.CorpusRecordID)
+		}
+		if len(chunk.PairKeys) != wantSizes[i] || len(chunk.QueueKeys) != wantSizes[i] || len(chunk.Pairs) != wantSizes[i] {
+			t.Fatalf("chunk %d sizes pair_keys=%d queue_keys=%d pairs=%d, want %d",
+				i, len(chunk.PairKeys), len(chunk.QueueKeys), len(chunk.Pairs), wantSizes[i])
+		}
+		if chunk.FirstSeq != wantFirstSeqs[i] {
+			t.Fatalf("chunk %d first seq = %d, want %d", i, chunk.FirstSeq, wantFirstSeqs[i])
+		}
+		gotQueueKeys = append(gotQueueKeys, chunk.QueueKeys...)
+	}
+	for i, key := range gotQueueKeys {
+		want := fmt.Sprintf("queue-%d", i)
+		if key != want {
+			t.Fatalf("queue key %d = %q, want %q", i, key, want)
+		}
+	}
+}
+
 func TestUAFValidateQueueStoreBatchEnqueue(t *testing.T) {
 	target, err := prog.GetTarget("test", "64")
 	if err != nil {
@@ -529,6 +578,47 @@ func TestUAFValidateQueueStoreBatchEnqueue(t *testing.T) {
 	}
 	if stats.Pending != 2 || stats.WithPairKey != 2 || stats.WithCorpusRecord != 2 {
 		t.Fatalf("unexpected queue stats: %+v", stats)
+	}
+}
+
+func TestUAFValidateQueueStoreAckBatch(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+
+	store, err := NewUAFValidateQueueStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create queue store: %v", err)
+	}
+	t.Cleanup(func() {
+		if cerr := store.Close(); cerr != nil {
+			t.Fatalf("failed to close queue store: %v", cerr)
+		}
+	})
+
+	entryA := testQueueEntry(0x30, 0x40, 0x50, 0x60, time.Unix(0, 1))
+	entryB := testQueueEntry(0x31, 0x41, 0x51, 0x61, time.Unix(0, 2))
+	recordA := observeQueueEntry(t, store, entryA, "record-a")
+	recordB := observeQueueEntry(t, store, entryB, "record-b")
+	keyA, _, _, err := store.EnqueueRecord(recordA)
+	if err != nil {
+		t.Fatalf("EnqueueRecord A failed: %v", err)
+	}
+	keyB, _, _, err := store.EnqueueRecord(recordB)
+	if err != nil {
+		t.Fatalf("EnqueueRecord B failed: %v", err)
+	}
+
+	if err := store.AckBatch([]string{keyA, keyB, keyA, ""}); err != nil {
+		t.Fatalf("AckBatch failed: %v", err)
+	}
+	stats, err := store.Stats()
+	if err != nil {
+		t.Fatalf("Stats failed: %v", err)
+	}
+	if stats.Pending != 0 {
+		t.Fatalf("pending after AckBatch = %d, want 0", stats.Pending)
 	}
 }
 

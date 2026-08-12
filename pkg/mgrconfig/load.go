@@ -427,6 +427,12 @@ func (cfg *Config) initUAFValidate() error {
 	if validate.MaxStablePairsPerEntry < 0 {
 		return fmt.Errorf("experimental.uaf_validate.max_stable_pairs_per_entry must be >= 0")
 	}
+	if validate.MaxPairsPerTask < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_pairs_per_task must be >= 0")
+	}
+	if validate.MaxPairsPerTask == 0 {
+		validate.MaxPairsPerTask = 32
+	}
 	if validate.ExecutorProgramTimeoutSeconds < 0 {
 		return fmt.Errorf("experimental.uaf_validate.executor_program_timeout_seconds must be >= 0")
 	}

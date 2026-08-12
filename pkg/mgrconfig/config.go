@@ -667,6 +667,10 @@ type UAFValidateConfig struct {
 	// MaxStablePairsPerEntry limits total stable pairs verified for one corpus entry.
 	// Zero means no limit.
 	MaxStablePairsPerEntry int `json:"max_stable_pairs_per_entry,omitempty"`
+	// MaxPairsPerTask limits how many queued race pairs are bundled into one
+	// continuous validation task for the same corpus record. Bounded tasks let
+	// queue ack and pair-index status advance incrementally during long runs.
+	MaxPairsPerTask int `json:"max_pairs_per_task,omitempty"`
 	// CollectionOnly stops after the replay+collection phase and skips target-pair
 	// verification. It is useful for no-history sensitivity probes that only need
 	// to count runtime-observed pairs.

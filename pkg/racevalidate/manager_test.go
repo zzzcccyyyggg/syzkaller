@@ -629,6 +629,44 @@ func TestStageManagerDedup(t *testing.T) {
 	}
 }
 
+func TestStageManagerCorpusQueueChunksUseDistinctKeys(t *testing.T) {
+	mgr := NewStageManager(Config{MaxConcurrent: 1}, nil)
+	makeEntry := func(queueKey string, seq uint64, pair ddrd.MayUAFPair) *fuzzer.UAFCorpusEntry {
+		pairCopy := pair
+		return &fuzzer.UAFCorpusEntry{
+			Profile: fuzzer.UAFPairProfile{
+				FreeAccessName: pair.FreeAccessName,
+				UseAccessName:  pair.UseAccessName,
+				FreeCallStack:  pair.FreeCallStack,
+				UseCallStack:   pair.UseCallStack,
+			},
+			PairBasicInfo:     pair,
+			Pairs:             []*ddrd.MayUAFPair{&pairCopy},
+			ValidateQueueKey:  queueKey,
+			ValidateQueueSeq:  seq,
+			ValidatePairKey:   queueKey,
+			ValidateQueueKeys: []string{queueKey},
+			ValidatePairKeys:  []string{queueKey},
+			CorpusRecordID:    "record-shared",
+		}
+	}
+	pairA := ddrd.MayUAFPair{Signal: 1, FreeAccessName: 0x10, UseAccessName: 0x20, FreeCallStack: 0x30, UseCallStack: 0x40}
+	pairB := ddrd.MayUAFPair{Signal: 2, FreeAccessName: 0x11, UseAccessName: 0x21, FreeCallStack: 0x31, UseCallStack: 0x41}
+
+	if !mgr.Enqueue(makeEntry("queue-a", 1, pairA)) {
+		t.Fatalf("expected first chunk to enqueue")
+	}
+	if mgr.Enqueue(makeEntry("queue-a", 1, pairA)) {
+		t.Fatalf("expected duplicate chunk to be deduplicated")
+	}
+	if !mgr.Enqueue(makeEntry("queue-b", 2, pairB)) {
+		t.Fatalf("expected second chunk for same corpus to enqueue")
+	}
+	if got := mgr.SeenCount(); got != 2 {
+		t.Fatalf("seen count = %d, want 2", got)
+	}
+}
+
 type flakyExecutor struct {
 	mu    sync.Mutex
 	runs  int
