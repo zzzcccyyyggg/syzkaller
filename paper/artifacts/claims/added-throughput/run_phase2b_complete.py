@@ -2,8 +2,9 @@
 """Run a Phase 2B complete-MRPFuzz throughput diagnostic.
 
 This diagnostic compares:
-- MRPFuzz complete producer+validate path on a 4-host-core budget split 2+2.
-- SegFuzz baseline on a 4-host-core budget.
+- MRPFuzz fuzz producer throughput on a pinned fuzz cpuset, while validate
+  remains enabled on a separate background cpuset.
+- SegFuzz baseline throughput on a comparable pinned cpuset.
 
 It is intentionally a short diagnostic runner, not the final paper-grade repeat
 matrix. It keeps all workdirs and copied configs under the run artifact dir.
@@ -453,13 +454,13 @@ class Runner:
             if elapsed >= duration:
                 break
             if should_tick(elapsed, last_tick):
-                self.record_single_tick(label, elapsed, sample_path, log_path, bench_path, final=False)
+                self.record_single_tick(label, elapsed, sample_path, log_path, bench_path, proc, final=False)
                 last_tick = elapsed
             if proc.poll() is not None:
                 break
             time.sleep(10)
         self.stop_process(proc)
-        self.record_single_tick(label, time.monotonic() - start, sample_path, log_path, bench_path, final=True)
+        self.record_single_tick(label, time.monotonic() - start, sample_path, log_path, bench_path, proc, final=True)
 
     def stop_process(self, proc: subprocess.Popen[bytes]) -> None:
         if proc.poll() is None:
@@ -491,7 +492,7 @@ class Runner:
                 "bench": pick_stats(latest_bench(fuzz["bench"])),
                 "log": latest_fuzz_stats(fuzz["log"]),
                 "forbidden": forbidden_patterns(fuzz["log"]),
-                "qemu_pids": pgrep_qemu(fuzz["workdir"]),
+                "qemu_pids": qemu_child_pids(fuzz.get("pid")),
             },
             "validate": {
                 "pid": validate.get("pid"),
@@ -499,7 +500,7 @@ class Runner:
                 "queue": latest_validate_queue_stats(validate["log"]),
                 "storage": latest_storage_stats(validate["log"]),
                 "forbidden": forbidden_patterns(validate["log"]),
-                "qemu_pids": pgrep_qemu(validate["workdir"]),
+                "qemu_pids": qemu_child_pids(validate.get("pid")),
             },
             "disk_free_gb": round(shutil.disk_usage(DDRD_ROOT).free / (1024**3), 2),
         }
@@ -513,6 +514,7 @@ class Runner:
         sample_path: Path,
         log_path: Path,
         bench_path: Path,
+        proc: subprocess.Popen[bytes],
         final: bool,
     ) -> None:
         tick = {
@@ -521,6 +523,8 @@ class Runner:
             "case": label,
             "elapsed_seconds": round(elapsed, 3),
             "final": final,
+            "pid": proc.pid,
+            "qemu_pids": qemu_child_pids(proc.pid),
             "bench": pick_stats(latest_bench(bench_path)),
             "forbidden": forbidden_patterns(log_path),
             "disk_free_gb": round(shutil.disk_usage(DDRD_ROOT).free / (1024**3), 2),
@@ -829,14 +833,21 @@ def forbidden_patterns(path: Path) -> list[str]:
     return [pattern for pattern in FORBIDDEN_LOG_PATTERNS if pattern in text]
 
 
-def pgrep_qemu(workdir: Path) -> list[int]:
-    out = command_text(["pgrep", "-f", f"qemu-system.*{workdir}"]).strip()
+def qemu_child_pids(parent_pid: object) -> list[int]:
+    if not isinstance(parent_pid, int):
+        return []
+    out = command_text(["ps", "-eo", "pid=,ppid=,comm="]).strip()
     pids: list[int] = []
     for line in out.splitlines():
+        parts = line.split(None, 2)
+        if len(parts) != 3:
+            continue
         try:
-            pids.append(int(line))
+            pid, ppid, comm = int(parts[0]), int(parts[1]), parts[2]
         except ValueError:
-            pass
+            continue
+        if ppid == parent_pid and comm.startswith("qemu-system"):
+            pids.append(pid)
     return pids
 
 
