@@ -70,6 +70,8 @@ type Fuzzer struct {
 	execQueues
 }
 
+const raceSeedFuzzSampleRate = 0.5
+
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	target *prog.Target) *Fuzzer {
 	if cfg.NewInputFilter == nil {
@@ -335,11 +337,14 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	}
 	sources := []queue.Source{
 		ret.triageCandidateQueue,
-		ret.candidateQueue,
 	}
 	if fuzzer.uaf != nil {
 		// Set the smash queue for uaf mode to submit barrier requests
 		fuzzer.uaf.setQueue(ret.smashQueue)
+		sources = append(sources,
+			queue.Alternate(ret.smashQueue, skipQueue),
+			ret.candidateQueue,
+		)
 
 		// Add timing exploration source if enabled
 		if fuzzer.timingScheduler != nil && fuzzer.timingScheduler.Config().EnableTimingExploration {
@@ -361,12 +366,11 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 
 		sources = append(sources,
 			ret.triageQueue,
-			queue.Alternate(ret.smashQueue, skipQueue),
 			queue.Callback(fuzzer.genFuzz),
 		)
 
 	} else {
-		sources = append(sources, ret.triageQueue)
+		sources = append(sources, ret.candidateQueue, ret.triageQueue)
 		sources = append(sources,
 			queue.Callback(fuzzer.genFuzz),
 		)
@@ -813,7 +817,7 @@ func (fuzzer *Fuzzer) genFuzz() *queue.Request {
 	}
 
 	rnd := fuzzer.rand()
-	if uafReady && corpusLen == 0 {
+	if uafReady && (corpusLen == 0 || rnd.Float64() < raceSeedFuzzSampleRate) {
 		if req := fuzzer.uaf.sampleBarrierRequest(rnd); req != nil {
 			return req
 		}

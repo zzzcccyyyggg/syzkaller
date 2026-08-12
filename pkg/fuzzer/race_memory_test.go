@@ -1,13 +1,16 @@
 package fuzzer
 
 import (
+	"context"
 	"math/rand"
 	"testing"
 	"time"
 
+	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
+	"github.com/google/syzkaller/pkg/signal"
 	"github.com/google/syzkaller/prog"
 )
 
@@ -252,6 +255,90 @@ func TestSampleBarrierRequestUsesCompactedSyncedSeed(t *testing.T) {
 	}
 	if req.TimingThresholdUs != 2500 {
 		t.Fatalf("sampled timing threshold = %d, want 2500", req.TimingThresholdUs)
+	}
+}
+
+func TestGenFuzzSamplesRaceSeedWithNonEmptyCorpus(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	progCorpus := corpus.NewCorpus(ctx)
+	progCorpus.Save(corpus.NewInput{
+		Prog:   p1,
+		Call:   0,
+		Signal: signal.FromRaw([]uint64{1}, 0),
+	})
+
+	fuzzer := NewFuzzer(ctx, &Config{
+		Corpus:                progCorpus,
+		ModeUAF:               true,
+		BarrierMode:           true,
+		BarrierMask:           0x3,
+		NormalThresholdMicros: 2500,
+		EnabledCalls: map[*prog.Syscall]bool{
+			target.SyscallMap["syz_test_fuzzer1"]: true,
+		},
+	}, rand.New(rand.NewSource(1)), target)
+	fuzzer.uafBootstrapDone.Store(true)
+	seed := &barrierSeed{
+		entry: &UAFCorpusEntry{
+			Programs: []*prog.Prog{p1, p2},
+			Barrier:  BarrierSnapshot{Participants: 0x3},
+		},
+		execOpts: setFlags(flatrpc.ExecFlagCollectSignal),
+		syncable: true,
+		synced:   true,
+	}
+	fuzzer.uaf.entries = map[string]*barrierSeed{"seed": seed}
+
+	var req *queue.Request
+	for i := 0; i < 16; i++ {
+		req = fuzzer.genFuzz()
+		if req != nil && req.ExecOpts.ExecFlags&flatrpc.ExecFlagCollectDdrdUaf != 0 &&
+			req.Barrier && len(req.BarrierPrograms) == 2 {
+			return
+		}
+	}
+	t.Fatal("expected genFuzz to sample a restored race seed with non-empty corpus")
+}
+
+func TestUAFQueuePrioritizesRaceSeedsBeforeCandidates(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	fuzzer := NewFuzzer(ctx, &Config{
+		Corpus:      corpus.NewCorpus(ctx),
+		ModeUAF:     true,
+		BarrierMode: true,
+		EnabledCalls: map[*prog.Syscall]bool{
+			target.SyscallMap["syz_test_fuzzer1"]: true,
+		},
+	}, rand.New(rand.NewSource(1)), target)
+
+	candidateReq := &queue.Request{}
+	raceSeedReq := &queue.Request{}
+	fuzzer.candidateQueue.Submit(candidateReq)
+	fuzzer.smashQueue.Submit(raceSeedReq)
+
+	if got := fuzzer.Next(); got != raceSeedReq {
+		t.Fatalf("first request = %p, want race seed request %p", got, raceSeedReq)
+	}
+	if got := fuzzer.Next(); got != candidateReq {
+		t.Fatalf("second request = %p, want candidate request %p", got, candidateReq)
 	}
 }
 

@@ -113,8 +113,12 @@ func (dist *Distributor) hasOtherActive(set []ExecutorID) bool {
 		if contains(set, vm) {
 			continue
 		}
+		lastSeen := active[vm].Load()
+		if lastSeen == 0 {
+			continue
+		}
 		// 1000 is semi-random notion of recency.
-		if active[vm].Load()+1000 < seq {
+		if lastSeen+1000 < seq {
 			continue
 		}
 		return true
