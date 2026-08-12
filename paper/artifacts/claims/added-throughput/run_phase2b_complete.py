@@ -536,27 +536,14 @@ class Runner:
         samples = read_json_stream(bench_path)
         usable = [s for s in samples if isinstance(s.get("uptime"), (int, float)) and s["uptime"] >= self.args.warmup]
         row: dict[str, object] = {"case": case, "tool": tool, "valid_preliminary": False, "samples": len(samples)}
+        if len(samples) >= 2:
+            row["full_valid"] = add_bench_window_metrics(row, "full_", samples[0], samples[-1])
         if len(usable) < 2:
             row["reason"] = "not enough post-warmup bench samples"
             return row
-        first, last = usable[0], usable[-1]
-        seconds = float(last["uptime"]) - float(first["uptime"])
-        row["measurement_seconds"] = round(seconds, 3)
-        row["first_uptime"] = first.get("uptime")
-        row["last_uptime"] = last.get("uptime")
-        if seconds <= 0:
+        if not add_bench_window_metrics(row, "", usable[0], usable[-1]):
             row["reason"] = "non-positive measurement window"
             return row
-        for key in STAT_KEYS:
-            a, b = first.get(key), last.get(key)
-            if isinstance(a, (int, float)) and isinstance(b, (int, float)):
-                delta = float(b) - float(a)
-                row[f"delta_{key}"] = int(delta)
-                row[f"rate_{key}_per_s"] = round(delta / seconds, 6)
-        exec_total = row.get("delta_exec total")
-        calls_executed = row.get("delta_calls executed")
-        if isinstance(exec_total, int) and exec_total > 0 and isinstance(calls_executed, int):
-            row["calls_executed_per_exec_total"] = round(calls_executed / exec_total, 6)
         row["valid_preliminary"] = row.get("rate_calls executed_per_s") is not None
         return row
 
@@ -615,12 +602,17 @@ class Runner:
             "This is a diagnostic run. Treat results as preliminary until repeated.",
         ]
         if self.metrics_rows:
-            lines += ["", "| case | calls executed/s | exec total/s | notes |", "| --- | ---: | ---: | --- |"]
+            lines += [
+                "",
+                "| case | post-warmup calls executed/s | full calls executed/s | exec total/s | notes |",
+                "| --- | ---: | ---: | ---: | --- |",
+            ]
             for row in self.metrics_rows:
                 lines.append(
-                    "| {case} | {calls} | {execs} | {notes} |".format(
+                    "| {case} | {calls} | {full_calls} | {execs} | {notes} |".format(
                         case=row.get("case", ""),
                         calls=row.get("rate_calls executed_per_s", ""),
+                        full_calls=row.get("full_rate_calls executed_per_s", ""),
                         execs=row.get("rate_exec total_per_s", ""),
                         notes=row.get("reason", ""),
                     )
@@ -831,6 +823,30 @@ def forbidden_patterns(path: Path) -> list[str]:
         return []
     text = tail_text(path, 2_000_000)
     return [pattern for pattern in FORBIDDEN_LOG_PATTERNS if pattern in text]
+
+
+def add_bench_window_metrics(row: dict[str, object], prefix: str, first: dict[str, object], last: dict[str, object]) -> bool:
+    start = first.get("uptime")
+    end = last.get("uptime")
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return False
+    seconds = float(end) - float(start)
+    row[f"{prefix}measurement_seconds"] = round(seconds, 3)
+    row[f"{prefix}first_uptime"] = start
+    row[f"{prefix}last_uptime"] = end
+    if seconds <= 0:
+        return False
+    for key in STAT_KEYS:
+        a, b = first.get(key), last.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            delta = float(b) - float(a)
+            row[f"{prefix}delta_{key}"] = int(delta)
+            row[f"{prefix}rate_{key}_per_s"] = round(delta / seconds, 6)
+    exec_total = row.get(f"{prefix}delta_exec total")
+    calls_executed = row.get(f"{prefix}delta_calls executed")
+    if isinstance(exec_total, int) and exec_total > 0 and isinstance(calls_executed, int):
+        row[f"{prefix}calls_executed_per_exec_total"] = round(calls_executed / exec_total, 6)
+    return row.get(f"{prefix}rate_calls executed_per_s") is not None
 
 
 def qemu_child_pids(parent_pid: object) -> list[int]:
