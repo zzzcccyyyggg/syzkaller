@@ -72,6 +72,7 @@ type Fuzzer struct {
 
 const raceSeedFuzzSampleRate = 0.5
 const defaultRaceNormalTriageInterval = 8
+const defaultRaceNormalTriageMaxJobs = 64
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	target *prog.Target) *Fuzzer {
@@ -397,6 +398,25 @@ func (fuzzer *Fuzzer) raceNormalTriageSource(source queue.Source) queue.Source {
 	return queue.Periodic(source, interval)
 }
 
+func (fuzzer *Fuzzer) shouldStartRaceNormalTriageJob() bool {
+	if fuzzer == nil || fuzzer.Config == nil || !fuzzer.Config.ModeUAF {
+		return true
+	}
+	if fuzzer.statJobsTriage == nil || fuzzer.statJobsTriageCandidate == nil || fuzzer.statNormalTriageSkips == nil {
+		return true
+	}
+	limit := fuzzer.Config.RaceNormalTriageMaxJobs
+	if limit <= 0 {
+		limit = defaultRaceNormalTriageMaxJobs
+	}
+	running := fuzzer.statJobsTriage.Val() + fuzzer.statJobsTriageCandidate.Val()
+	if running < limit {
+		return true
+	}
+	fuzzer.statNormalTriageSkips.Add(1)
+	return false
+}
+
 func (fuzzer *Fuzzer) CandidatesToTriage() int {
 	count := fuzzer.statCandidates.Val() + fuzzer.statJobsTriageCandidate.Val()
 	// log.Logf(1, "[DEBUG-TRIAGE] CandidatesToTriage: candidates=%d triageJobs=%d total=%d",
@@ -582,22 +602,24 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			if flags&progCandidate > 0 {
 				queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
 			}
-			job := &triageJob{
-				p:        req.Prog.Clone(),
-				executor: res.Executor,
-				flags:    flags,
-				queue:    queue.Append(),
-				calls:    triage,
-				info: &JobInfo{
-					Name: req.Prog.String(),
-					Type: "triage",
-				},
+			if fuzzer.shouldStartRaceNormalTriageJob() {
+				job := &triageJob{
+					p:        req.Prog.Clone(),
+					executor: res.Executor,
+					flags:    flags,
+					queue:    queue.Append(),
+					calls:    triage,
+					info: &JobInfo{
+						Name: req.Prog.String(),
+						Type: "triage",
+					},
+				}
+				for id := range triage {
+					job.info.Calls = append(job.info.Calls, job.p.CallName(id))
+				}
+				sort.Strings(job.info.Calls)
+				fuzzer.startJob(stat, job)
 			}
-			for id := range triage {
-				job.info.Calls = append(job.info.Calls, job.p.CallName(id))
-			}
-			sort.Strings(job.info.Calls)
-			fuzzer.startJob(stat, job)
 		}
 	}
 
@@ -709,6 +731,9 @@ type Config struct {
 	// RaceNormalTriageInterval throttles ordinary syzkaller coverage triage in
 	// race mode so deflake/minimization cannot starve barrier fuzzing.
 	RaceNormalTriageInterval int
+	// RaceNormalTriageMaxJobs bounds ordinary syzkaller coverage triage backlog
+	// in race mode. Pair collection and validation queues are unaffected.
+	RaceNormalTriageMaxJobs int
 	// EnableSoloFilter controls the legacy solo re-execution filter in race mode.
 	EnableSoloFilter bool
 	// EnableAffinityTable controls the legacy syscall affinity table in race mode.

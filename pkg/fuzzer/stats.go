@@ -19,6 +19,7 @@ type Stats struct {
 	statJobs                 *stat.Val
 	statJobsTriage           *stat.Val
 	statJobsTriageCandidate  *stat.Val
+	statNormalTriageSkips    *stat.Val
 	statJobsSmash            *stat.Val
 	statJobsFaultInjection   *stat.Val
 	statJobsHints            *stat.Val
@@ -71,6 +72,8 @@ func newStats(target *prog.Target) Stats {
 			stat.Link("/jobs?type=triage")),
 		statJobsTriageCandidate: stat.New("candidate triage jobs", "Running candidate triage jobs",
 			stat.StackedGraph("jobs"), stat.Link("/jobs?type=triage")),
+		statNormalTriageSkips: stat.New("triage skips", "Skipped ordinary coverage triage jobs due race-mode backlog",
+			stat.Console, stat.Graph("jobs")),
 		statJobsSmash: stat.New("smash jobs", "Running smash jobs", stat.StackedGraph("jobs"),
 			stat.Link("/jobs?type=smash")),
 		statJobsFaultInjection: stat.New("fault jobs", "Running fault injection jobs", stat.StackedGraph("jobs")),

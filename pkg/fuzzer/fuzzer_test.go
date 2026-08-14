@@ -218,6 +218,30 @@ func TestRaceNormalTriageSource(t *testing.T) {
 	})
 }
 
+func TestRaceNormalTriageJobLimit(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	t.Run("limits combined race triage backlog", func(t *testing.T) {
+		fuzzer := &Fuzzer{
+			Stats:  newStats(target),
+			Config: &Config{ModeUAF: true, RaceNormalTriageMaxJobs: 2},
+		}
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob())
+		fuzzer.statJobsTriage.Add(1)
+		fuzzer.statJobsTriageCandidate.Add(1)
+		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob())
+		assert.Equal(t, 1, fuzzer.statNormalTriageSkips.Val())
+	})
+
+	t.Run("non race mode is unchanged", func(t *testing.T) {
+		fuzzer := &Fuzzer{Config: &Config{}}
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob())
+	})
+}
+
 func TestCurrentWidenedTimingThreshold(t *testing.T) {
 	t.Run("uses static widened threshold without controller", func(t *testing.T) {
 		f := &Fuzzer{

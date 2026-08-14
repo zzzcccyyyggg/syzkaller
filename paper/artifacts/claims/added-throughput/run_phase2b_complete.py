@@ -145,6 +145,7 @@ class Runner:
             "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
             "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
             "mrpfuzz_race_normal_triage_interval": self.args.mrpfuzz_race_normal_triage_interval,
+            "mrpfuzz_race_normal_triage_max_jobs": self.args.mrpfuzz_race_normal_triage_max_jobs,
             "stall_timeout_seconds": self.args.stall_timeout,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
@@ -194,8 +195,12 @@ class Runner:
                 ("--mrpfuzz-fuzz-vm-cpu", self.args.mrpfuzz_fuzz_vm_cpu),
                 ("--mrpfuzz-fuzz-procs", self.args.mrpfuzz_fuzz_procs),
                 ("--mrpfuzz-race-normal-triage-interval", self.args.mrpfuzz_race_normal_triage_interval),
+                ("--mrpfuzz-race-normal-triage-max-jobs", self.args.mrpfuzz_race_normal_triage_max_jobs),
             ]:
-                if value < 1 and name != "--mrpfuzz-race-normal-triage-interval":
+                if value < 1 and name not in (
+                    "--mrpfuzz-race-normal-triage-interval",
+                    "--mrpfuzz-race-normal-triage-max-jobs",
+                ):
                     raise SystemExit(f"{name} must be >= 1")
                 if value < 0:
                     raise SystemExit(f"{name} must be >= 0")
@@ -265,6 +270,7 @@ class Runner:
         fuzz_exp["enable_coverage_triage"] = False
         fuzz_exp["enable_affinity_table"] = False
         fuzz_exp["race_normal_triage_interval"] = self.args.mrpfuzz_race_normal_triage_interval
+        fuzz_exp["race_normal_triage_max_jobs"] = self.args.mrpfuzz_race_normal_triage_max_jobs
         fuzz_exp["enable_dynamic_threshold"] = True
         fuzz_exp["dynamic_threshold_eval_sec"] = 30
         fuzz_cfg["vm_running_time"] = 3600
@@ -1078,6 +1084,12 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=8,
         help="Poll ordinary syzkaller coverage triage every N scheduler passes in MRPFuzz race mode; 1 preserves legacy priority.",
+    )
+    parser.add_argument(
+        "--mrpfuzz-race-normal-triage-max-jobs",
+        type=int,
+        default=64,
+        help="Maximum ordinary syzkaller coverage triage jobs kept in MRPFuzz race mode; 0 uses the manager default.",
     )
     parser.add_argument(
         "--mrpfuzz-seed-workdir",

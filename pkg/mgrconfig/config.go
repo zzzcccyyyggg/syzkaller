@@ -382,6 +382,9 @@ type Experimental struct {
 	// triage is polled after race mode is enabled. 1 preserves legacy priority;
 	// 0 uses the MRPFuzz default.
 	RaceNormalTriageInterval int `json:"race_normal_triage_interval,omitempty"`
+	// RaceNormalTriageMaxJobs bounds ordinary syzkaller coverage triage backlog
+	// in race mode. 0 uses the MRPFuzz default.
+	RaceNormalTriageMaxJobs int `json:"race_normal_triage_max_jobs,omitempty"`
 	// EnableAffinityTable controls the legacy syscall affinity table in race mode.
 	// Defaults to false in the paper path and is useful only when legacy solo
 	// filtering or coverage triage is explicitly enabled.
