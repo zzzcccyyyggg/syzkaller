@@ -372,6 +372,7 @@ class Runner:
     def run_mrpfuzz_complete(self) -> None:
         fuzz = self.mrpfuzz["fuzz"]
         validate = self.mrpfuzz["validate"]
+        sample_path = self.samples_dir / "mrpfuzz-complete.jsonl"
         fuzz_cmd = manager_cmd(DDRD_ROOT / "bin/syz-manager", fuzz["config"], fuzz["bench"], fuzz["cpuset"])
         validate_cmd = manager_cmd(
             DDRD_ROOT / "bin/syz-manager",
@@ -392,10 +393,13 @@ class Runner:
             fuzz_proc,
             validate_proc,
             duration=self.args.duration,
-            sample_path=self.samples_dir / "mrpfuzz-complete.jsonl",
+            sample_path=sample_path,
         )
-        self.metrics_rows.append(self.compute_bench_metrics("mrpfuzz-complete-fuzz", "mrpfuzz", fuzz["bench"]))
-        self.metrics_rows[-1].update(self.summarize_mrpfuzz_logs())
+        row = self.compute_bench_metrics("mrpfuzz-complete-fuzz", "mrpfuzz", fuzz["bench"])
+        if not row.get("valid_preliminary"):
+            row = self.compute_mrpfuzz_sample_metrics("mrpfuzz-complete-fuzz", "mrpfuzz", sample_path)
+        row.update(self.summarize_mrpfuzz_logs())
+        self.metrics_rows.append(row)
         self.write_metrics()
 
     def run_segfuzz(self) -> None:
@@ -581,6 +585,31 @@ class Runner:
             return row
         if not add_bench_window_metrics(row, "", usable[0], usable[-1]):
             row["reason"] = "non-positive measurement window"
+            return row
+        row["valid_preliminary"] = row.get("rate_calls executed_per_s") is not None
+        return row
+
+    def compute_mrpfuzz_sample_metrics(self, case: str, tool: str, sample_path: Path) -> dict[str, object]:
+        samples = read_jsonl(sample_path)
+        usable = [
+            s
+            for s in samples
+            if isinstance(s.get("elapsed_seconds"), (int, float)) and s["elapsed_seconds"] >= self.args.warmup
+        ]
+        row: dict[str, object] = {
+            "case": case,
+            "tool": tool,
+            "valid_preliminary": False,
+            "metric_source": "watcher_samples",
+            "samples": len(samples),
+        }
+        if len(samples) >= 2:
+            row["full_valid"] = add_sample_window_metrics(row, "full_", samples[0], samples[-1])
+        if len(usable) < 2:
+            row["reason"] = "not enough post-warmup watcher samples"
+            return row
+        if not add_sample_window_metrics(row, "", usable[0], usable[-1]):
+            row["reason"] = "non-positive sample measurement window"
             return row
         row["valid_preliminary"] = row.get("rate_calls executed_per_s") is not None
         return row
@@ -792,6 +821,22 @@ def read_json_stream(path: Path) -> list[dict[str, object]]:
     return objects
 
 
+def read_jsonl(path: Path) -> list[dict[str, object]]:
+    if not path.exists() or path.stat().st_size == 0:
+        return []
+    rows: list[dict[str, object]] = []
+    for line in path.read_text(errors="replace").splitlines():
+        if not line.strip():
+            continue
+        try:
+            obj = json.loads(line)
+        except json.JSONDecodeError:
+            continue
+        if isinstance(obj, dict):
+            rows.append(obj)
+    return rows
+
+
 def pick_stats(stats: dict[str, object] | None) -> dict[str, int | None]:
     result: dict[str, int | None] = {}
     stats = stats or {}
@@ -906,6 +951,38 @@ def add_bench_window_metrics(row: dict[str, object], prefix: str, first: dict[st
         return False
     for key in STAT_KEYS:
         a, b = first.get(key), last.get(key)
+        if isinstance(a, (int, float)) and isinstance(b, (int, float)):
+            delta = float(b) - float(a)
+            row[f"{prefix}delta_{key}"] = int(delta)
+            row[f"{prefix}rate_{key}_per_s"] = round(delta / seconds, 6)
+    exec_total = row.get(f"{prefix}delta_exec total")
+    calls_executed = row.get(f"{prefix}delta_calls executed")
+    if isinstance(exec_total, int) and exec_total > 0 and isinstance(calls_executed, int):
+        row[f"{prefix}calls_executed_per_exec_total"] = round(calls_executed / exec_total, 6)
+    return row.get(f"{prefix}rate_calls executed_per_s") is not None
+
+
+def add_sample_window_metrics(row: dict[str, object], prefix: str, first: dict[str, object], last: dict[str, object]) -> bool:
+    start = first.get("elapsed_seconds")
+    end = last.get("elapsed_seconds")
+    if not isinstance(start, (int, float)) or not isinstance(end, (int, float)):
+        return False
+    seconds = float(end) - float(start)
+    row[f"{prefix}measurement_seconds"] = round(seconds, 3)
+    row[f"{prefix}first_elapsed_seconds"] = round(float(start), 3)
+    row[f"{prefix}last_elapsed_seconds"] = round(float(end), 3)
+    if seconds <= 0:
+        return False
+    first_fuzz = first.get("fuzz")
+    last_fuzz = last.get("fuzz")
+    if not isinstance(first_fuzz, dict) or not isinstance(last_fuzz, dict):
+        return False
+    first_stats = first_fuzz.get("bench")
+    last_stats = last_fuzz.get("bench")
+    if not isinstance(first_stats, dict) or not isinstance(last_stats, dict):
+        return False
+    for key in STAT_KEYS:
+        a, b = first_stats.get(key), last_stats.get(key)
         if isinstance(a, (int, float)) and isinstance(b, (int, float)):
             delta = float(b) - float(a)
             row[f"{prefix}delta_{key}"] = int(delta)
