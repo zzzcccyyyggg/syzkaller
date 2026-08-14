@@ -132,6 +132,12 @@ class Runner:
                 "mrpfuzz_total_cpuset": self.args.mrpfuzz_cpuset,
                 "mrpfuzz_fuzz_cpuset": self.args.mrpfuzz_fuzz_cpuset,
                 "mrpfuzz_validate_cpuset": self.args.mrpfuzz_validate_cpuset,
+                "mrpfuzz_fuzz_vm_count": self.args.mrpfuzz_fuzz_vm_count,
+                "mrpfuzz_fuzz_vm_cpu": self.args.mrpfuzz_fuzz_vm_cpu,
+                "mrpfuzz_fuzz_procs": self.args.mrpfuzz_fuzz_procs,
+                "mrpfuzz_validate_vm_count": 1,
+                "mrpfuzz_validate_vm_cpu": 2,
+                "mrpfuzz_validate_procs": 2,
                 "segfuzz_cpuset": self.args.segfuzz_cpuset,
                 "segfuzz_vm_cpu": segfuzz_vm_cpu(self.args),
                 "segfuzz_procs": self.args.segfuzz_procs,
@@ -181,6 +187,14 @@ class Runner:
         ).strip()
         if active:
             raise SystemExit("existing syz-manager/qemu-system process found:\n" + active)
+        if self.want_mrpfuzz():
+            for name, value in [
+                ("--mrpfuzz-fuzz-vm-count", self.args.mrpfuzz_fuzz_vm_count),
+                ("--mrpfuzz-fuzz-vm-cpu", self.args.mrpfuzz_fuzz_vm_cpu),
+                ("--mrpfuzz-fuzz-procs", self.args.mrpfuzz_fuzz_procs),
+            ]:
+                if value < 1:
+                    raise SystemExit(f"{name} must be >= 1")
         free_gb = shutil.disk_usage(DDRD_ROOT).free / (1024**3)
         if free_gb < self.args.min_free_gb:
             raise SystemExit(f"free disk too low: {free_gb:.1f} GiB < {self.args.min_free_gb} GiB")
@@ -227,7 +241,14 @@ class Runner:
         fuzz_cfg = cfggen.generate_config("ptmx", "fuzz", include_experimental=True)
         validate_cfg = cfggen.generate_config("ptmx", "validate", include_experimental=True)
 
-        self.apply_mrpfuzz_common(fuzz_cfg, workdir, "127.0.0.1:64301", vm_count=1, vm_cpu=2, procs=2)
+        self.apply_mrpfuzz_common(
+            fuzz_cfg,
+            workdir,
+            "127.0.0.1:64301",
+            vm_count=self.args.mrpfuzz_fuzz_vm_count,
+            vm_cpu=self.args.mrpfuzz_fuzz_vm_cpu,
+            procs=self.args.mrpfuzz_fuzz_procs,
+        )
         fuzz_exp = fuzz_cfg.setdefault("experimental", {})
         fuzz_exp["race_mode"] = True
         fuzz_exp["barrier_mode"] = True
@@ -610,6 +631,9 @@ class Runner:
             f"- Warmup seconds: `{self.args.warmup}`",
             f"- Case: `{self.args.case}`",
             f"- MRPFuzz fuzz cpuset: `{self.args.mrpfuzz_fuzz_cpuset}`",
+            f"- MRPFuzz fuzz VMs: `{self.args.mrpfuzz_fuzz_vm_count}`",
+            f"- MRPFuzz fuzz VM CPUs: `{self.args.mrpfuzz_fuzz_vm_cpu}`",
+            f"- MRPFuzz fuzz procs: `{self.args.mrpfuzz_fuzz_procs}`",
             f"- MRPFuzz validate cpuset: `{self.args.mrpfuzz_validate_cpuset}`",
             f"- SegFuzz cpuset: `{self.args.segfuzz_cpuset}`",
             f"- SegFuzz VM CPUs: `{segfuzz_vm_cpu(self.args)}`",
@@ -960,6 +984,9 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--mrpfuzz-cpuset", default="8,9,10,11")
     parser.add_argument("--mrpfuzz-fuzz-cpuset", default="8,9")
     parser.add_argument("--mrpfuzz-validate-cpuset", default="10,11")
+    parser.add_argument("--mrpfuzz-fuzz-vm-count", type=int, default=1)
+    parser.add_argument("--mrpfuzz-fuzz-vm-cpu", type=int, default=2)
+    parser.add_argument("--mrpfuzz-fuzz-procs", type=int, default=2)
     parser.add_argument("--segfuzz-cpuset", default="8,9,10,11")
     parser.add_argument("--segfuzz-vm-cpu", type=int, default=0, help="SegFuzz VM CPUs; default is the cpuset CPU count.")
     parser.add_argument("--segfuzz-procs", type=int, default=1)
