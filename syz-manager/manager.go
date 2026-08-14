@@ -1427,6 +1427,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			StateScopeSameInstanceRatio:  mgr.cfg.Experimental.StateScopeSameInstanceRatio,
 			StateScopePartnerSamples:     mgr.cfg.Experimental.StateScopePartnerSamples,
 			EnableCoverageTriage:         mgr.cfg.Experimental.EnableCoverageTriage,
+			RaceNormalTriageInterval:     mgr.cfg.Experimental.RaceNormalTriageInterval,
 			EnableSoloFilter:             mgr.cfg.Experimental.EnableSoloFilter,
 			EnableAffinityTable:          mgr.cfg.Experimental.EnableAffinityTable,
 			// Dual-Queue Timing Exploration Configuration

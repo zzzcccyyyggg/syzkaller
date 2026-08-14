@@ -285,6 +285,9 @@ func (cfg *Config) initBarrierMask() error {
 	if cfg.Experimental.RaceExecOnly && !cfg.Experimental.RaceMode {
 		return fmt.Errorf("experimental.race_exec_only requires race_mode to be enabled")
 	}
+	if cfg.Experimental.RaceNormalTriageInterval < 0 {
+		return fmt.Errorf("experimental.race_normal_triage_interval must be >= 0")
+	}
 	if cfg.Experimental.RaceMode && !cfg.Experimental.BarrierMode {
 		return fmt.Errorf("experimental.race_mode requires barrier_mode to be enabled")
 	}

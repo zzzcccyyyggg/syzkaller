@@ -144,6 +144,7 @@ class Runner:
             },
             "mrpfuzz_seed_workdir": self.args.mrpfuzz_seed_workdir,
             "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
+            "mrpfuzz_race_normal_triage_interval": self.args.mrpfuzz_race_normal_triage_interval,
             "stall_timeout_seconds": self.args.stall_timeout,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
@@ -192,9 +193,12 @@ class Runner:
                 ("--mrpfuzz-fuzz-vm-count", self.args.mrpfuzz_fuzz_vm_count),
                 ("--mrpfuzz-fuzz-vm-cpu", self.args.mrpfuzz_fuzz_vm_cpu),
                 ("--mrpfuzz-fuzz-procs", self.args.mrpfuzz_fuzz_procs),
+                ("--mrpfuzz-race-normal-triage-interval", self.args.mrpfuzz_race_normal_triage_interval),
             ]:
-                if value < 1:
+                if value < 1 and name != "--mrpfuzz-race-normal-triage-interval":
                     raise SystemExit(f"{name} must be >= 1")
+                if value < 0:
+                    raise SystemExit(f"{name} must be >= 0")
         free_gb = shutil.disk_usage(DDRD_ROOT).free / (1024**3)
         if free_gb < self.args.min_free_gb:
             raise SystemExit(f"free disk too low: {free_gb:.1f} GiB < {self.args.min_free_gb} GiB")
@@ -260,6 +264,7 @@ class Runner:
         fuzz_exp["enable_solo_filter"] = False
         fuzz_exp["enable_coverage_triage"] = False
         fuzz_exp["enable_affinity_table"] = False
+        fuzz_exp["race_normal_triage_interval"] = self.args.mrpfuzz_race_normal_triage_interval
         fuzz_exp["enable_dynamic_threshold"] = True
         fuzz_exp["dynamic_threshold_eval_sec"] = 30
         fuzz_cfg["vm_running_time"] = 3600
@@ -1068,6 +1073,12 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--segfuzz-vm-cpu", type=int, default=0, help="SegFuzz VM CPUs; default is the cpuset CPU count.")
     parser.add_argument("--segfuzz-procs", type=int, default=1)
     parser.add_argument("--mrpfuzz-max-pairs-per-task", type=int, default=32)
+    parser.add_argument(
+        "--mrpfuzz-race-normal-triage-interval",
+        type=int,
+        default=8,
+        help="Poll ordinary syzkaller coverage triage every N scheduler passes in MRPFuzz race mode; 1 preserves legacy priority.",
+    )
     parser.add_argument(
         "--mrpfuzz-seed-workdir",
         default="",

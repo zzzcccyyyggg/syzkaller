@@ -71,6 +71,7 @@ type Fuzzer struct {
 }
 
 const raceSeedFuzzSampleRate = 0.5
+const defaultRaceNormalTriageInterval = 8
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	target *prog.Target) *Fuzzer {
@@ -365,7 +366,7 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 		}
 
 		sources = append(sources,
-			ret.triageQueue,
+			fuzzer.raceNormalTriageSource(ret.triageQueue),
 			queue.Callback(fuzzer.genFuzz),
 		)
 
@@ -379,6 +380,21 @@ func newExecQueues(fuzzer *Fuzzer) execQueues {
 	// Sources are listed in the order, in which they will be polled.
 	ret.source = queue.Order(sources...)
 	return ret
+}
+
+func (fuzzer *Fuzzer) raceNormalTriageSource(source queue.Source) queue.Source {
+	if fuzzer == nil || fuzzer.Config == nil || !fuzzer.Config.ModeUAF {
+		return source
+	}
+	interval := fuzzer.Config.RaceNormalTriageInterval
+	if interval <= 0 {
+		interval = defaultRaceNormalTriageInterval
+	}
+	if interval <= 1 {
+		return source
+	}
+	log.Logf(0, "[THROUGHPUT] Normal syzkaller triage polled every %d scheduler passes in race mode", interval)
+	return queue.Periodic(source, interval)
 }
 
 func (fuzzer *Fuzzer) CandidatesToTriage() int {
@@ -690,6 +706,9 @@ type Config struct {
 	// EnableCoverageTriage controls pair-level coverage triage jobs in race mode.
 	// Nil keeps the paper/default path disabled.
 	EnableCoverageTriage *bool
+	// RaceNormalTriageInterval throttles ordinary syzkaller coverage triage in
+	// race mode so deflake/minimization cannot starve barrier fuzzing.
+	RaceNormalTriageInterval int
 	// EnableSoloFilter controls the legacy solo re-execution filter in race mode.
 	EnableSoloFilter bool
 	// EnableAffinityTable controls the legacy syscall affinity table in race mode.

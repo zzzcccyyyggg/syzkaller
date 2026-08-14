@@ -378,6 +378,10 @@ type Experimental struct {
 	// Defaults to false when unset. Set to true only for legacy feedback
 	// experiments that intentionally pay extra solo-execution cost.
 	EnableCoverageTriage *bool `json:"enable_coverage_triage,omitempty"`
+	// RaceNormalTriageInterval controls how often ordinary syzkaller coverage
+	// triage is polled after race mode is enabled. 1 preserves legacy priority;
+	// 0 uses the MRPFuzz default.
+	RaceNormalTriageInterval int `json:"race_normal_triage_interval,omitempty"`
 	// EnableAffinityTable controls the legacy syscall affinity table in race mode.
 	// Defaults to false in the paper path and is useful only when legacy solo
 	// filtering or coverage triage is explicitly enabled.

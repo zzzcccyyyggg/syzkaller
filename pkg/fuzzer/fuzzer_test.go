@@ -186,6 +186,38 @@ func TestInheritTimingThreshold(t *testing.T) {
 	})
 }
 
+func TestRaceNormalTriageSource(t *testing.T) {
+	t.Run("default interval throttles in race mode", func(t *testing.T) {
+		req := &queue.Request{}
+		sourceQueue := queue.Plain()
+		sourceQueue.Submit(req)
+		fuzzer := &Fuzzer{Config: &Config{ModeUAF: true}}
+		source := fuzzer.raceNormalTriageSource(sourceQueue)
+		for i := 1; i < defaultRaceNormalTriageInterval; i++ {
+			assert.Nil(t, source.Next())
+		}
+		assert.Same(t, req, source.Next())
+	})
+
+	t.Run("interval one preserves legacy priority", func(t *testing.T) {
+		req := &queue.Request{}
+		sourceQueue := queue.Plain()
+		sourceQueue.Submit(req)
+		fuzzer := &Fuzzer{Config: &Config{ModeUAF: true, RaceNormalTriageInterval: 1}}
+		source := fuzzer.raceNormalTriageSource(sourceQueue)
+		assert.Same(t, req, source.Next())
+	})
+
+	t.Run("non race mode is unchanged", func(t *testing.T) {
+		req := &queue.Request{}
+		sourceQueue := queue.Plain()
+		sourceQueue.Submit(req)
+		fuzzer := &Fuzzer{Config: &Config{}}
+		source := fuzzer.raceNormalTriageSource(sourceQueue)
+		assert.Same(t, req, source.Next())
+	})
+}
+
 func TestCurrentWidenedTimingThreshold(t *testing.T) {
 	t.Run("uses static widened threshold without controller", func(t *testing.T) {
 		f := &Fuzzer{
