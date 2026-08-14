@@ -224,21 +224,44 @@ func TestRaceNormalTriageJobLimit(t *testing.T) {
 		t.Fatal(err)
 	}
 
-	t.Run("limits combined race triage backlog", func(t *testing.T) {
+	t.Run("limits fuzz-generated race triage backlog", func(t *testing.T) {
 		fuzzer := &Fuzzer{
 			Stats:  newStats(target),
 			Config: &Config{ModeUAF: true, RaceNormalTriageMaxJobs: 2},
 		}
-		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob())
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob(0))
 		fuzzer.statJobsTriage.Add(1)
-		fuzzer.statJobsTriageCandidate.Add(1)
-		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob())
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob(0))
+		fuzzer.statJobsTriage.Add(1)
+		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob(0))
 		assert.Equal(t, 1, fuzzer.statNormalTriageSkips.Val())
+	})
+
+	t.Run("candidate triage has a separate cap", func(t *testing.T) {
+		fuzzer := &Fuzzer{
+			Stats:  newStats(target),
+			Config: &Config{ModeUAF: true, RaceNormalTriageMaxJobs: 1, RaceCandidateTriageMaxJobs: 2},
+		}
+		fuzzer.statJobsTriage.Add(1)
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob(progCandidate))
+		fuzzer.statJobsTriageCandidate.Add(2)
+		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob(progCandidate))
+		assert.Equal(t, 1, fuzzer.statNormalTriageSkips.Val())
+	})
+
+	t.Run("disable normal triage skips candidate and fuzz triage", func(t *testing.T) {
+		fuzzer := &Fuzzer{
+			Stats:  newStats(target),
+			Config: &Config{ModeUAF: true, RaceDisableNormalTriage: true},
+		}
+		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob(0))
+		assert.False(t, fuzzer.shouldStartRaceNormalTriageJob(progCandidate))
+		assert.Equal(t, 2, fuzzer.statNormalTriageSkips.Val())
 	})
 
 	t.Run("non race mode is unchanged", func(t *testing.T) {
 		fuzzer := &Fuzzer{Config: &Config{}}
-		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob())
+		assert.True(t, fuzzer.shouldStartRaceNormalTriageJob(0))
 	})
 }
 

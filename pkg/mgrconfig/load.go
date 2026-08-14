@@ -291,6 +291,9 @@ func (cfg *Config) initBarrierMask() error {
 	if cfg.Experimental.RaceNormalTriageMaxJobs < 0 {
 		return fmt.Errorf("experimental.race_normal_triage_max_jobs must be >= 0")
 	}
+	if cfg.Experimental.RaceCandidateTriageMaxJobs < 0 {
+		return fmt.Errorf("experimental.race_candidate_triage_max_jobs must be >= 0")
+	}
 	if cfg.Experimental.RaceMode && !cfg.Experimental.BarrierMode {
 		return fmt.Errorf("experimental.race_mode requires barrier_mode to be enabled")
 	}

@@ -146,6 +146,8 @@ class Runner:
             "mrpfuzz_max_pairs_per_task": self.args.mrpfuzz_max_pairs_per_task,
             "mrpfuzz_race_normal_triage_interval": self.args.mrpfuzz_race_normal_triage_interval,
             "mrpfuzz_race_normal_triage_max_jobs": self.args.mrpfuzz_race_normal_triage_max_jobs,
+            "mrpfuzz_race_candidate_triage_max_jobs": self.args.mrpfuzz_race_candidate_triage_max_jobs,
+            "mrpfuzz_disable_normal_triage": self.args.mrpfuzz_disable_normal_triage,
             "stall_timeout_seconds": self.args.stall_timeout,
             "repos": {
                 "mrpfuzz": repo_metadata(DDRD_ROOT),
@@ -196,10 +198,12 @@ class Runner:
                 ("--mrpfuzz-fuzz-procs", self.args.mrpfuzz_fuzz_procs),
                 ("--mrpfuzz-race-normal-triage-interval", self.args.mrpfuzz_race_normal_triage_interval),
                 ("--mrpfuzz-race-normal-triage-max-jobs", self.args.mrpfuzz_race_normal_triage_max_jobs),
+                ("--mrpfuzz-race-candidate-triage-max-jobs", self.args.mrpfuzz_race_candidate_triage_max_jobs),
             ]:
                 if value < 1 and name not in (
                     "--mrpfuzz-race-normal-triage-interval",
                     "--mrpfuzz-race-normal-triage-max-jobs",
+                    "--mrpfuzz-race-candidate-triage-max-jobs",
                 ):
                     raise SystemExit(f"{name} must be >= 1")
                 if value < 0:
@@ -271,6 +275,8 @@ class Runner:
         fuzz_exp["enable_affinity_table"] = False
         fuzz_exp["race_normal_triage_interval"] = self.args.mrpfuzz_race_normal_triage_interval
         fuzz_exp["race_normal_triage_max_jobs"] = self.args.mrpfuzz_race_normal_triage_max_jobs
+        fuzz_exp["race_candidate_triage_max_jobs"] = self.args.mrpfuzz_race_candidate_triage_max_jobs
+        fuzz_exp["race_disable_normal_triage"] = self.args.mrpfuzz_disable_normal_triage
         fuzz_exp["enable_dynamic_threshold"] = True
         fuzz_exp["dynamic_threshold_eval_sec"] = 30
         fuzz_cfg["vm_running_time"] = 3600
@@ -1088,8 +1094,20 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument(
         "--mrpfuzz-race-normal-triage-max-jobs",
         type=int,
+        default=8,
+        help="Maximum fuzz-generated ordinary syzkaller coverage triage jobs kept in MRPFuzz race mode; 0 uses the manager default.",
+    )
+    parser.add_argument(
+        "--mrpfuzz-race-candidate-triage-max-jobs",
+        type=int,
         default=64,
-        help="Maximum ordinary syzkaller coverage triage jobs kept in MRPFuzz race mode; 0 uses the manager default.",
+        help="Maximum startup/candidate corpus triage jobs kept in MRPFuzz race mode; 0 uses the manager default.",
+    )
+    parser.add_argument(
+        "--mrpfuzz-disable-normal-triage",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+        help="Skip ordinary syzkaller coverage triage jobs in MRPFuzz race mode while keeping pair collection and validation.",
     )
     parser.add_argument(
         "--mrpfuzz-seed-workdir",

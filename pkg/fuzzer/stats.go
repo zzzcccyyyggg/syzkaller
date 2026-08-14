@@ -72,7 +72,7 @@ func newStats(target *prog.Target) Stats {
 			stat.Link("/jobs?type=triage")),
 		statJobsTriageCandidate: stat.New("candidate triage jobs", "Running candidate triage jobs",
 			stat.StackedGraph("jobs"), stat.Link("/jobs?type=triage")),
-		statNormalTriageSkips: stat.New("triage skips", "Skipped ordinary coverage triage jobs due race-mode backlog",
+		statNormalTriageSkips: stat.New("triage skips", "Skipped ordinary coverage triage jobs due race-mode limits",
 			stat.Console, stat.Graph("jobs")),
 		statJobsSmash: stat.New("smash jobs", "Running smash jobs", stat.StackedGraph("jobs"),
 			stat.Link("/jobs?type=smash")),

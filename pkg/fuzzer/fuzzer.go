@@ -72,7 +72,8 @@ type Fuzzer struct {
 
 const raceSeedFuzzSampleRate = 0.5
 const defaultRaceNormalTriageInterval = 8
-const defaultRaceNormalTriageMaxJobs = 64
+const defaultRaceNormalTriageMaxJobs = 8
+const defaultRaceCandidateTriageMaxJobs = 64
 
 func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	target *prog.Target) *Fuzzer {
@@ -141,6 +142,9 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		}
 		if cfg.EnableCoverageTriage != nil && !*cfg.EnableCoverageTriage {
 			log.Logf(0, "[CLEAN-AUDIT] Coverage triage jobs DISABLED (enable_coverage_triage=false)")
+		}
+		if cfg.RaceDisableNormalTriage {
+			log.Logf(0, "[THROUGHPUT] Normal syzkaller coverage triage jobs DISABLED in race mode")
 		}
 		if cfg.NoObjectKccwfNamespace {
 			log.Logf(0, "[ABLATION] KCCWF partner-program namespacing ENABLED for no-object baseline")
@@ -398,18 +402,34 @@ func (fuzzer *Fuzzer) raceNormalTriageSource(source queue.Source) queue.Source {
 	return queue.Periodic(source, interval)
 }
 
-func (fuzzer *Fuzzer) shouldStartRaceNormalTriageJob() bool {
+func (fuzzer *Fuzzer) shouldStartRaceNormalTriageJob(flags ProgFlags) bool {
 	if fuzzer == nil || fuzzer.Config == nil || !fuzzer.Config.ModeUAF {
 		return true
+	}
+	if fuzzer.Config.RaceDisableNormalTriage {
+		if fuzzer.statNormalTriageSkips != nil {
+			fuzzer.statNormalTriageSkips.Add(1)
+		}
+		return false
 	}
 	if fuzzer.statJobsTriage == nil || fuzzer.statJobsTriageCandidate == nil || fuzzer.statNormalTriageSkips == nil {
 		return true
 	}
-	limit := fuzzer.Config.RaceNormalTriageMaxJobs
-	if limit <= 0 {
-		limit = defaultRaceNormalTriageMaxJobs
+	limit := 0
+	running := 0
+	if flags&progCandidate > 0 {
+		limit = fuzzer.Config.RaceCandidateTriageMaxJobs
+		if limit <= 0 {
+			limit = defaultRaceCandidateTriageMaxJobs
+		}
+		running = fuzzer.statJobsTriageCandidate.Val()
+	} else {
+		limit = fuzzer.Config.RaceNormalTriageMaxJobs
+		if limit <= 0 {
+			limit = defaultRaceNormalTriageMaxJobs
+		}
+		running = fuzzer.statJobsTriage.Val()
 	}
-	running := fuzzer.statJobsTriage.Val() + fuzzer.statJobsTriageCandidate.Val()
 	if running < limit {
 		return true
 	}
@@ -602,7 +622,7 @@ func (fuzzer *Fuzzer) processResult(req *queue.Request, res *queue.Result, flags
 			if flags&progCandidate > 0 {
 				queue, stat = fuzzer.triageCandidateQueue, fuzzer.statJobsTriageCandidate
 			}
-			if fuzzer.shouldStartRaceNormalTriageJob() {
+			if fuzzer.shouldStartRaceNormalTriageJob(flags) {
 				job := &triageJob{
 					p:        req.Prog.Clone(),
 					executor: res.Executor,
@@ -731,9 +751,17 @@ type Config struct {
 	// RaceNormalTriageInterval throttles ordinary syzkaller coverage triage in
 	// race mode so deflake/minimization cannot starve barrier fuzzing.
 	RaceNormalTriageInterval int
-	// RaceNormalTriageMaxJobs bounds ordinary syzkaller coverage triage backlog
-	// in race mode. Pair collection and validation queues are unaffected.
+	// RaceNormalTriageMaxJobs bounds fuzz-generated ordinary syzkaller coverage
+	// triage backlog in race mode. Startup/candidate triage, pair collection,
+	// and validation queues are unaffected.
 	RaceNormalTriageMaxJobs int
+	// RaceCandidateTriageMaxJobs bounds startup/candidate corpus triage in race
+	// mode separately from fuzz-generated triage.
+	RaceCandidateTriageMaxJobs int
+	// RaceDisableNormalTriage skips ordinary syzkaller coverage triage jobs in
+	// race mode. Pair collection, MRPFuzz corpus handling, and validation queues
+	// are unaffected.
+	RaceDisableNormalTriage bool
 	// EnableSoloFilter controls the legacy solo re-execution filter in race mode.
 	EnableSoloFilter bool
 	// EnableAffinityTable controls the legacy syscall affinity table in race mode.
