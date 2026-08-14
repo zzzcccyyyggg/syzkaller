@@ -1077,11 +1077,12 @@ public:
 				fprintf(stderr, "[SHM-MERGE] Total merged syscall context: %d entries\n", merged_ctx.history_count);
 		}
 
-		std::vector<may_uaf_pair_t> pairs(kDdrdMaxUafPairs);
+		if (pair_scratch_.size() < kDdrdMaxUafPairs)
+			pair_scratch_.resize(kDdrdMaxUafPairs);
 		// 为避免更改过多 race 也先使用uaf pair的模型
 		// Pass merged syscall context to race detector
 		// Use configurable threshold if set, otherwise use default (0 = 10ms)
-		int count = race_detector_analyze_and_generate_race_infos_with_threshold(&detector_, pairs.data(),
+		int count = race_detector_analyze_and_generate_race_infos_with_threshold(&detector_, pair_scratch_.data(),
 									  (int)kDdrdMaxUafPairs,
 									  &merged_ctx, timing_threshold_us_);
 		if (timing_threshold_us_ > 0) {
@@ -1095,7 +1096,7 @@ public:
 			return;
 		}
 
-		output_.basic_pairs.assign(pairs.begin(), pairs.begin() + count);
+		output_.basic_pairs.assign(pair_scratch_.begin(), pair_scratch_.begin() + count);
 		debug("ddrd: detected %d UAF pair(s)\n", count);
 
 		for (int i = 0; i < count; i++) {
@@ -1284,6 +1285,7 @@ private:
 	bool active_for_group_;
 	bool target_pair_active_;
 	uint64_t timing_threshold_us_;  // configurable threshold in microseconds (0 = use default 10ms)
+	std::vector<may_uaf_pair_t> pair_scratch_;
 	DdrdOutputState output_;
 };
 #endif // GOOS_linux

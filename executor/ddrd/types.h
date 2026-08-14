@@ -3,6 +3,7 @@
 
 #include <stdint.h>
 #include <stdbool.h>
+#include <stddef.h>
 
 #define MAX_LOCK_NAME 64
 
@@ -54,6 +55,9 @@ typedef struct {
     int thread_count;           // 活跃线程数量
     int max_threads;            // 最大线程数量
     bool enable_history;        // 是否启用线程访问历史记录功能
+    uint64_t* seen_pair_ids;    // race pair 去重 scratch，跨次分析复用
+    bool* seen_pair_occupied;   // race pair 去重 scratch 占用位
+    size_t seen_pair_capacity;  // scratch 容量
 } AccessContext;
 int access_context_init_from_buffer(AccessContext* record_ctx, const char* buffer, int max_records, int max_frees);
 int access_context_init_from_records(AccessContext* record_ctx, const AccessRecord* records, int input_count, int max_records, int max_frees);

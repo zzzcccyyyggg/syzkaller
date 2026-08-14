@@ -16,6 +16,7 @@ static int compare_access_record_time(const void* lhs, const void* rhs);
 static uint64_t rotate_left64_value(uint64_t value, unsigned int shift);
 static uint64_t race_pair_id_from_records(const AccessRecord* first_access, const AccessRecord* second_access);
 static size_t next_power_of_two_size(size_t value);
+static bool prepare_seen_pair_scratch(AccessContext* record_ctx, size_t table_size);
 static bool seen_pair_id_contains(const uint64_t* table, const bool* occupied, size_t table_size, uint64_t id);
 static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_size, uint64_t id);
 
@@ -198,6 +199,38 @@ static bool insert_seen_pair_id(uint64_t* table, bool* occupied, size_t table_si
     return true;
 }
 
+static bool prepare_seen_pair_scratch(AccessContext* record_ctx, size_t table_size)
+{
+    if (!record_ctx || table_size == 0)
+        return false;
+    if (record_ctx->seen_pair_ids && record_ctx->seen_pair_occupied &&
+        record_ctx->seen_pair_capacity >= table_size) {
+        memset(record_ctx->seen_pair_occupied, 0,
+               record_ctx->seen_pair_capacity * sizeof(*record_ctx->seen_pair_occupied));
+        return true;
+    }
+    if (table_size > SIZE_MAX / sizeof(*record_ctx->seen_pair_ids) ||
+        table_size > SIZE_MAX / sizeof(*record_ctx->seen_pair_occupied))
+        return false;
+
+    uint64_t* ids = (uint64_t*)malloc(table_size * sizeof(*ids));
+    bool* occupied = (bool*)malloc(table_size * sizeof(*occupied));
+    if (!ids || !occupied) {
+        free(ids);
+        free(occupied);
+        return false;
+    }
+
+    free(record_ctx->seen_pair_ids);
+    free(record_ctx->seen_pair_occupied);
+    record_ctx->seen_pair_ids = ids;
+    record_ctx->seen_pair_occupied = occupied;
+    record_ctx->seen_pair_capacity = table_size;
+    memset(record_ctx->seen_pair_occupied, 0,
+           table_size * sizeof(*record_ctx->seen_pair_occupied));
+    return true;
+}
+
 static bool seen_pair_id_contains(const uint64_t* table, const bool* occupied, size_t table_size, uint64_t id)
 {
     if (!table || !occupied || table_size == 0)
@@ -237,13 +270,10 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
     if (max_pairs <= 0x1fffffff)
         max_candidates = max_pairs * RACE_PAIR_CANDIDATE_SCAN_MULTIPLIER;
     seen_pair_capacity = next_power_of_two_size((size_t)max_pairs * 4);
-    seen_pair_ids = (uint64_t*)calloc(seen_pair_capacity, sizeof(*seen_pair_ids));
-    seen_pair_occupied = (bool*)calloc(seen_pair_capacity, sizeof(*seen_pair_occupied));
-    if (!seen_pair_ids || !seen_pair_occupied) {
-        free(seen_pair_ids);
-        free(seen_pair_occupied);
-        seen_pair_ids = NULL;
-        seen_pair_occupied = NULL;
+    if (prepare_seen_pair_scratch(record_ctx, seen_pair_capacity)) {
+        seen_pair_ids = record_ctx->seen_pair_ids;
+        seen_pair_occupied = record_ctx->seen_pair_occupied;
+        seen_pair_capacity = record_ctx->seen_pair_capacity;
     }
 
     for (int i = 0; i < record_ctx->record_count &&
@@ -309,11 +339,13 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
                 pair_count, pair->first.tid, pair->second.tid,
                 (unsigned long long)pair->first.access_time, (unsigned long long)pair->second.access_time);
 
-            pair->thread1_history = access_context_find_thread(record_ctx, pair->first.tid);
-            pair->thread2_history = access_context_find_thread(record_ctx, pair->second.tid);
+            pair->thread1_history = NULL;
+            pair->thread2_history = NULL;
             pair->first_access_index = -1;
             pair->second_access_index = -1;
 
+            if (record_ctx->enable_history)
+                pair->thread1_history = access_context_find_thread(record_ctx, pair->first.tid);
             if (pair->thread1_history) {
                 int total_accesses1 = pair->thread1_history->buffer_full ?
                     SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM : pair->thread1_history->access_count;
@@ -328,6 +360,8 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
                 }
             }
 
+            if (record_ctx->enable_history)
+                pair->thread2_history = access_context_find_thread(record_ctx, pair->second.tid);
             if (pair->thread2_history) {
                 int total_accesses2 = pair->thread2_history->buffer_full ?
                     SINGLE_THREAD_MAX_ACCESS_HISTORY_NUM : pair->thread2_history->access_count;
@@ -346,8 +380,6 @@ int access_context_analyze_race_pairs_with_threshold(AccessContext* record_ctx, 
         }
     }
 
-    free(seen_pair_ids);
-    free(seen_pair_occupied);
     return pair_count;
 }
 

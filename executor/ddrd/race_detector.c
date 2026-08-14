@@ -69,6 +69,9 @@ void race_detector_init(RaceDetector* detector)
     detector->context.record_count = 0;
     detector->context.free_count = 0;
     detector->context.enable_history = false;
+    detector->context.seen_pair_ids = NULL;
+    detector->context.seen_pair_occupied = NULL;
+    detector->context.seen_pair_capacity = 0;
 
     debug("Initializing race detector...\n");
 
@@ -139,6 +142,15 @@ void race_detector_cleanup(RaceDetector* detector)
         free(detector->context.thread_histories);
         detector->context.thread_histories = NULL;
     }
+    if (detector->context.seen_pair_ids) {
+        free(detector->context.seen_pair_ids);
+        detector->context.seen_pair_ids = NULL;
+    }
+    if (detector->context.seen_pair_occupied) {
+        free(detector->context.seen_pair_occupied);
+        detector->context.seen_pair_occupied = NULL;
+    }
+    detector->context.seen_pair_capacity = 0;
     if (detector->trace_buffer) {
         free(detector->trace_buffer);
         detector->trace_buffer = NULL;
