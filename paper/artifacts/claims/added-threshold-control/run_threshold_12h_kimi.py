@@ -29,8 +29,6 @@ QEMU_VERSION = "QEMU emulator version 6.2.0 (Debian 1:6.2+dfsg-2ubuntu6.30)"
 QEMU_SHA256 = "7d1e85a29e09c49f6a1c60a18713d80a72ef3b8932c4183cc100bce3a01fa64e"
 KERNEL_ACCESS_DELAY_MULTIPLIER = 10
 COMMON_FROZEN_ARTIFACT_SHA256 = {
-    ROOT / "bin/syz-manager": "7e12dd9720901174bc0577c92932b3b52074333a8b5727ac7c1b07036eb1649b",
-    ROOT / "bin/linux_amd64/syz-executor": "66adcd0648ff3803a7f5260a923dab49d86baaa3f143058a70ca3f9dffd01ec5",
     ROOT / "bin/syz-llm-candidate-check": "501f0ac48f2bb49095d577d02e049c9931adab7186d150354f521e334580a3c0",
     ROOT / "scripts/generate_config.py": "00e595ddd4cd5902cd68c809d191fe168125071542374b803f38c6c827f5be80",
     ROOT / "tools/llm-mutate-pilot/pilot.py": "9a9552460e0701ce48c11b1cfbbd703f52adc7e14958d82c074e26b045a3bf71",
@@ -259,6 +257,8 @@ class VariantRunner:
         self.qemu_version = ""
         self.manager_path = ""
         self.manager_sha256 = ""
+        self.executor_path = ""
+        self.executor_sha256 = ""
 
     def create_dirs(self) -> None:
         if self.run_dir.exists():
@@ -274,13 +274,14 @@ class VariantRunner:
             path.mkdir(parents=True, exist_ok=True)
 
     def preflight(self) -> None:
+        manager = Path(self.args.manager_bin).resolve()
         required = [
             self.init_corpus,
             self.module_syscalls,
             self.module_overrides,
             ROOT / "images/bookworm.img",
             ROOT / "images/bookworm.id_rsa",
-            ROOT / "bin/syz-manager",
+            manager,
             ROOT / "bin/linux_amd64/syz-executor",
             self.kernel_dir / "bzImage",
             self.kernel_dir / "vmlinux",
@@ -323,11 +324,13 @@ class VariantRunner:
                     f"frozen experiment artifact hash mismatch for {path}: "
                     f"{actual_hash} != {expected_hash}"
                 )
-        manager = Path(self.args.manager_bin).resolve()
         if not manager.is_file():
             raise SystemExit(f"manager binary does not exist: {manager}")
         self.manager_path = str(manager)
         self.manager_sha256 = sha256(manager)
+        executor = (ROOT / "bin/linux_amd64/syz-executor").resolve()
+        self.executor_path = str(executor)
+        self.executor_sha256 = sha256(executor)
         qemu = shutil.which("qemu-system-x86_64")
         if not qemu:
             raise SystemExit("qemu-system-x86_64 is not available in PATH")
@@ -625,6 +628,10 @@ class VariantRunner:
                 "manager": {
                     "path": self.manager_path,
                     "sha256": self.manager_sha256,
+                },
+                "executor": {
+                    "path": self.executor_path,
+                    "sha256": self.executor_sha256,
                 },
             },
             "initial_corpus": {
