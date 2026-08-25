@@ -94,8 +94,18 @@ During v2 startup, both fuzz guests again rebooted after an RCU stall and a
 `panic_on_warn`. They reconnected at 18:38:52 and 18:39:11; calls then resumed
 from 181 to 476. At the recovery checkpoint, all `2 fuzz + 4 validate` VMs were
 online, `P/C/Q=104/42/62`, and GPT-5.4 had accepted four variants with zero API
-failures. This confirms that the longer watchdog prevents a recoverable dual-VM
-restart from truncating the arm.
+failures.
+
+The longer watchdog did not resolve the underlying liveness problem. After
+calls reached 1661, both fuzz VMs remained connected but no calls finished for
+600 seconds, and v2 stopped at `2026-08-25 18:56:22 +12:00`. Its final counters
+were `P/C/Q=170/63/107`, and `validated_uaf.db` contained one unique VarName
+race family. Unlike the first recovery, this interval had no subsequent guest
+crash or reboot before the watchdog fired: six scheduled calls remained
+unfinished. Fixed-10000 v2 is therefore also incomplete and must not be used as
+a 24-hour endpoint result. A further retry should first add per-VM progress
+recovery or diagnose the hanging fuzz programs; merely extending the global
+watchdog again would conceal lost experimental time.
 
 ## Operations
 
