@@ -68,6 +68,35 @@ Fixed-10000   1461    10000       779        105      674          2         4
 The table is a startup snapshot, not an experiment result. No validated race
 had been reported at this early checkpoint.
 
+## Fixed-10000 replacement run
+
+The original Fixed-10000 runner stopped at `2026-08-25 18:01:56 +12:00`
+after `calls executed=14922` remained unchanged for the global 240-second
+stall window. Its final threshold counters were `P/C/Q=1800/111/1689`.
+
+The direct trigger was fuzz-guest recovery rather than validator exit or a
+resource floor: one guest disconnected at 17:59:44, started rebooting at
+18:00:04, and reconnected at 18:01:06. Calls had not resumed by 18:01:56, so
+the runner stopped both managers. The v1 directory and evidence are retained,
+but v1 is not a complete formal arm.
+
+Fixed-10000 was restarted from the frozen initial corpus as a new full 24-hour
+run. Experiment semantics are unchanged; only the operational stall watchdog
+was raised from 240 to 600 seconds.
+
+```text
+run id       = 20260825-local-f2fs-2core24h-fixed10000-gpt54api-v2
+running at   = 2026-08-25 18:36:06 +12:00
+tmux session = f2fs24-fixed10000-v2
+```
+
+During v2 startup, both fuzz guests again rebooted after an RCU stall and a
+`panic_on_warn`. They reconnected at 18:38:52 and 18:39:11; calls then resumed
+from 181 to 476. At the recovery checkpoint, all `2 fuzz + 4 validate` VMs were
+online, `P/C/Q=104/42/62`, and GPT-5.4 had accepted four variants with zero API
+failures. This confirms that the longer watchdog prevents a recoverable dual-VM
+restart from truncating the arm.
+
 ## Operations
 
 Per-run state and watcher records are under:
