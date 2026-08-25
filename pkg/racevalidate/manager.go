@@ -193,7 +193,6 @@ type validationTask struct {
 	historyCount     int                        // number of replay history records
 	pairLatest       map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
 	pairCounts       map[string]int
-	pairOriginalTD   map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
 	pairSNSamples    map[string]*snSampleStats
 	scheduleFamilies []string // canonical VarName families reserved by the scheduler
 }
@@ -594,12 +593,12 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 			// skipOriginalCheck: skip if debug mode OR if RequireOriginMatch is disabled
 			skipOriginalCheck := sm.cfg.TargetVarNamePair != "" || !sm.cfg.RequireOriginMatch
 			result.StablePairs = collectStablePairs(task.pairLatest, task.pairCounts, sm.stable, originalPairs, skipOriginalCheck, originMatchMode, sm.cfg.MaxStablePairsPerOrigin, sm.cfg.MaxStablePairsPerEntry)
+			logCollectionProvenanceSummary(task, result.StablePairs, sm.stable)
 			if len(result.StablePairs) > 0 {
-				// Compute stable pairs with per-pair delays (min/max of original vs runtime TimeDiff)
+				// Use the minimum-gap runtime occurrence retained during collection.
 				stablePairsWithDelays := collectStablePairsWithDelays(
 					task.pairLatest,
 					task.pairCounts,
-					task.pairOriginalTD,
 					sm.stable,
 					originalPairs,
 					skipOriginalCheck,
@@ -883,17 +882,6 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 		key:          key,
 		historyCount: len(clone.ReplayHistory),
 	}
-	// Pre-compute original TimeDiff for each pair from entry.Pairs
-	if len(clone.Pairs) > 0 {
-		task.pairOriginalTD = make(map[string]uint64, len(clone.Pairs))
-		for _, pair := range clone.Pairs {
-			if pair == nil {
-				continue
-			}
-			k := pairKey(*pair)
-			task.pairOriginalTD[k] = pair.TimeDiff
-		}
-	}
 	sm.pending[key] = task
 	sm.seenKeys[key] = struct{}{}
 	return task
@@ -991,12 +979,11 @@ func (sm *StageManager) prepareTaskRef(ref *ValidationEntryRef) *validationTask 
 		return nil
 	}
 	task := &validationTask{
-		entry:          lightEntry,
-		ref:            ref,
-		signature:      signature,
-		key:            key,
-		historyCount:   ref.HistoryCount,
-		pairOriginalTD: map[string]uint64{pairKey(pair): pair.TimeDiff},
+		entry:        lightEntry,
+		ref:          ref,
+		signature:    signature,
+		key:          key,
+		historyCount: ref.HistoryCount,
 	}
 	sm.pending[key] = task
 	sm.seenKeys[key] = struct{}{}
@@ -1704,6 +1691,30 @@ func classifyValidatedPairOrigin(entry *fuzzer.UAFCorpusEntry, runtime ddrd.MayU
 	return "none"
 }
 
+func logCollectionProvenanceSummary(task *validationTask, accepted []ddrd.MayUAFPair, minCount int) {
+	if task == nil {
+		return
+	}
+	if minCount <= 1 {
+		minCount = 1
+	}
+	counts := map[string]int{"exact": 0, "varname": 0, "none": 0}
+	stableRuntime := 0
+	for key, count := range task.pairCounts {
+		if count < minCount {
+			continue
+		}
+		pair, ok := task.pairLatest[key]
+		if !ok {
+			continue
+		}
+		stableRuntime++
+		counts[classifyValidatedPairOrigin(task.entry, pair)]++
+	}
+	log.Logf(0, "uafvalidate: collection-provenance key=%s stable_runtime=%d exact=%d varname=%d novel=%d accepted=%d",
+		task.key, stableRuntime, counts["exact"], counts["varname"], counts["none"], len(accepted))
+}
+
 func samePairIdentity(a, b ddrd.MayUAFPair, allowReverse bool) bool {
 	if a.FreeAccessName == b.FreeAccessName && a.UseAccessName == b.UseAccessName &&
 		a.FreeCallStack == b.FreeCallStack && a.UseCallStack == b.UseCallStack {
@@ -1971,7 +1982,10 @@ func (sm *StageManager) updateIntersection(task *validationTask, res *Validation
 			continue
 		}
 		seen[key] = struct{}{}
-		task.pairLatest[key] = pair
+		current, exists := task.pairLatest[key]
+		if !exists || current.TimeDiff == 0 || (pair.TimeDiff != 0 && pair.TimeDiff < current.TimeDiff) {
+			task.pairLatest[key] = pair
+		}
 		task.pairCounts[key]++
 		recordSNSample(task.pairSNSamples, key, pair)
 	}
@@ -2376,7 +2390,10 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 		}
 		// Additional condition: pair must exist in original corpus pairs
 		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs.
-		if !skipOriginalCheck && len(originalKeys) > 0 {
+		if !skipOriginalCheck {
+			if len(originalKeys) == 0 {
+				continue
+			}
 			if _, inOriginal := originalKeys[originMatchKey(pair, originMatchMode)]; !inOriginal {
 				continue
 			}
@@ -2396,13 +2413,12 @@ func collectStablePairs(latest map[string]ddrd.MayUAFPair, counts map[string]int
 	return stable
 }
 
-// collectStablePairsWithDelays returns stable pairs with computed delays:
-// - StartDelayUs: original TimeDiff in microseconds (same as discovery phase)
-// - AccessDelayUs: max(original TimeDiff, runtime TimeDiff) in microseconds
+// collectStablePairsWithDelays uses the minimum-gap runtime occurrence retained
+// during collection. Algorithm 2 derives the scheduling delay from this
+// collection metadata, not from the fuzz-time admission observation.
 func collectStablePairsWithDelays(
 	latest map[string]ddrd.MayUAFPair,
 	counts map[string]int,
-	originalTD map[string]uint64,
 	minCount int,
 	originalPairs []*ddrd.MayUAFPair,
 	skipOriginalCheck bool,
@@ -2416,7 +2432,7 @@ func collectStablePairsWithDelays(
 	if minCount <= 1 {
 		minCount = 1
 	}
-	originalKeys, originalTDByMatchKey := buildOriginalMatchIndexes(originalPairs, originMatchMode)
+	originalKeys, _ := buildOriginalMatchIndexes(originalPairs, originMatchMode)
 	keys := make([]string, 0, len(counts))
 	for key, count := range counts {
 		if count < minCount {
@@ -2428,7 +2444,10 @@ func collectStablePairsWithDelays(
 		}
 		// Additional condition: pair must exist in original corpus pairs
 		// In debug mode (skipOriginalCheck=true), skip this check to allow any runtime-discovered pairs
-		if !skipOriginalCheck && len(originalKeys) > 0 {
+		if !skipOriginalCheck {
+			if len(originalKeys) == 0 {
+				continue
+			}
 			if _, inOriginal := originalKeys[originMatchKey(pair, originMatchMode)]; !inOriginal {
 				continue
 			}
@@ -2444,33 +2463,12 @@ func collectStablePairsWithDelays(
 	result := make([]StablePairWithDelays, 0, len(keys))
 	for _, key := range keys {
 		pair := latest[key]
-		runtimeTD := pair.TimeDiff // nanoseconds from runtime observation
-		origTD := originalTD[key]  // nanoseconds from original corpus entry
-		if origTD == 0 {
-			origTD = originalTDByMatchKey[originMatchKey(pair, originMatchMode)]
-		}
-		if origTD == 0 {
-			origTD = runtimeTD // fallback if not recorded
-		}
-
-		// Compute max for access delay
-		var maxTD uint64
-		if runtimeTD > origTD {
-			maxTD = runtimeTD
-		} else {
-			maxTD = origTD
-		}
-
-		// Convert to microseconds (TimeDiff is in nanoseconds)
-		// StartDelayUs: use original delay (same as discovery phase)
-		// AccessDelayUs: use max(original, runtime) for kernel udelay
-		startDelayUs := int64(origTD / 1000)
-		accessDelayUs := int64(maxTD / 1000)
+		collectionDelayUs := int64(pair.TimeDiff / 1000)
 
 		result = append(result, StablePairWithDelays{
 			Pair:          pair,
-			StartDelayUs:  startDelayUs,
-			AccessDelayUs: accessDelayUs,
+			StartDelayUs:  collectionDelayUs,
+			AccessDelayUs: collectionDelayUs,
 		})
 	}
 	return result
@@ -2528,7 +2526,16 @@ func originMatchKey(pair ddrd.MayUAFPair, mode string) string {
 	if originKeyMode(mode) == OriginMatchModeVarName {
 		return varNamePairKey(pair)
 	}
-	return pairKey(pair)
+	return canonicalExactPairKey(pair)
+}
+
+func canonicalExactPairKey(pair ddrd.MayUAFPair) string {
+	left := fmt.Sprintf("%016x-%016x", pair.FreeAccessName, pair.FreeCallStack)
+	right := fmt.Sprintf("%016x-%016x", pair.UseAccessName, pair.UseCallStack)
+	if left > right {
+		left, right = right, left
+	}
+	return left + "-" + right
 }
 
 func buildOriginalMatchIndexes(originalPairs []*ddrd.MayUAFPair, mode string) (map[string]struct{}, map[string]uint64) {
@@ -2555,7 +2562,7 @@ func buildExactOriginalIndex(originalPairs []*ddrd.MayUAFPair) map[string]uint64
 		if pair == nil {
 			continue
 		}
-		key := pairKey(*pair)
+		key := canonicalExactPairKey(*pair)
 		if pair.TimeDiff != 0 {
 			if cur := timeDiffs[key]; cur == 0 || pair.TimeDiff < cur {
 				timeDiffs[key] = pair.TimeDiff
@@ -2583,8 +2590,8 @@ func sortStablePairKeys(keys []string, latest map[string]ddrd.MayUAFPair, counts
 			return ki < kj
 		}
 
-		_, exactI := exactOriginalTD[pairKey(pi)]
-		_, exactJ := exactOriginalTD[pairKey(pj)]
+		_, exactI := exactOriginalTD[canonicalExactPairKey(pi)]
+		_, exactJ := exactOriginalTD[canonicalExactPairKey(pj)]
 		if exactI != exactJ {
 			return exactI
 		}
@@ -2604,7 +2611,7 @@ func sortStablePairKeys(keys []string, latest map[string]ddrd.MayUAFPair, counts
 }
 
 func stablePairTimeDiffDelta(pair ddrd.MayUAFPair, exactOriginalTD map[string]uint64, originalTDByMatchKey map[string]uint64, originMatchMode string) uint64 {
-	orig := exactOriginalTD[pairKey(pair)]
+	orig := exactOriginalTD[canonicalExactPairKey(pair)]
 	if orig == 0 {
 		orig = originalTDByMatchKey[originMatchKey(pair, originMatchMode)]
 	}

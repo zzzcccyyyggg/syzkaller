@@ -29,8 +29,6 @@ QEMU_VERSION = "QEMU emulator version 6.2.0 (Debian 1:6.2+dfsg-2ubuntu6.30)"
 QEMU_SHA256 = "7d1e85a29e09c49f6a1c60a18713d80a72ef3b8932c4183cc100bce3a01fa64e"
 KERNEL_ACCESS_DELAY_MULTIPLIER = 10
 COMMON_FROZEN_ARTIFACT_SHA256 = {
-    ROOT / "bin/syz-manager": "7e12dd9720901174bc0577c92932b3b52074333a8b5727ac7c1b07036eb1649b",
-    ROOT / "bin/linux_amd64/syz-executor": "66adcd0648ff3803a7f5260a923dab49d86baaa3f143058a70ca3f9dffd01ec5",
     ROOT / "bin/syz-llm-candidate-check": "501f0ac48f2bb49095d577d02e049c9931adab7186d150354f521e334580a3c0",
     ROOT / "scripts/generate_config.py": "00e595ddd4cd5902cd68c809d191fe168125071542374b803f38c6c827f5be80",
     ROOT / "tools/llm-mutate-pilot/pilot.py": "9a9552460e0701ce48c11b1cfbbd703f52adc7e14958d82c074e26b045a3bf71",
@@ -259,6 +257,8 @@ class VariantRunner:
         self.qemu_version = ""
         self.manager_path = ""
         self.manager_sha256 = ""
+        self.executor_path = ""
+        self.executor_sha256 = ""
 
     def create_dirs(self) -> None:
         if self.run_dir.exists():
@@ -274,13 +274,14 @@ class VariantRunner:
             path.mkdir(parents=True, exist_ok=True)
 
     def preflight(self) -> None:
+        manager = Path(self.args.manager_bin).resolve()
         required = [
             self.init_corpus,
             self.module_syscalls,
             self.module_overrides,
             ROOT / "images/bookworm.img",
             ROOT / "images/bookworm.id_rsa",
-            ROOT / "bin/syz-manager",
+            manager,
             ROOT / "bin/linux_amd64/syz-executor",
             self.kernel_dir / "bzImage",
             self.kernel_dir / "vmlinux",
@@ -323,11 +324,13 @@ class VariantRunner:
                     f"frozen experiment artifact hash mismatch for {path}: "
                     f"{actual_hash} != {expected_hash}"
                 )
-        manager = Path(self.args.manager_bin).resolve()
         if not manager.is_file():
             raise SystemExit(f"manager binary does not exist: {manager}")
         self.manager_path = str(manager)
         self.manager_sha256 = sha256(manager)
+        executor = (ROOT / "bin/linux_amd64/syz-executor").resolve()
+        self.executor_path = str(executor)
+        self.executor_sha256 = sha256(executor)
         qemu = shutil.which("qemu-system-x86_64")
         if not qemu:
             raise SystemExit("qemu-system-x86_64 is not available in PATH")
@@ -538,16 +541,17 @@ class VariantRunner:
                 "verify_stack_access_delay_us": self.args.verify_stack_access_delay_us,
                 "verify_stack_access_delay_multiplier": self.args.verify_stack_access_delay_multiplier,
                 "disable_collection_delay": True,
-                "require_origin_match": False,
+                "require_origin_match": self.args.require_origin_match,
                 "replay_collect_pairs": False,
                 "verify_collect_pairs": False,
                 "verify_delay_sweep": False,
+                "collection_only": self.args.collection_only,
                 "enable_history_minimization": False,
                 "max_pairs_per_task": 8,
                 "max_tasks_per_corpus": self.args.max_tasks_per_corpus,
                 "max_stable_pairs_per_entry": self.args.max_stable_pairs_per_entry,
                 "max_stable_pairs_per_origin": self.args.max_stable_pairs_per_origin,
-                "origin_match_mode": "varname",
+                "origin_match_mode": self.args.origin_match_mode,
                 "continue_after_hb": True,
             }
         )
@@ -626,6 +630,10 @@ class VariantRunner:
                     "path": self.manager_path,
                     "sha256": self.manager_sha256,
                 },
+                "executor": {
+                    "path": self.executor_path,
+                    "sha256": self.executor_sha256,
+                },
             },
             "initial_corpus": {
                 "source": str(self.init_corpus),
@@ -664,6 +672,10 @@ class VariantRunner:
                 "max_tasks_per_corpus": self.args.max_tasks_per_corpus,
                 "max_stable_pairs_per_entry": self.args.max_stable_pairs_per_entry,
                 "max_stable_pairs_per_origin": self.args.max_stable_pairs_per_origin,
+                "paper_strict_pg": self.args.paper_strict_pg,
+                "collection_only": self.args.collection_only,
+                "require_origin_match": self.args.require_origin_match,
+                "origin_match_mode": self.args.origin_match_mode,
                 "repeat_count": self.args.validation_repeat_count,
                 "stable_pair_min_occurrences": self.args.stable_min_occurrences,
                 "verify_repeat_times": self.args.verify_repeat_times,
@@ -1125,6 +1137,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--collection-miss-max-defer", type=float, default=0.75)
     parser.add_argument("--max-stable-pairs-per-entry", type=int, default=16)
     parser.add_argument("--max-stable-pairs-per-origin", type=int, default=1)
+    parser.add_argument("--paper-strict-pg", action="store_true")
+    parser.add_argument("--collection-only", action="store_true")
+    parser.add_argument("--require-origin-match", action="store_true")
+    parser.add_argument(
+        "--origin-match-mode",
+        choices=("exact", "varname", "primary-varname"),
+        default="varname",
+    )
     parser.add_argument("--fuzz-cpuset", default="0-3")
     parser.add_argument("--validate-cpuset", default="4-7")
     parser.add_argument("--kimi-cpuset", default="8-9")
@@ -1181,6 +1201,13 @@ def parse_args() -> argparse.Namespace:
         parser.error("--dynamic-threshold-min-us must be in [1, 10000]")
     if args.dynamic_threshold_max_us < args.dynamic_threshold_min_us:
         parser.error("--dynamic-threshold-max-us must be >= --dynamic-threshold-min-us")
+    if args.paper_strict_pg:
+        if args.collection_threshold_floor_us not in (0, args.dynamic_threshold_max_us):
+            parser.error("--paper-strict-pg requires collection threshold tau_max")
+        args.collection_threshold_floor_us = args.dynamic_threshold_max_us
+        args.require_origin_match = True
+        args.origin_match_mode = "exact"
+        args.max_stable_pairs_per_origin = 1
     if args.fixed_threshold_us <= 0:
         parser.error("--fixed-threshold-us must be positive")
     if args.validation_repeat_count <= 0:

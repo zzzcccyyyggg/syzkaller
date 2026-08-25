@@ -180,3 +180,31 @@ func TestWriteThresholdValidatorQueueStatsUsesVarNameFamilies(t *testing.T) {
 		t.Fatalf("unexpected validator stats: %+v", got)
 	}
 }
+
+func TestFilterValidationGroupPairsUsesQueuedPairsAsPG(t *testing.T) {
+	original := &ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40,
+		TimeDiff: 500_000,
+	}
+	unrelated := &ddrd.MayUAFPair{
+		FreeAccessName: 0x50, UseAccessName: 0x60,
+		FreeCallStack: 0x70, UseCallStack: 0x80,
+	}
+	entry := &fuzzer.UAFCorpusEntry{Pairs: []*ddrd.MayUAFPair{unrelated}}
+	group := &managerpkg.QueuedUAFCorpusGroup{Pairs: []ddrd.MayUAFPair{*original}}
+
+	filterValidationGroupPairs(entry, group)
+	if len(entry.Pairs) != 1 || entry.Pairs[0] == nil {
+		t.Fatalf("materialized P_G=%v, want one queued pair", entry.Pairs)
+	}
+	if got := entry.Pairs[0]; got.FreeAccessName != original.FreeAccessName ||
+		got.UseAccessName != original.UseAccessName ||
+		got.FreeCallStack != original.FreeCallStack || got.UseCallStack != original.UseCallStack ||
+		got.TimeDiff != original.TimeDiff {
+		t.Fatalf("materialized pair=%+v, want %+v", got, original)
+	}
+	if entry.PairBasicInfo != *original {
+		t.Fatalf("primary pair=%+v, want %+v", entry.PairBasicInfo, *original)
+	}
+}

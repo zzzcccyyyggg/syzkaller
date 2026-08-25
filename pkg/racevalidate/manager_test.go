@@ -412,7 +412,7 @@ func TestCollectStablePairsOriginMatchVarNameAllowsStackDrift(t *testing.T) {
 	}
 }
 
-func TestCollectStablePairsWithDelaysUsesOriginalVarNameDelay(t *testing.T) {
+func TestCollectStablePairsWithDelaysUsesCollectionGap(t *testing.T) {
 	original := ddrd.MayUAFPair{
 		FreeAccessName: 0x10,
 		UseAccessName:  0x20,
@@ -431,15 +431,75 @@ func TestCollectStablePairsWithDelaysUsesOriginalVarNameDelay(t *testing.T) {
 	counts := map[string]int{pairKey(runtime): 1}
 	originalPairs := []*ddrd.MayUAFPair{&original}
 
-	got := collectStablePairsWithDelays(latest, counts, nil, 1, originalPairs, false, OriginMatchModeVarName, 0, 0)
+	got := collectStablePairsWithDelays(latest, counts, 1, originalPairs, false, OriginMatchModeVarName, 0, 0)
 	if len(got) != 1 {
 		t.Fatalf("expected one varname-matched pair, got %d", len(got))
 	}
-	if got[0].StartDelayUs != 50 {
-		t.Fatalf("expected original start delay 50us, got %d", got[0].StartDelayUs)
+	if got[0].StartDelayUs != 90 {
+		t.Fatalf("expected collection start delay 90us, got %d", got[0].StartDelayUs)
 	}
 	if got[0].AccessDelayUs != 90 {
-		t.Fatalf("expected max access delay 90us, got %d", got[0].AccessDelayUs)
+		t.Fatalf("expected collection access delay 90us, got %d", got[0].AccessDelayUs)
+	}
+}
+
+func TestCollectStablePairsExactAllowsReverseOrder(t *testing.T) {
+	original := ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40,
+		TimeDiff: 500_000,
+	}
+	runtime := ddrd.MayUAFPair{
+		FreeAccessName: original.UseAccessName, UseAccessName: original.FreeAccessName,
+		FreeCallStack: original.UseCallStack, UseCallStack: original.FreeCallStack,
+		TimeDiff: 200_000,
+	}
+	latest := map[string]ddrd.MayUAFPair{pairKey(runtime): runtime}
+	counts := map[string]int{pairKey(runtime): 1}
+	got := collectStablePairsWithDelays(latest, counts, 1,
+		[]*ddrd.MayUAFPair{&original}, false, OriginMatchModeExact, 1, 0)
+	if len(got) != 1 {
+		t.Fatalf("reverse exact pair was not reproduced: %+v", got)
+	}
+	if got[0].AccessDelayUs != 200 {
+		t.Fatalf("delay=%dus, want minimum collection gap 200us", got[0].AccessDelayUs)
+	}
+}
+
+func TestCollectStablePairsStrictRejectsMissingPG(t *testing.T) {
+	runtime := ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40,
+		TimeDiff: 200_000,
+	}
+	latest := map[string]ddrd.MayUAFPair{pairKey(runtime): runtime}
+	counts := map[string]int{pairKey(runtime): 1}
+	if got := collectStablePairs(latest, counts, 1, nil, false, OriginMatchModeExact, 1, 0); len(got) != 0 {
+		t.Fatalf("strict collection accepted runtime pairs without P_G: %+v", got)
+	}
+}
+
+func TestUpdateIntersectionRetainsMinimumGapOccurrence(t *testing.T) {
+	sm := &StageManager{}
+	task := &validationTask{}
+	large := ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40,
+		TimeDiff: 900_000, FreeSN: 9, UseSN: 10,
+	}
+	small := large
+	small.TimeDiff = 200_000
+	small.FreeSN = 3
+	small.UseSN = 4
+	sm.updateIntersection(task, &ValidationResult{Success: true, Pairs: []ddrd.MayUAFPair{large}})
+	sm.updateIntersection(task, &ValidationResult{Success: true, Pairs: []ddrd.MayUAFPair{small}})
+	sm.updateIntersection(task, &ValidationResult{Success: true, Pairs: []ddrd.MayUAFPair{large}})
+	got := task.pairLatest[pairKey(large)]
+	if got.TimeDiff != small.TimeDiff || got.FreeSN != small.FreeSN || got.UseSN != small.UseSN {
+		t.Fatalf("minimum-gap occurrence not retained: got=%+v want=%+v", got, small)
+	}
+	if task.pairCounts[pairKey(large)] != 3 {
+		t.Fatalf("reproduction count=%d, want 3", task.pairCounts[pairKey(large)])
 	}
 }
 
