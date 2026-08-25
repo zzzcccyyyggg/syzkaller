@@ -2,14 +2,96 @@ package uafvalidate
 
 import (
 	"context"
+	"strings"
 	"sync"
 	"testing"
 	"time"
 
 	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/fuzzer"
+	"github.com/google/syzkaller/pkg/report"
 	"github.com/google/syzkaller/prog"
 )
+
+func TestValidationCollectionThresholdUsesAdmissionThreshold(t *testing.T) {
+	if got := validationCollectionThresholdUs(&fuzzer.UAFCorpusEntry{AdmissionThresholdUs: 2500}, 0); got != 2500 {
+		t.Fatalf("collection threshold = %d, want 2500", got)
+	}
+	if got := validationCollectionThresholdUs(&fuzzer.UAFCorpusEntry{}, 0); got != defaultValidationCollectionThresholdUs {
+		t.Fatalf("legacy collection threshold = %d, want %d", got, defaultValidationCollectionThresholdUs)
+	}
+}
+
+func TestValidationCollectionThresholdFloorPreservesAdmission(t *testing.T) {
+	entry := &fuzzer.UAFCorpusEntry{AdmissionThresholdUs: 100}
+	if got := validationCollectionThresholdUs(entry, 2000); got != 2000 {
+		t.Fatalf("widened collection threshold = %d, want 2000", got)
+	}
+	if got := validationAdmissionThresholdUs(entry); got != 100 {
+		t.Fatalf("admission threshold = %d, want 100", got)
+	}
+	entry.AdmissionThresholdUs = 2500
+	if got := validationCollectionThresholdUs(entry, 2000); got != 2500 {
+		t.Fatalf("collection floor narrowed admission threshold: got %d, want 2500", got)
+	}
+}
+
+func TestValidatedPairMetadataRecordsThresholdTimeDiffAndOrigin(t *testing.T) {
+	original := &ddrd.MayUAFPair{
+		FreeAccessName: 0x10,
+		UseAccessName:  0x20,
+		FreeCallStack:  0x30,
+		UseCallStack:   0x40,
+	}
+	entry := &fuzzer.UAFCorpusEntry{
+		AdmissionThresholdUs: 2500,
+		PairBasicInfo:        *original,
+		Pairs:                []*ddrd.MayUAFPair{original},
+	}
+	runtime := *original
+	runtime.TimeDiff = 1_250_000
+	metadata := makeValidatedPairMetadata(entry, runtime, 2500)
+	if metadata.AdmissionThresholdUs != 2500 || metadata.CollectionThresholdUs != 2500 ||
+		metadata.ObservedTimeDiffNs != runtime.TimeDiff || metadata.OriginMatch != "exact" || metadata.Expanded {
+		t.Fatalf("unexpected exact metadata: %+v", metadata)
+	}
+
+	runtime.UseCallStack++
+	metadata = makeValidatedPairMetadata(entry, runtime, 2500)
+	if metadata.OriginMatch != "varname" || !metadata.Expanded {
+		t.Fatalf("unexpected stack-variant metadata: %+v", metadata)
+	}
+
+	runtime.UseAccessName++
+	metadata = makeValidatedPairMetadata(entry, runtime, 2500)
+	if metadata.OriginMatch != "none" || !metadata.Expanded {
+		t.Fatalf("unexpected expanded metadata: %+v", metadata)
+	}
+}
+
+func TestSerializeValidatedEntryIncludesValidationMetadata(t *testing.T) {
+	entry := &fuzzer.UAFCorpusEntry{AdmissionThresholdUs: 500}
+	metadata := validatedPairMetadata{
+		AdmissionThresholdUs:  500,
+		CollectionThresholdUs: 500,
+		ObservedTimeDiffNs:    123456,
+		OriginMatch:           "none",
+		Expanded:              true,
+	}
+	data := string(serializeValidatedEntryWithHistory(&ExecutionResult{}, entry, nil, &metadata))
+	for _, want := range []string{
+		"=== VALIDATION METADATA ===",
+		"AdmissionThresholdUs: 500",
+		"CollectionThresholdUs: 500",
+		"ObservedTimeDiffNs: 123456",
+		"OriginMatch: none",
+		"Expanded: true",
+	} {
+		if !strings.Contains(data, want) {
+			t.Fatalf("validated record missing %q:\n%s", want, data)
+		}
+	}
+}
 
 type fakeExecutor struct {
 	mu   sync.Mutex
@@ -375,6 +457,137 @@ func TestVerificationAccessDelayFloor(t *testing.T) {
 	}
 }
 
+func TestVerificationAccessDelayStackOverride(t *testing.T) {
+	cfg := Config{
+		VerifyAccessDelayMinUs:      100_000,
+		VerifyStackAccessDelayMinUs: 1_000,
+	}
+	if got := verificationAccessDelayUsForMode(200, cfg, TargetMatchModeStrictSN); got != 100_000 {
+		t.Fatalf("strict SN should use the global floor, got %d", got)
+	}
+	if got := verificationAccessDelayUsForMode(200, cfg, TargetMatchModeSNRange); got != 100_000 {
+		t.Fatalf("SN range should use the global floor, got %d", got)
+	}
+	if got := verificationAccessDelayUsForMode(200, cfg, TargetMatchModeStackOnly); got != 1_000 {
+		t.Fatalf("stack-only should use its override floor, got %d", got)
+	}
+	if got := verificationAccessDelayUsForMode(2_000, cfg, TargetMatchModeStackOnly); got != 2_000 {
+		t.Fatalf("stack-only should preserve a larger observed delay, got %d", got)
+	}
+	cfg.DisableAccessDelay = true
+	if got := verificationAccessDelayUsForMode(200, cfg, TargetMatchModeStrictSN); got != 0 {
+		t.Fatalf("disable access delay should win, got %d", got)
+	}
+}
+
+func TestVerificationAccessDelayThresholdNormalization(t *testing.T) {
+	cfg := Config{
+		VerifyAccessDelayMinUs:                1_000,
+		VerifyAccessDelayNormalizeToThreshold: true,
+		VerifyAccessDelayTargetUs:             100_000,
+		VerifyAccessDelayMaxUs:                100_000,
+		VerifyStackAccessDelayUs:              1_000,
+	}
+	tests := []struct {
+		observedUs int64
+		threshold  int64
+		wantUs     int64
+	}{
+		{0, 500, 1_000},
+		{50, 500, 10_000},
+		{100, 500, 20_000},
+		{250, 500, 50_000},
+		{500, 500, 100_000},
+		{1_000, 500, 100_000},
+		{500, 1_000, 50_000},
+	}
+	for _, test := range tests {
+		got := verificationAccessDelayUsForModeAndThreshold(
+			test.observedUs, cfg, TargetMatchModeStrictSN, test.threshold)
+		if got != test.wantUs {
+			t.Errorf("observed=%dus threshold=%dus: got %dus, want %dus",
+				test.observedUs, test.threshold, got, test.wantUs)
+		}
+	}
+	if got := verificationAccessDelayUsForModeAndThreshold(
+		250, cfg, TargetMatchModeSNRange, 500); got != 50_000 {
+		t.Fatalf("SN range should use normalized delay, got %d", got)
+	}
+	if got := verificationAccessDelayUsForModeAndThreshold(
+		250, cfg, TargetMatchModeStackOnly, 500); got != 1_000 {
+		t.Fatalf("stack-only should use its fixed delay, got %d", got)
+	}
+}
+
+func TestVerificationAccessDelayFixedMultipliers(t *testing.T) {
+	cfg := Config{
+		VerifyAccessDelayMinUs:                1_000,
+		VerifyAccessDelayMultiplier:           200,
+		VerifyAccessDelayMaxUs:                1_000_000,
+		VerifyStackAccessDelayMultiplier:      40,
+		VerifyStackAccessDelayUs:              1_000,
+		VerifyAccessDelayTargetUs:             100_000,
+		VerifyAccessDelayNormalizeToThreshold: true,
+	}
+	for _, test := range []struct {
+		observedUs int64
+		mode       string
+		wantUs     int64
+	}{
+		{100, TargetMatchModeStrictSN, 20_000},
+		{500, TargetMatchModeSNRange, 100_000},
+		{1_000, TargetMatchModeStrictSN, 200_000},
+		{5_000, TargetMatchModeStrictSN, 1_000_000},
+		{500, TargetMatchModeStackOnly, 20_000},
+		{5_000, TargetMatchModeStackOnly, 200_000},
+	} {
+		got := verificationAccessDelayUsForModeAndThreshold(test.observedUs, cfg, test.mode, 500)
+		if got != test.wantUs {
+			t.Errorf("observed=%dus mode=%s: got %dus, want %dus", test.observedUs, test.mode, got, test.wantUs)
+		}
+	}
+}
+
+func TestReportMatchesBothTargetVarNames(t *testing.T) {
+	reportFor := func(primary, secondary string) *report.Report {
+		body := "Kernel panic: ============ DATARACE ============\n" +
+			"VarName " + primary + ", BlockLineNumber 0, IrLineNumber 1, is write 1\n" +
+			"============OTHER_INFO============\n" +
+			"VarName " + secondary + ", BlockLineNumber 0, IrLineNumber 2, watchpoint index 1\n" +
+			"=================END==============\n"
+		return &report.Report{Report: []byte(body)}
+	}
+	want := map[string]struct{}{"11": {}, "22": {}}
+	if reportMatchesVarNames(reportFor("11", "33"), want) {
+		t.Fatal("one matching endpoint must not validate a target pair")
+	}
+	if !reportMatchesVarNames(reportFor("22", "11"), want) {
+		t.Fatal("both target endpoints should match in either report order")
+	}
+}
+
+func TestRequiredStableCountMajority(t *testing.T) {
+	tests := map[int]int{1: 1, 2: 2, 3: 2, 4: 3, 5: 3}
+	for repeat, want := range tests {
+		if got := requiredStableCount(repeat); got != want {
+			t.Errorf("repeat=%d: got stable count %d, want %d", repeat, got, want)
+		}
+	}
+}
+
+func TestStablePairMinOccurrencesOverride(t *testing.T) {
+	sm := NewStageManager(Config{
+		MaxConcurrent:            1,
+		RepeatCount:              2,
+		StablePairMinOccurrences: 1,
+	}, func(context.Context) (Executor, error) {
+		return nil, nil
+	})
+	if sm.stable != 1 {
+		t.Fatalf("got stable threshold %d, want explicit override 1", sm.stable)
+	}
+}
+
 func TestCollectStablePairsLimitsStackVariantsPerOrigin(t *testing.T) {
 	original := ddrd.MayUAFPair{
 		FreeAccessName: 0x10,
@@ -664,6 +877,133 @@ func TestStageManagerCorpusQueueChunksUseDistinctKeys(t *testing.T) {
 	}
 	if got := mgr.SeenCount(); got != 2 {
 		t.Fatalf("seen count = %d, want 2", got)
+	}
+}
+
+func TestVarNameSchedulerCapsCanonicalFamilyConcurrency(t *testing.T) {
+	mgr := NewStageManager(Config{
+		MaxConcurrent:           3,
+		EnableVarNameScheduling: true,
+		MaxConcurrentPerVarName: 1,
+	}, nil)
+	makeEntry := func(queueKey string, pair ddrd.MayUAFPair) *fuzzer.UAFCorpusEntry {
+		pairCopy := pair
+		return &fuzzer.UAFCorpusEntry{
+			Profile: fuzzer.UAFPairProfile{
+				FreeAccessName: pair.FreeAccessName,
+				UseAccessName:  pair.UseAccessName,
+				FreeCallStack:  pair.FreeCallStack,
+				UseCallStack:   pair.UseCallStack,
+			},
+			PairBasicInfo:    pair,
+			Pairs:            []*ddrd.MayUAFPair{&pairCopy},
+			ValidateQueueKey: queueKey,
+			ValidatePairKey:  queueKey,
+			CorpusRecordID:   queueKey,
+		}
+	}
+	pairA := ddrd.MayUAFPair{FreeAccessName: 0x10, UseAccessName: 0x20, FreeCallStack: 0x30, UseCallStack: 0x40}
+	pairB := ddrd.MayUAFPair{FreeAccessName: 0x20, UseAccessName: 0x10, FreeCallStack: 0x50, UseCallStack: 0x60}
+	pairOther := ddrd.MayUAFPair{FreeAccessName: 0x70, UseAccessName: 0x80, FreeCallStack: 0x90, UseCallStack: 0xa0}
+	for index, entry := range []*fuzzer.UAFCorpusEntry{
+		makeEntry("queue-a", pairA),
+		makeEntry("queue-b", pairB),
+		makeEntry("queue-other", pairOther),
+	} {
+		if !mgr.Enqueue(entry) {
+			t.Fatalf("entry %d did not enqueue", index)
+		}
+	}
+
+	mgr.mu.Lock()
+	first := mgr.pickNextVarNameTask()
+	second := mgr.pickNextVarNameTask()
+	blocked := mgr.pickNextVarNameTask()
+	mgr.mu.Unlock()
+	if first == nil || second == nil {
+		t.Fatalf("expected two families to run concurrently, got first=%v second=%v", first, second)
+	}
+	if blocked != nil {
+		t.Fatalf("same canonical family bypassed concurrency cap: %+v", blocked.scheduleFamilies)
+	}
+
+	canonical := "0000000000000010-0000000000000020"
+	var activeFamilyTask *validationTask
+	for _, task := range []*validationTask{first, second} {
+		for _, family := range task.scheduleFamilies {
+			if family == canonical {
+				activeFamilyTask = task
+			}
+		}
+	}
+	if activeFamilyTask == nil {
+		t.Fatal("expected one task from the capped family to be active")
+	}
+	mgr.complete(activeFamilyTask)
+
+	mgr.mu.Lock()
+	released := mgr.pickNextVarNameTask()
+	mgr.mu.Unlock()
+	if released == nil {
+		t.Fatal("waiting stack variant was not released after family slot completed")
+	}
+	foundCanonical := false
+	for _, family := range released.scheduleFamilies {
+		foundCanonical = foundCanonical || family == canonical
+	}
+	if !foundCanonical {
+		t.Fatalf("released task families=%v, want %s", released.scheduleFamilies, canonical)
+	}
+}
+
+func TestThresholdAwareSchedulerRestoresWideCandidatesWhenThresholdGrows(t *testing.T) {
+	thresholdUs := int64(100)
+	mgr := NewStageManager(Config{
+		MaxConcurrent:                          2,
+		EnableVarNameScheduling:                true,
+		MaxConcurrentPerVarName:                1,
+		EnableThresholdAwareValidationPriority: true,
+		CurrentThresholdUs: func() int64 {
+			return thresholdUs
+		},
+	}, nil)
+	makeEntry := func(queueKey string, pair ddrd.MayUAFPair, history int) *fuzzer.UAFCorpusEntry {
+		pairCopy := pair
+		entry := &fuzzer.UAFCorpusEntry{
+			PairBasicInfo: pair, Pairs: []*ddrd.MayUAFPair{&pairCopy},
+			ValidateQueueKey: queueKey, ValidatePairKey: queueKey, CorpusRecordID: queueKey,
+		}
+		for i := 0; i < history; i++ {
+			entry.ReplayHistory = append(entry.ReplayHistory, &fuzzer.BarrierExecutionRecord{})
+		}
+		return entry
+	}
+	wide := ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40, TimeDiff: 2_000_000,
+	}
+	closePair := ddrd.MayUAFPair{
+		FreeAccessName: 0x50, UseAccessName: 0x60,
+		FreeCallStack: 0x70, UseCallStack: 0x80, TimeDiff: 50_000,
+	}
+	if !mgr.Enqueue(makeEntry("wide", wide, 0)) || !mgr.Enqueue(makeEntry("close", closePair, 10)) {
+		t.Fatal("failed to enqueue threshold-priority tasks")
+	}
+
+	mgr.mu.Lock()
+	first := mgr.pickNextVarNameTask()
+	mgr.mu.Unlock()
+	if first == nil || first.entry == nil || first.entry.ValidateQueueKey != "close" {
+		t.Fatalf("first task=%v, want close candidate", first)
+	}
+	mgr.complete(first)
+
+	thresholdUs = 5_000
+	mgr.mu.Lock()
+	second := mgr.pickNextVarNameTask()
+	mgr.mu.Unlock()
+	if second == nil || second.entry == nil || second.entry.ValidateQueueKey != "wide" {
+		t.Fatalf("second task=%v, want restored wide candidate", second)
 	}
 }
 

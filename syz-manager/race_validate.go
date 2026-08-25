@@ -89,48 +89,65 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:             cfg.MaxConcurrent,
-		DelayRetryBudget:          cfg.DelayRetryBudget,
-		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
-		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
-		Debug:                     *flagDebug,
-		RepeatCount:               cfg.RepeatCount,
-		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
-		Workdir:                   mgr.cfg.Workdir,
-		TargetVarNamePair:         cfg.TargetVarNamePair,
-		TargetCorpusKey:           cfg.TargetCorpusKey,
-		DisableAsyncSplit:         cfg.DisableAsyncSplit,
-		DisableCollectionDelay:    cfg.DisableCollectionDelay,
-		DisableVerifyDelay:        cfg.DisableVerifyDelay,
-		DisableAccessDelay:        cfg.DisableAccessDelay,
-		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
-		TargetMatchMode:           cfg.TargetMatchMode,
-		SNFallbackRange:           cfg.SNFallbackRange,
-		TargetDelaySide:           cfg.TargetDelaySide,
-		TargetDelayMode:           cfg.TargetDelayMode,
-		WildcardTargetTID:         cfg.WildcardTargetTID,
-		VerifyDelaySweep:          cfg.VerifyDelaySweep,
-		VerifyDelaySteps:          cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:          cfg.VerifyDelayPower,
-		EnableReplay:              cfg.EnableReplay,
-		ReplayCollectPairs:        cfg.ReplayCollectPairs,
-		VerifyCollectPairs:        cfg.VerifyCollectPairs,
-		MaxReplayHistory:          cfg.MaxReplayHistory,
-		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
-		PriorityLowHistory:        cfg.PriorityLowHistory,
-		RequireOriginMatch:        cfg.RequireOriginMatch,
-		OriginMatchMode:           cfg.OriginMatchMode,
-		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
-		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
-		CollectionOnly:            cfg.CollectionOnly,
-		DisableBackoffSkip:        cfg.DisableBackoffSkip,
-		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
-		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
-		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
-		MinimizationStrategy:      cfg.MinimizationStrategy,
-		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
-		PairStatusSink:            mgr.uafPairIndex,
+		MaxConcurrent:                          cfg.MaxConcurrent,
+		MaxConcurrentPerVarName:                cfg.MaxConcurrentPerVarName,
+		CollectionThresholdFloorUs:             cfg.CollectionThresholdFloorUs,
+		EnableCollectionMissBackoff:            cfg.EnableCollectionMissBackoff,
+		CollectionMissFreeAttempts:             cfg.CollectionMissFreeAttempts,
+		CollectionMissWeight:                   cfg.CollectionMissWeight,
+		CollectionMissMaxDefer:                 cfg.CollectionMissMaxDefer,
+		DelayRetryBudget:                       cfg.DelayRetryBudget,
+		ExecutionTimeout:                       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:                        time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
+		Debug:                                  *flagDebug,
+		RepeatCount:                            cfg.RepeatCount,
+		StablePairMinOccurrences:               cfg.StablePairMinOccurrences,
+		VerifyRepeatTimes:                      cfg.VerifyRepeatTimes,
+		Workdir:                                mgr.cfg.Workdir,
+		TargetVarNamePair:                      cfg.TargetVarNamePair,
+		TargetCorpusKey:                        cfg.TargetCorpusKey,
+		DisableAsyncSplit:                      cfg.DisableAsyncSplit,
+		DisableCollectionDelay:                 cfg.DisableCollectionDelay,
+		DisableVerifyDelay:                     cfg.DisableVerifyDelay,
+		DisableAccessDelay:                     cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:                 cfg.VerifyAccessDelayMinUs,
+		VerifyAccessDelayMultiplier:            cfg.VerifyAccessDelayMultiplier,
+		VerifyAccessDelayNormalizeToThreshold:  cfg.VerifyAccessDelayNormalizeToThreshold,
+		VerifyAccessDelayTargetUs:              cfg.VerifyAccessDelayTargetUs,
+		VerifyAccessDelayMaxUs:                 cfg.VerifyAccessDelayMaxUs,
+		VerifyStackAccessDelayUs:               cfg.VerifyStackAccessDelayUs,
+		VerifyStackAccessDelayMultiplier:       cfg.VerifyStackAccessDelayMultiplier,
+		VerifyStackAccessDelayMinUs:            cfg.VerifyStackAccessDelayMinUs,
+		TargetMatchMode:                        cfg.TargetMatchMode,
+		SNFallbackRange:                        cfg.SNFallbackRange,
+		TargetDelaySide:                        cfg.TargetDelaySide,
+		TargetDelayMode:                        cfg.TargetDelayMode,
+		WildcardTargetTID:                      cfg.WildcardTargetTID,
+		VerifyDelaySweep:                       cfg.VerifyDelaySweep,
+		VerifyDelaySteps:                       cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:                       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:                       cfg.VerifyDelayPower,
+		EnableReplay:                           cfg.EnableReplay,
+		ReplayCollectPairs:                     cfg.ReplayCollectPairs,
+		VerifyCollectPairs:                     cfg.VerifyCollectPairs,
+		MaxReplayHistory:                       cfg.MaxReplayHistory,
+		EnableVarNameScheduling:                cfg.EnableVarNameScheduling,
+		PriorityLowHistory:                     cfg.PriorityLowHistory,
+		EnableThresholdAwareValidationPriority: cfg.EnableThresholdAwareValidationPriority,
+		CurrentThresholdUs:                     mgr.currentSharedThresholdUs,
+		RequireOriginMatch:                     cfg.RequireOriginMatch,
+		OriginMatchMode:                        cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:                cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:                 cfg.MaxStablePairsPerEntry,
+		CollectionOnly:                         cfg.CollectionOnly,
+		DisableBackoffSkip:                     cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:                   cfg.ContinueAfterBackoff,
+		EnableHistoryMinimization:              cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:                cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:                   cfg.MinimizationStrategy,
+		EntryResolver:                          &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:                         mgr.uafPairIndex,
+		TaskStarted:                            mgr.recordThresholdValidationTaskStarted,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -172,48 +189,65 @@ func (mgr *Manager) runUAFValidateMode(ctx context.Context) {
 
 func (mgr *Manager) newUAFValidatorConfig(cfg *mgrconfig.UAFValidateConfig) uafvalidate.Config {
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:             cfg.MaxConcurrent,
-		DelayRetryBudget:          cfg.DelayRetryBudget,
-		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
-		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
-		Debug:                     *flagDebug,
-		RepeatCount:               cfg.RepeatCount,
-		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
-		Workdir:                   mgr.cfg.Workdir,
-		TargetVarNamePair:         cfg.TargetVarNamePair,
-		TargetCorpusKey:           cfg.TargetCorpusKey,
-		DisableAsyncSplit:         cfg.DisableAsyncSplit,
-		DisableCollectionDelay:    cfg.DisableCollectionDelay,
-		DisableVerifyDelay:        cfg.DisableVerifyDelay,
-		DisableAccessDelay:        cfg.DisableAccessDelay,
-		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
-		TargetMatchMode:           cfg.TargetMatchMode,
-		SNFallbackRange:           cfg.SNFallbackRange,
-		TargetDelaySide:           cfg.TargetDelaySide,
-		TargetDelayMode:           cfg.TargetDelayMode,
-		WildcardTargetTID:         cfg.WildcardTargetTID,
-		VerifyDelaySweep:          cfg.VerifyDelaySweep,
-		VerifyDelaySteps:          cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:          cfg.VerifyDelayPower,
-		EnableReplay:              cfg.EnableReplay,
-		ReplayCollectPairs:        cfg.ReplayCollectPairs,
-		VerifyCollectPairs:        cfg.VerifyCollectPairs,
-		MaxReplayHistory:          cfg.MaxReplayHistory,
-		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
-		PriorityLowHistory:        cfg.PriorityLowHistory,
-		RequireOriginMatch:        cfg.RequireOriginMatch,
-		OriginMatchMode:           cfg.OriginMatchMode,
-		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
-		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
-		CollectionOnly:            cfg.CollectionOnly,
-		DisableBackoffSkip:        cfg.DisableBackoffSkip,
-		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
-		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
-		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
-		MinimizationStrategy:      cfg.MinimizationStrategy,
-		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
-		PairStatusSink:            mgr.uafPairIndex,
+		MaxConcurrent:                          cfg.MaxConcurrent,
+		MaxConcurrentPerVarName:                cfg.MaxConcurrentPerVarName,
+		CollectionThresholdFloorUs:             cfg.CollectionThresholdFloorUs,
+		EnableCollectionMissBackoff:            cfg.EnableCollectionMissBackoff,
+		CollectionMissFreeAttempts:             cfg.CollectionMissFreeAttempts,
+		CollectionMissWeight:                   cfg.CollectionMissWeight,
+		CollectionMissMaxDefer:                 cfg.CollectionMissMaxDefer,
+		DelayRetryBudget:                       cfg.DelayRetryBudget,
+		ExecutionTimeout:                       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:                        time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
+		Debug:                                  *flagDebug,
+		RepeatCount:                            cfg.RepeatCount,
+		StablePairMinOccurrences:               cfg.StablePairMinOccurrences,
+		VerifyRepeatTimes:                      cfg.VerifyRepeatTimes,
+		Workdir:                                mgr.cfg.Workdir,
+		TargetVarNamePair:                      cfg.TargetVarNamePair,
+		TargetCorpusKey:                        cfg.TargetCorpusKey,
+		DisableAsyncSplit:                      cfg.DisableAsyncSplit,
+		DisableCollectionDelay:                 cfg.DisableCollectionDelay,
+		DisableVerifyDelay:                     cfg.DisableVerifyDelay,
+		DisableAccessDelay:                     cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:                 cfg.VerifyAccessDelayMinUs,
+		VerifyAccessDelayMultiplier:            cfg.VerifyAccessDelayMultiplier,
+		VerifyAccessDelayNormalizeToThreshold:  cfg.VerifyAccessDelayNormalizeToThreshold,
+		VerifyAccessDelayTargetUs:              cfg.VerifyAccessDelayTargetUs,
+		VerifyAccessDelayMaxUs:                 cfg.VerifyAccessDelayMaxUs,
+		VerifyStackAccessDelayUs:               cfg.VerifyStackAccessDelayUs,
+		VerifyStackAccessDelayMultiplier:       cfg.VerifyStackAccessDelayMultiplier,
+		VerifyStackAccessDelayMinUs:            cfg.VerifyStackAccessDelayMinUs,
+		TargetMatchMode:                        cfg.TargetMatchMode,
+		SNFallbackRange:                        cfg.SNFallbackRange,
+		TargetDelaySide:                        cfg.TargetDelaySide,
+		TargetDelayMode:                        cfg.TargetDelayMode,
+		WildcardTargetTID:                      cfg.WildcardTargetTID,
+		VerifyDelaySweep:                       cfg.VerifyDelaySweep,
+		VerifyDelaySteps:                       cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:                       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:                       cfg.VerifyDelayPower,
+		EnableReplay:                           cfg.EnableReplay,
+		ReplayCollectPairs:                     cfg.ReplayCollectPairs,
+		VerifyCollectPairs:                     cfg.VerifyCollectPairs,
+		MaxReplayHistory:                       cfg.MaxReplayHistory,
+		EnableVarNameScheduling:                cfg.EnableVarNameScheduling,
+		PriorityLowHistory:                     cfg.PriorityLowHistory,
+		EnableThresholdAwareValidationPriority: cfg.EnableThresholdAwareValidationPriority,
+		CurrentThresholdUs:                     mgr.currentSharedThresholdUs,
+		RequireOriginMatch:                     cfg.RequireOriginMatch,
+		OriginMatchMode:                        cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:                cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:                 cfg.MaxStablePairsPerEntry,
+		CollectionOnly:                         cfg.CollectionOnly,
+		DisableBackoffSkip:                     cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:                   cfg.ContinueAfterBackoff,
+		EnableHistoryMinimization:              cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:                cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:                   cfg.MinimizationStrategy,
+		EntryResolver:                          &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:                         mgr.uafPairIndex,
+		TaskStarted:                            mgr.recordThresholdValidationTaskStarted,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -241,7 +275,6 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 	runCtx, cancel := context.WithCancel(ctx)
 	defer cancel()
 
-	var validatorProcessed int32
 	var validatorSuccess int32
 
 	resultsDone := make(chan struct{})
@@ -253,7 +286,6 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 				repeatTotal = 1
 			}
 			if res.RepeatIndex+1 >= repeatTotal {
-				atomic.AddInt32(&validatorProcessed, 1)
 				if validationResultSucceededForStats(res) {
 					atomic.AddInt32(&validatorSuccess, 1)
 				}
@@ -265,8 +297,11 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 						}
 					}
 					queueKeys := validationQueueKeys(res.Entry)
-					if err := mgr.uafValidateQueue.AckBatch(queueKeys); err != nil {
+					ackResult, err := mgr.uafValidateQueue.AckBatchWithStats(queueKeys)
+					if err != nil {
 						log.Errorf("uaf validation queue: failed to ack %d queue entries: %v", len(queueKeys), err)
+					} else {
+						mgr.recordThresholdQueueAck(ackResult)
 					}
 				}
 			}
@@ -320,24 +355,8 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 			return
 
 		case <-statsTicker.C:
-			processed := int(atomic.LoadInt32(&validatorProcessed))
 			success := int(atomic.LoadInt32(&validatorSuccess))
-			pending := stage.PendingCount()
-			idle := !stage.HasPending()
-			var rate float64
-			if processed > 0 {
-				rate = float64(processed) / time.Since(statsStartTime).Minutes()
-			}
-			_ = ddrd.WriteValidatorStats(mgr.uafSharedWorkdir, ddrd.ValidatorStats{
-				PendingCount:       pending,
-				ProcessedCount:     processed,
-				SuccessCount:       success,
-				ProcessingRatePerM: rate,
-				LastUpdate:         time.Now(),
-				Idle:               idle,
-			})
-			log.Logf(1, "uaf validation queue: status pending=%d processed=%d success=%d rate_per_min=%.2f idle=%t",
-				pending, processed, success, rate, idle)
+			mgr.writeThresholdValidatorQueueStats(statsStartTime, success)
 
 		case <-pollTicker.C:
 			newLastSeq, newAccepted, newAcked, err := mgr.loadValidationQueueEntries(stage, lastSeq)
@@ -353,6 +372,58 @@ func (mgr *Manager) runUAFValidateQueueMode(ctx context.Context) {
 			}
 		}
 	}
+}
+
+func (mgr *Manager) writeThresholdValidatorQueueStats(start time.Time, success int) {
+	if mgr == nil || mgr.uafValidateQueue == nil {
+		return
+	}
+	if err := mgr.uafValidateQueue.Reload(); err != nil {
+		log.Errorf("threshold validator stats: failed to reload queue: %v", err)
+		return
+	}
+	counterUnit := mgr.thresholdCounterUnit()
+	pending := mgr.uafValidateQueue.Count()
+	processed := int(mgr.thresholdConsumedPairs.Load())
+	if counterUnit == ddrd.ThresholdCounterUnitQueueFamily {
+		familyCount, err := mgr.uafValidateQueue.FamilyCount()
+		if err != nil {
+			log.Errorf("threshold validator stats: failed to count pending VarName families: %v", err)
+			return
+		}
+		pending = familyCount
+		processed = int(mgr.thresholdConsumedFamilies.Load())
+	} else if mgr.uafPairIndex != nil {
+		if err := mgr.uafPairIndex.Reload(); err != nil {
+			log.Errorf("threshold validator stats: failed to reload pair index: %v", err)
+			return
+		}
+		pairStats, err := mgr.uafPairIndex.Stats()
+		if err != nil {
+			log.Errorf("threshold validator stats: failed to read pair index: %v", err)
+			return
+		}
+		pending = pairStats.Queued
+	}
+	rate := 0.0
+	if elapsed := time.Since(start).Minutes(); processed > 0 && elapsed > 0 {
+		rate = float64(processed) / elapsed
+	}
+	stats := ddrd.ValidatorStats{
+		CounterUnit:        counterUnit,
+		PendingCount:       pending,
+		ProcessedCount:     processed,
+		SuccessCount:       success,
+		ProcessingRatePerM: rate,
+		LastUpdate:         time.Now(),
+		Idle:               pending == 0,
+	}
+	if err := ddrd.WriteValidatorStats(mgr.uafSharedWorkdir, stats); err != nil {
+		log.Errorf("threshold validator stats: failed to write state: %v", err)
+		return
+	}
+	log.Logf(1, "uaf validation queue: threshold status unit=%s pending=%d consumed=%d success=%d rate_per_min=%.2f idle=%t",
+		counterUnit, pending, processed, success, rate, stats.Idle)
 }
 
 func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, sinceSeq uint64) (uint64, int, int, error) {
@@ -374,10 +445,12 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 	}
 	rawGroups := len(groups)
 	maxPairsPerTask := 0
+	maxTasksPerCorpus := 0
 	if cfg := mgr.cfg.Experimental.UAFValidate; cfg != nil {
 		maxPairsPerTask = cfg.MaxPairsPerTask
+		maxTasksPerCorpus = cfg.MaxTasksPerCorpus
 	}
-	groups = manager.SplitQueuedUAFCorpusGroups(groups, maxPairsPerTask)
+	groups = manager.SplitQueuedUAFCorpusGroups(groups, maxPairsPerTask, maxTasksPerCorpus)
 
 	accepted := 0
 	acked := 0
@@ -387,7 +460,6 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 	groupedPairs := 0
 	reader := manager.NewStreamingUAFCorpusReader(filepath.Join(mgr.uafSharedWorkdir, "uaf-corpus.db"), mgr.target)
 	corpusCache := make(map[string]*fuzzer.UAFCorpusEntry, rawGroups)
-	var processingPairKeys []string
 	var processedPairKeys []string
 	var ackQueueKeys []string
 	for _, group := range groups {
@@ -401,18 +473,17 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 		}
 		entry, materializeErr := mgr.materializeValidationGroup(group, reader, corpusCache)
 		if materializeErr != nil {
-			mgr.flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys)
+			acked += mgr.flushValidationQueueBatchUpdates(processedPairKeys, ackQueueKeys)
 			return sinceSeq, accepted, acked, materializeErr
 		}
 		if entry == nil {
 			malformed++
+			processedPairKeys = append(processedPairKeys, group.PairKeys...)
 			queueKeys := dedupeStrings(group.QueueKeys)
 			ackQueueKeys = append(ackQueueKeys, queueKeys...)
-			acked += len(queueKeys)
 			continue
 		}
 		if stage.Enqueue(entry) {
-			processingPairKeys = append(processingPairKeys, group.PairKeys...)
 			accepted++
 			continue
 		}
@@ -420,34 +491,108 @@ func (mgr *Manager) loadValidationQueueEntries(stage *uafvalidate.StageManager, 
 		processedPairKeys = append(processedPairKeys, group.PairKeys...)
 		queueKeys := dedupeStrings(group.QueueKeys)
 		ackQueueKeys = append(ackQueueKeys, queueKeys...)
-		acked += len(queueKeys)
 	}
-	mgr.flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys)
+	acked += mgr.flushValidationQueueBatchUpdates(processedPairKeys, ackQueueKeys)
 	if len(groups) != 0 {
-		log.Logf(0, "uaf validation queue: loaded groups=%d raw_groups=%d max_pairs_per_task=%d grouped_pairs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
-			len(groups), rawGroups, maxPairsPerTask, groupedPairs, accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
+		log.Logf(0, "uaf validation queue: loaded groups=%d raw_groups=%d max_pairs_per_task=%d max_tasks_per_corpus=%d grouped_pairs=%d accepted=%d skipped=%d malformed=%d acked=%d max_history=%d since_seq=%d max_seq=%d",
+			len(groups), rawGroups, maxPairsPerTask, maxTasksPerCorpus, groupedPairs, accepted, skipped, malformed, acked, maxHistory, sinceSeq, maxSeq)
 	}
 
 	return maxSeq, accepted, acked, nil
 }
 
-func (mgr *Manager) flushValidationQueueBatchUpdates(processingPairKeys, processedPairKeys, ackQueueKeys []string) {
+func (mgr *Manager) flushValidationQueueBatchUpdates(processedPairKeys, ackQueueKeys []string) int {
 	if mgr == nil {
-		return
+		return 0
 	}
 	if mgr.uafPairIndex != nil {
-		if err := mgr.uafPairIndex.MarkProcessingBatch(processingPairKeys); err != nil {
-			log.Errorf("uaf validation queue: failed to mark %d pairs processing: %v", len(processingPairKeys), err)
-		}
 		if err := mgr.uafPairIndex.MarkProcessedBatch(processedPairKeys); err != nil {
 			log.Errorf("uaf validation queue: failed to mark %d skipped pairs processed: %v", len(processedPairKeys), err)
 		}
 	}
 	if mgr.uafValidateQueue != nil {
-		if err := mgr.uafValidateQueue.AckBatch(ackQueueKeys); err != nil {
-			log.Errorf("uaf validation queue: failed to ack %d queue entries: %v", len(ackQueueKeys), err)
+		uniqueQueueKeys := dedupeStrings(ackQueueKeys)
+		mgr.recordThresholdQueueKeysStarted(uniqueQueueKeys)
+		ackResult, err := mgr.uafValidateQueue.AckBatchWithStats(uniqueQueueKeys)
+		if err != nil {
+			log.Errorf("uaf validation queue: failed to ack %d queue entries: %v", len(uniqueQueueKeys), err)
+			return 0
+		}
+		mgr.recordThresholdQueueAck(ackResult)
+		return ackResult.Entries
+	}
+	return 0
+}
+
+func (mgr *Manager) thresholdCounterUnit() string {
+	if mgr != nil && mgr.cfg != nil &&
+		mgr.cfg.Experimental.DynamicThresholdCounterUnit == ddrd.ThresholdCounterUnitQueueFamily {
+		return ddrd.ThresholdCounterUnitQueueFamily
+	}
+	return ddrd.ThresholdCounterUnitQueuePair
+}
+
+func (mgr *Manager) currentSharedThresholdUs() int64 {
+	if mgr == nil || mgr.uafSharedWorkdir == "" {
+		return 0
+	}
+	state, err := ddrd.ReadThresholdState(mgr.uafSharedWorkdir)
+	if err != nil || state == nil {
+		return 0
+	}
+	return state.Fuzzer.CurrentThresholdUs
+}
+
+func (mgr *Manager) recordThresholdQueueAck(result manager.UAFValidateQueueAckResult) {
+	if mgr == nil {
+		return
+	}
+	if result.CompletedFamilies != 0 {
+		mgr.thresholdConsumedFamilies.Add(int64(result.CompletedFamilies))
+	}
+}
+
+func (mgr *Manager) recordThresholdValidationTaskStarted(entry *fuzzer.UAFCorpusEntry) {
+	if mgr == nil || entry == nil {
+		return
+	}
+	queueKeys := validationQueueKeys(entry)
+	if mgr.recordThresholdQueueKeysStarted(queueKeys) == 0 {
+		return
+	}
+	if mgr.uafPairIndex != nil {
+		pairKeys := validationPairKeys(entry)
+		if err := mgr.uafPairIndex.MarkProcessingBatch(pairKeys); err != nil {
+			log.Errorf("uaf validation queue: failed to mark %d started pairs processing: %v", len(pairKeys), err)
 		}
 	}
+}
+
+func (mgr *Manager) recordThresholdQueueKeysStarted(queueKeys []string) int {
+	if mgr == nil {
+		return 0
+	}
+	unique := dedupeStrings(queueKeys)
+	if len(unique) == 0 {
+		return 0
+	}
+	mgr.thresholdStartedMu.Lock()
+	if mgr.thresholdStartedQueueKeys == nil {
+		mgr.thresholdStartedQueueKeys = make(map[string]struct{})
+	}
+	started := 0
+	for _, key := range unique {
+		if _, exists := mgr.thresholdStartedQueueKeys[key]; exists {
+			continue
+		}
+		mgr.thresholdStartedQueueKeys[key] = struct{}{}
+		started++
+	}
+	mgr.thresholdStartedMu.Unlock()
+	if started != 0 {
+		mgr.thresholdConsumedPairs.Add(int64(started))
+	}
+	return started
 }
 
 func (mgr *Manager) materializeValidationGroup(group *manager.QueuedUAFCorpusGroup,
@@ -477,6 +622,12 @@ func (mgr *Manager) materializeValidationGroup(group *manager.QueuedUAFCorpusGro
 		return nil, nil
 	}
 	filterValidationGroupPairs(entry, group)
+	if entry.AdmissionThresholdUs <= 0 {
+		entry.AdmissionThresholdUs = group.AdmissionThresholdUs
+	} else if group.AdmissionThresholdUs > 0 && entry.AdmissionThresholdUs != group.AdmissionThresholdUs {
+		log.Logf(0, "uaf validation queue: admission threshold mismatch corpus=%s stored=%dus queued=%dus; using stored value",
+			group.CorpusRecordID, entry.AdmissionThresholdUs, group.AdmissionThresholdUs)
+	}
 	entry.ValidateQueueKey = firstString(group.QueueKeys)
 	entry.ValidateQueueSeq = group.FirstSeq
 	entry.ValidatePairKey = firstString(group.PairKeys)
@@ -1169,48 +1320,65 @@ func (mgr *Manager) runUAFValidateContinuousMode(ctx context.Context) {
 	}
 
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:             cfg.MaxConcurrent,
-		DelayRetryBudget:          cfg.DelayRetryBudget,
-		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
-		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
-		Debug:                     *flagDebug,
-		RepeatCount:               cfg.RepeatCount,
-		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
-		Workdir:                   mgr.cfg.Workdir,
-		TargetVarNamePair:         cfg.TargetVarNamePair,
-		TargetCorpusKey:           cfg.TargetCorpusKey,
-		DisableAsyncSplit:         cfg.DisableAsyncSplit,
-		DisableCollectionDelay:    cfg.DisableCollectionDelay,
-		DisableVerifyDelay:        cfg.DisableVerifyDelay,
-		DisableAccessDelay:        cfg.DisableAccessDelay,
-		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
-		TargetMatchMode:           cfg.TargetMatchMode,
-		SNFallbackRange:           cfg.SNFallbackRange,
-		TargetDelaySide:           cfg.TargetDelaySide,
-		TargetDelayMode:           cfg.TargetDelayMode,
-		WildcardTargetTID:         cfg.WildcardTargetTID,
-		VerifyDelaySweep:          cfg.VerifyDelaySweep,
-		VerifyDelaySteps:          cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:          cfg.VerifyDelayPower,
-		EnableReplay:              cfg.EnableReplay,
-		ReplayCollectPairs:        cfg.ReplayCollectPairs,
-		VerifyCollectPairs:        cfg.VerifyCollectPairs,
-		MaxReplayHistory:          cfg.MaxReplayHistory,
-		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
-		PriorityLowHistory:        cfg.PriorityLowHistory,
-		RequireOriginMatch:        cfg.RequireOriginMatch,
-		OriginMatchMode:           cfg.OriginMatchMode,
-		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
-		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
-		CollectionOnly:            cfg.CollectionOnly,
-		DisableBackoffSkip:        cfg.DisableBackoffSkip,
-		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
-		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
-		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
-		MinimizationStrategy:      cfg.MinimizationStrategy,
-		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
-		PairStatusSink:            mgr.uafPairIndex,
+		MaxConcurrent:                          cfg.MaxConcurrent,
+		MaxConcurrentPerVarName:                cfg.MaxConcurrentPerVarName,
+		CollectionThresholdFloorUs:             cfg.CollectionThresholdFloorUs,
+		EnableCollectionMissBackoff:            cfg.EnableCollectionMissBackoff,
+		CollectionMissFreeAttempts:             cfg.CollectionMissFreeAttempts,
+		CollectionMissWeight:                   cfg.CollectionMissWeight,
+		CollectionMissMaxDefer:                 cfg.CollectionMissMaxDefer,
+		DelayRetryBudget:                       cfg.DelayRetryBudget,
+		ExecutionTimeout:                       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:                        time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
+		Debug:                                  *flagDebug,
+		RepeatCount:                            cfg.RepeatCount,
+		StablePairMinOccurrences:               cfg.StablePairMinOccurrences,
+		VerifyRepeatTimes:                      cfg.VerifyRepeatTimes,
+		Workdir:                                mgr.cfg.Workdir,
+		TargetVarNamePair:                      cfg.TargetVarNamePair,
+		TargetCorpusKey:                        cfg.TargetCorpusKey,
+		DisableAsyncSplit:                      cfg.DisableAsyncSplit,
+		DisableCollectionDelay:                 cfg.DisableCollectionDelay,
+		DisableVerifyDelay:                     cfg.DisableVerifyDelay,
+		DisableAccessDelay:                     cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:                 cfg.VerifyAccessDelayMinUs,
+		VerifyAccessDelayMultiplier:            cfg.VerifyAccessDelayMultiplier,
+		VerifyAccessDelayNormalizeToThreshold:  cfg.VerifyAccessDelayNormalizeToThreshold,
+		VerifyAccessDelayTargetUs:              cfg.VerifyAccessDelayTargetUs,
+		VerifyAccessDelayMaxUs:                 cfg.VerifyAccessDelayMaxUs,
+		VerifyStackAccessDelayUs:               cfg.VerifyStackAccessDelayUs,
+		VerifyStackAccessDelayMultiplier:       cfg.VerifyStackAccessDelayMultiplier,
+		VerifyStackAccessDelayMinUs:            cfg.VerifyStackAccessDelayMinUs,
+		TargetMatchMode:                        cfg.TargetMatchMode,
+		SNFallbackRange:                        cfg.SNFallbackRange,
+		TargetDelaySide:                        cfg.TargetDelaySide,
+		TargetDelayMode:                        cfg.TargetDelayMode,
+		WildcardTargetTID:                      cfg.WildcardTargetTID,
+		VerifyDelaySweep:                       cfg.VerifyDelaySweep,
+		VerifyDelaySteps:                       cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:                       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:                       cfg.VerifyDelayPower,
+		EnableReplay:                           cfg.EnableReplay,
+		ReplayCollectPairs:                     cfg.ReplayCollectPairs,
+		VerifyCollectPairs:                     cfg.VerifyCollectPairs,
+		MaxReplayHistory:                       cfg.MaxReplayHistory,
+		EnableVarNameScheduling:                cfg.EnableVarNameScheduling,
+		PriorityLowHistory:                     cfg.PriorityLowHistory,
+		EnableThresholdAwareValidationPriority: cfg.EnableThresholdAwareValidationPriority,
+		CurrentThresholdUs:                     mgr.currentSharedThresholdUs,
+		RequireOriginMatch:                     cfg.RequireOriginMatch,
+		OriginMatchMode:                        cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:                cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:                 cfg.MaxStablePairsPerEntry,
+		CollectionOnly:                         cfg.CollectionOnly,
+		DisableBackoffSkip:                     cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:                   cfg.ContinueAfterBackoff,
+		EnableHistoryMinimization:              cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:                cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:                   cfg.MinimizationStrategy,
+		EntryResolver:                          &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:                         mgr.uafPairIndex,
+		TaskStarted:                            mgr.recordThresholdValidationTaskStarted,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()
@@ -1439,48 +1607,65 @@ func (mgr *Manager) runUAFValidateModeStreaming(ctx context.Context) {
 
 	// Setup validator
 	validatorCfg := uafvalidate.Config{
-		MaxConcurrent:             cfg.MaxConcurrent,
-		DelayRetryBudget:          cfg.DelayRetryBudget,
-		ExecutionTimeout:          time.Duration(cfg.TimeoutSeconds) * time.Second,
-		MaxBatchTimeout:           time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
-		Debug:                     *flagDebug,
-		RepeatCount:               cfg.RepeatCount,
-		VerifyRepeatTimes:         cfg.VerifyRepeatTimes,
-		Workdir:                   mgr.cfg.Workdir,
-		TargetVarNamePair:         cfg.TargetVarNamePair,
-		TargetCorpusKey:           cfg.TargetCorpusKey,
-		DisableAsyncSplit:         cfg.DisableAsyncSplit,
-		DisableCollectionDelay:    cfg.DisableCollectionDelay,
-		DisableVerifyDelay:        cfg.DisableVerifyDelay,
-		DisableAccessDelay:        cfg.DisableAccessDelay,
-		VerifyAccessDelayMinUs:    cfg.VerifyAccessDelayMinUs,
-		TargetMatchMode:           cfg.TargetMatchMode,
-		SNFallbackRange:           cfg.SNFallbackRange,
-		TargetDelaySide:           cfg.TargetDelaySide,
-		TargetDelayMode:           cfg.TargetDelayMode,
-		WildcardTargetTID:         cfg.WildcardTargetTID,
-		VerifyDelaySweep:          cfg.VerifyDelaySweep,
-		VerifyDelaySteps:          cfg.VerifyDelaySteps,
-		VerifyDelayMaxUs:          cfg.VerifyDelayMaxUs,
-		VerifyDelayPower:          cfg.VerifyDelayPower,
-		EnableReplay:              cfg.EnableReplay,
-		ReplayCollectPairs:        cfg.ReplayCollectPairs,
-		VerifyCollectPairs:        cfg.VerifyCollectPairs,
-		MaxReplayHistory:          cfg.MaxReplayHistory,
-		EnableVarNameScheduling:   cfg.EnableVarNameScheduling,
-		PriorityLowHistory:        cfg.PriorityLowHistory,
-		RequireOriginMatch:        cfg.RequireOriginMatch,
-		OriginMatchMode:           cfg.OriginMatchMode,
-		MaxStablePairsPerOrigin:   cfg.MaxStablePairsPerOrigin,
-		MaxStablePairsPerEntry:    cfg.MaxStablePairsPerEntry,
-		CollectionOnly:            cfg.CollectionOnly,
-		DisableBackoffSkip:        cfg.DisableBackoffSkip,
-		ContinueAfterBackoff:      cfg.ContinueAfterBackoff,
-		EnableHistoryMinimization: cfg.EnableHistoryMinimization,
-		MinimizationMaxAttempts:   cfg.MinimizationMaxAttempts,
-		MinimizationStrategy:      cfg.MinimizationStrategy,
-		EntryResolver:             &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
-		PairStatusSink:            mgr.uafPairIndex,
+		MaxConcurrent:                          cfg.MaxConcurrent,
+		MaxConcurrentPerVarName:                cfg.MaxConcurrentPerVarName,
+		CollectionThresholdFloorUs:             cfg.CollectionThresholdFloorUs,
+		EnableCollectionMissBackoff:            cfg.EnableCollectionMissBackoff,
+		CollectionMissFreeAttempts:             cfg.CollectionMissFreeAttempts,
+		CollectionMissWeight:                   cfg.CollectionMissWeight,
+		CollectionMissMaxDefer:                 cfg.CollectionMissMaxDefer,
+		DelayRetryBudget:                       cfg.DelayRetryBudget,
+		ExecutionTimeout:                       time.Duration(cfg.TimeoutSeconds) * time.Second,
+		MaxBatchTimeout:                        time.Duration(cfg.MaxBatchTimeoutSeconds) * time.Second,
+		Debug:                                  *flagDebug,
+		RepeatCount:                            cfg.RepeatCount,
+		StablePairMinOccurrences:               cfg.StablePairMinOccurrences,
+		VerifyRepeatTimes:                      cfg.VerifyRepeatTimes,
+		Workdir:                                mgr.cfg.Workdir,
+		TargetVarNamePair:                      cfg.TargetVarNamePair,
+		TargetCorpusKey:                        cfg.TargetCorpusKey,
+		DisableAsyncSplit:                      cfg.DisableAsyncSplit,
+		DisableCollectionDelay:                 cfg.DisableCollectionDelay,
+		DisableVerifyDelay:                     cfg.DisableVerifyDelay,
+		DisableAccessDelay:                     cfg.DisableAccessDelay,
+		VerifyAccessDelayMinUs:                 cfg.VerifyAccessDelayMinUs,
+		VerifyAccessDelayMultiplier:            cfg.VerifyAccessDelayMultiplier,
+		VerifyAccessDelayNormalizeToThreshold:  cfg.VerifyAccessDelayNormalizeToThreshold,
+		VerifyAccessDelayTargetUs:              cfg.VerifyAccessDelayTargetUs,
+		VerifyAccessDelayMaxUs:                 cfg.VerifyAccessDelayMaxUs,
+		VerifyStackAccessDelayUs:               cfg.VerifyStackAccessDelayUs,
+		VerifyStackAccessDelayMultiplier:       cfg.VerifyStackAccessDelayMultiplier,
+		VerifyStackAccessDelayMinUs:            cfg.VerifyStackAccessDelayMinUs,
+		TargetMatchMode:                        cfg.TargetMatchMode,
+		SNFallbackRange:                        cfg.SNFallbackRange,
+		TargetDelaySide:                        cfg.TargetDelaySide,
+		TargetDelayMode:                        cfg.TargetDelayMode,
+		WildcardTargetTID:                      cfg.WildcardTargetTID,
+		VerifyDelaySweep:                       cfg.VerifyDelaySweep,
+		VerifyDelaySteps:                       cfg.VerifyDelaySteps,
+		VerifyDelayMaxUs:                       cfg.VerifyDelayMaxUs,
+		VerifyDelayPower:                       cfg.VerifyDelayPower,
+		EnableReplay:                           cfg.EnableReplay,
+		ReplayCollectPairs:                     cfg.ReplayCollectPairs,
+		VerifyCollectPairs:                     cfg.VerifyCollectPairs,
+		MaxReplayHistory:                       cfg.MaxReplayHistory,
+		EnableVarNameScheduling:                cfg.EnableVarNameScheduling,
+		PriorityLowHistory:                     cfg.PriorityLowHistory,
+		EnableThresholdAwareValidationPriority: cfg.EnableThresholdAwareValidationPriority,
+		CurrentThresholdUs:                     mgr.currentSharedThresholdUs,
+		RequireOriginMatch:                     cfg.RequireOriginMatch,
+		OriginMatchMode:                        cfg.OriginMatchMode,
+		MaxStablePairsPerOrigin:                cfg.MaxStablePairsPerOrigin,
+		MaxStablePairsPerEntry:                 cfg.MaxStablePairsPerEntry,
+		CollectionOnly:                         cfg.CollectionOnly,
+		DisableBackoffSkip:                     cfg.DisableBackoffSkip,
+		ContinueAfterBackoff:                   cfg.ContinueAfterBackoff,
+		EnableHistoryMinimization:              cfg.EnableHistoryMinimization,
+		MinimizationMaxAttempts:                cfg.MinimizationMaxAttempts,
+		MinimizationStrategy:                   cfg.MinimizationStrategy,
+		EntryResolver:                          &validationEntryResolver{workdir: mgr.uafSharedWorkdir, target: mgr.target},
+		PairStatusSink:                         mgr.uafPairIndex,
+		TaskStarted:                            mgr.recordThresholdValidationTaskStarted,
 	}
 	if validatorCfg.MaxConcurrent > mgr.vmPool.Count() {
 		validatorCfg.MaxConcurrent = mgr.vmPool.Count()

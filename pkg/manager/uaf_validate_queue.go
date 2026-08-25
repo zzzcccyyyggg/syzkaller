@@ -16,25 +16,28 @@ import (
 
 // QueuedUAFCorpusEntry is a queued validation item together with queue metadata.
 type QueuedUAFCorpusEntry struct {
-	Key            string
-	Seq            uint64
-	PairKey        string
-	CorpusRecordID string
-	Pair           ddrd.MayUAFPair
-	HistoryCount   int
+	Key                  string
+	Seq                  uint64
+	PairKey              string
+	VarNameFamilyKey     string
+	CorpusRecordID       string
+	Pair                 ddrd.MayUAFPair
+	HistoryCount         int
+	AdmissionThresholdUs int64
 }
 
 // QueuedUAFCorpusGroup groups queue items that share the same heavy corpus record.
 // Pair-level status remains in race-pair-index.db, but validate can materialize the
 // shared corpus record once and test all queued pairs from that state together.
 type QueuedUAFCorpusGroup struct {
-	CorpusRecordID string
-	QueueKeys      []string
-	PairKeys       []string
-	Pairs          []ddrd.MayUAFPair
-	HistoryCount   int
-	FirstSeq       uint64
-	Items          []*QueuedUAFCorpusEntry
+	CorpusRecordID       string
+	QueueKeys            []string
+	PairKeys             []string
+	Pairs                []ddrd.MayUAFPair
+	HistoryCount         int
+	AdmissionThresholdUs int64
+	FirstSeq             uint64
+	Items                []*QueuedUAFCorpusEntry
 }
 
 // UAFValidateQueueStore is a small append-only queue used to hand validation
@@ -52,6 +55,7 @@ type UAFValidateQueueStore struct {
 
 type UAFValidateQueueStats struct {
 	Pending          int
+	PendingFamilies  int
 	WithPairKey      int
 	WithCorpusRecord int
 	WithHistory      int
@@ -61,17 +65,26 @@ type UAFValidateQueueStats struct {
 }
 
 type UAFValidateQueueEnqueueResult struct {
-	Key      string
-	Seq      uint64
-	PairKey  string
-	Enqueued bool
+	Key             string
+	Seq             uint64
+	PairKey         string
+	Enqueued        bool
+	RecordActivated bool
+	FamilyActivated bool
+}
+
+type UAFValidateQueueAckResult struct {
+	Entries           int
+	CompletedFamilies int
 }
 
 type storedValidateQueueItem struct {
-	PairKey        string    `json:"pair_key"`
-	CorpusRecordID string    `json:"corpus_record_id"`
-	EnqueuedAt     time.Time `json:"enqueued_at"`
-	HistoryCount   int       `json:"history_count,omitempty"`
+	PairKey              string    `json:"pair_key"`
+	VarNameFamilyKey     string    `json:"varname_family_key,omitempty"`
+	CorpusRecordID       string    `json:"corpus_record_id"`
+	EnqueuedAt           time.Time `json:"enqueued_at"`
+	HistoryCount         int       `json:"history_count,omitempty"`
+	AdmissionThresholdUs int64     `json:"admission_threshold_us,omitempty"`
 }
 
 func NewUAFValidateQueueStore(workdir string, target *prog.Target) (*UAFValidateQueueStore, error) {
@@ -144,6 +157,7 @@ func (store *UAFValidateQueueStore) Stats() (UAFValidateQueueStats, error) {
 	defer store.mu.Unlock()
 
 	stats.Pending = len(store.db.Records)
+	families := make(map[string]struct{})
 	for _, rec := range store.db.Records {
 		if rec.Seq > stats.MaxSeq {
 			stats.MaxSeq = rec.Seq
@@ -160,6 +174,9 @@ func (store *UAFValidateQueueStore) Stats() (UAFValidateQueueStats, error) {
 		if item.PairKey != "" {
 			stats.WithPairKey++
 		}
+		if familyKey := store.storedItemFamilyKey(&item); familyKey != "" {
+			families[familyKey] = struct{}{}
+		}
 		if item.CorpusRecordID != "" {
 			stats.WithCorpusRecord++
 		}
@@ -170,7 +187,18 @@ func (store *UAFValidateQueueStore) Stats() (UAFValidateQueueStats, error) {
 			stats.LatestEnqueuedAt = item.EnqueuedAt
 		}
 	}
+	stats.PendingFamilies = len(families)
 	return stats, nil
+}
+
+func (store *UAFValidateQueueStore) FamilyCount() (int, error) {
+	if store == nil || store.db == nil {
+		return 0, nil
+	}
+	store.mu.Lock()
+	defer store.mu.Unlock()
+	counts, err := store.pendingFamilyCountsLocked()
+	return len(counts), err
 }
 
 func (store *UAFValidateQueueStore) Enqueue(entry *fuzzer.UAFCorpusEntry) (string, error) {
@@ -191,6 +219,7 @@ func (store *UAFValidateQueueStore) Enqueue(entry *fuzzer.UAFCorpusEntry) (strin
 		Pair:                    *pair,
 		PreferredCorpusRecordID: entry.CorpusRecordID,
 		PreferredHistoryRecords: len(entry.ReplayHistory),
+		AdmissionThresholdUs:    entry.AdmissionThresholdUs,
 	}
 	key, _, _, err := store.EnqueueRecord(record)
 	return key, err
@@ -211,8 +240,12 @@ func (store *UAFValidateQueueStore) EnqueueRecords(records []*RacePairRecord) ([
 	}
 	results := make([]UAFValidateQueueEnqueueResult, 0, len(records))
 	err := store.withWriteTxn(func() error {
+		familyCounts, err := store.pendingFamilyCountsLocked()
+		if err != nil {
+			return err
+		}
 		for _, record := range records {
-			result, err := store.enqueueRecordLocked(record)
+			result, err := store.enqueueRecordLocked(record, familyCounts)
 			if err != nil {
 				return err
 			}
@@ -228,7 +261,8 @@ func (store *UAFValidateQueueStore) EnqueueRecords(records []*RacePairRecord) ([
 	return results, nil
 }
 
-func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord) (UAFValidateQueueEnqueueResult, error) {
+func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord,
+	familyCounts map[string]int) (UAFValidateQueueEnqueueResult, error) {
 	var result UAFValidateQueueEnqueueResult
 	if store == nil || record == nil || record.PairKey == "" {
 		return result, nil
@@ -240,11 +274,14 @@ func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord) 
 	if corpusID == "" {
 		return result, nil
 	}
+	familyKey := ddrd.VarNamePairKey(&record.Pair)
 	item := storedValidateQueueItem{
-		PairKey:        record.PairKey,
-		CorpusRecordID: corpusID,
-		EnqueuedAt:     time.Now(),
-		HistoryCount:   record.PreferredHistoryRecords,
+		PairKey:              record.PairKey,
+		VarNameFamilyKey:     familyKey,
+		CorpusRecordID:       corpusID,
+		EnqueuedAt:           time.Now(),
+		HistoryCount:         record.PreferredHistoryRecords,
+		AdmissionThresholdUs: record.AdmissionThresholdUs,
 	}
 	data, err := json.Marshal(item)
 	if err != nil {
@@ -253,6 +290,8 @@ func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord) 
 
 	key := record.PairKey
 	seq := store.nextSeqLocked()
+	_, familyWasPending := familyCounts[familyKey]
+	_, recordAlreadyPending := store.db.Records[key]
 	if existingRec, exists := store.db.Records[key]; exists {
 		if len(existingRec.Val) != 0 {
 			var existing storedValidateQueueItem
@@ -269,11 +308,16 @@ func (store *UAFValidateQueueStore) enqueueRecordLocked(record *RacePairRecord) 
 		}
 	}
 	store.db.Save(key, data, seq)
+	if !recordAlreadyPending && familyKey != "" {
+		familyCounts[familyKey]++
+	}
 	return UAFValidateQueueEnqueueResult{
-		Key:      key,
-		Seq:      seq,
-		PairKey:  record.PairKey,
-		Enqueued: true,
+		Key:             key,
+		Seq:             seq,
+		PairKey:         record.PairKey,
+		Enqueued:        true,
+		RecordActivated: !recordAlreadyPending,
+		FamilyActivated: familyKey != "" && !familyWasPending,
 	}, nil
 }
 
@@ -329,11 +373,13 @@ func (store *UAFValidateQueueStore) EntriesSince(sinceSeq uint64) ([]*QueuedUAFC
 		}
 		if store.pairIndex == nil {
 			items = append(items, &QueuedUAFCorpusEntry{
-				Key:            rec.key,
-				Seq:            rec.seq,
-				PairKey:        queued.PairKey,
-				CorpusRecordID: queued.CorpusRecordID,
-				HistoryCount:   queued.HistoryCount,
+				Key:                  rec.key,
+				Seq:                  rec.seq,
+				PairKey:              queued.PairKey,
+				VarNameFamilyKey:     store.storedItemFamilyKey(&queued),
+				CorpusRecordID:       queued.CorpusRecordID,
+				HistoryCount:         queued.HistoryCount,
+				AdmissionThresholdUs: queued.AdmissionThresholdUs,
 			})
 			continue
 		}
@@ -343,10 +389,12 @@ func (store *UAFValidateQueueStore) EntriesSince(sinceSeq uint64) ([]*QueuedUAFC
 		}
 		if pairRecord == nil {
 			items = append(items, &QueuedUAFCorpusEntry{
-				Key:            rec.key,
-				Seq:            rec.seq,
-				PairKey:        queued.PairKey,
-				CorpusRecordID: queued.CorpusRecordID,
+				Key:                  rec.key,
+				Seq:                  rec.seq,
+				PairKey:              queued.PairKey,
+				VarNameFamilyKey:     store.storedItemFamilyKey(&queued),
+				CorpusRecordID:       queued.CorpusRecordID,
+				AdmissionThresholdUs: queued.AdmissionThresholdUs,
 			})
 			continue
 		}
@@ -358,13 +406,19 @@ func (store *UAFValidateQueueStore) EntriesSince(sinceSeq uint64) ([]*QueuedUAFC
 		if historyCount == 0 {
 			historyCount = pairRecord.PreferredHistoryRecords
 		}
+		admissionThresholdUs := queued.AdmissionThresholdUs
+		if admissionThresholdUs <= 0 {
+			admissionThresholdUs = pairRecord.AdmissionThresholdUs
+		}
 		items = append(items, &QueuedUAFCorpusEntry{
-			Key:            rec.key,
-			Seq:            rec.seq,
-			PairKey:        queued.PairKey,
-			CorpusRecordID: corpusID,
-			Pair:           pairRecord.Pair,
-			HistoryCount:   historyCount,
+			Key:                  rec.key,
+			Seq:                  rec.seq,
+			PairKey:              queued.PairKey,
+			VarNameFamilyKey:     ddrd.VarNamePairKey(&pairRecord.Pair),
+			CorpusRecordID:       corpusID,
+			Pair:                 pairRecord.Pair,
+			HistoryCount:         historyCount,
+			AdmissionThresholdUs: admissionThresholdUs,
 		})
 	}
 	return items, maxSeq, nil
@@ -424,17 +478,25 @@ func (store *UAFValidateQueueStore) EntriesSinceGroupedByCorpus(sinceSeq uint64)
 	return groups, maxSeq, nil
 }
 
-// SplitQueuedUAFCorpusGroups bounds how much pair work one materialized corpus
-// task can carry. It preserves the original queue order and keeps each queue key
-// in exactly one returned group so callers can ack completed chunks precisely.
-func SplitQueuedUAFCorpusGroups(groups []*QueuedUAFCorpusGroup, maxPairs int) []*QueuedUAFCorpusGroup {
-	if maxPairs <= 0 || len(groups) == 0 {
+// SplitQueuedUAFCorpusGroups bounds pair work and repeated collection for one
+// corpus record. It preserves queue order and keeps each queue key in exactly
+// one returned group so callers can ack completed chunks precisely.
+func SplitQueuedUAFCorpusGroups(groups []*QueuedUAFCorpusGroup, maxPairs, maxTasks int) []*QueuedUAFCorpusGroup {
+	if len(groups) == 0 || (maxPairs <= 0 && maxTasks <= 0) {
 		return groups
 	}
 
 	result := make([]*QueuedUAFCorpusGroup, 0, len(groups))
 	for _, group := range groups {
-		if group == nil || len(group.PairKeys) <= maxPairs {
+		pairCount := queuedGroupPairCount(group)
+		effectiveMaxPairs := maxPairs
+		if maxTasks > 0 && pairCount > 0 {
+			pairsForTaskCap := (pairCount + maxTasks - 1) / maxTasks
+			if effectiveMaxPairs <= 0 || pairsForTaskCap > effectiveMaxPairs {
+				effectiveMaxPairs = pairsForTaskCap
+			}
+		}
+		if group == nil || effectiveMaxPairs <= 0 || pairCount <= effectiveMaxPairs {
 			result = append(result, group)
 			continue
 		}
@@ -457,7 +519,7 @@ func SplitQueuedUAFCorpusGroups(groups []*QueuedUAFCorpusGroup, maxPairs int) []
 			if item.PairKey != "" {
 				itemPairs = 1
 			}
-			if chunk != nil && chunkPairs > 0 && itemPairs > 0 && chunkPairs+itemPairs > maxPairs {
+			if chunk != nil && chunkPairs > 0 && itemPairs > 0 && chunkPairs+itemPairs > effectiveMaxPairs {
 				flush()
 			}
 			if chunk == nil {
@@ -473,6 +535,19 @@ func SplitQueuedUAFCorpusGroups(groups []*QueuedUAFCorpusGroup, maxPairs int) []
 	return result
 }
 
+func queuedGroupPairCount(group *QueuedUAFCorpusGroup) int {
+	if group == nil {
+		return 0
+	}
+	count := 0
+	for _, item := range group.Items {
+		if item != nil && item.PairKey != "" {
+			count++
+		}
+	}
+	return count
+}
+
 func appendQueuedGroupItem(group *QueuedUAFCorpusGroup, item *QueuedUAFCorpusEntry) {
 	if group == nil || item == nil {
 		return
@@ -486,6 +561,9 @@ func appendQueuedGroupItem(group *QueuedUAFCorpusGroup, item *QueuedUAFCorpusEnt
 	if item.HistoryCount > group.HistoryCount {
 		group.HistoryCount = item.HistoryCount
 	}
+	if item.AdmissionThresholdUs > group.AdmissionThresholdUs {
+		group.AdmissionThresholdUs = item.AdmissionThresholdUs
+	}
 	if group.FirstSeq == 0 || item.Seq < group.FirstSeq {
 		group.FirstSeq = item.Seq
 	}
@@ -496,10 +574,21 @@ func (store *UAFValidateQueueStore) Ack(key string) error {
 }
 
 func (store *UAFValidateQueueStore) AckBatch(keys []string) error {
+	_, err := store.AckBatchWithStats(keys)
+	return err
+}
+
+func (store *UAFValidateQueueStore) AckBatchWithStats(keys []string) (UAFValidateQueueAckResult, error) {
+	var result UAFValidateQueueAckResult
 	if store == nil || len(keys) == 0 {
-		return nil
+		return result, nil
 	}
-	return store.withWriteTxn(func() error {
+	err := store.withWriteTxn(func() error {
+		familyCounts, err := store.pendingFamilyCountsLocked()
+		if err != nil {
+			return err
+		}
+		touchedFamilies := make(map[string]struct{})
 		seen := make(map[string]struct{}, len(keys))
 		for _, key := range keys {
 			if key == "" {
@@ -509,10 +598,63 @@ func (store *UAFValidateQueueStore) AckBatch(keys []string) error {
 				continue
 			}
 			seen[key] = struct{}{}
+			rec, ok := store.db.Records[key]
+			if !ok {
+				continue
+			}
+			var item storedValidateQueueItem
+			if len(rec.Val) != 0 && json.Unmarshal(rec.Val, &item) == nil {
+				if familyKey := store.storedItemFamilyKey(&item); familyKey != "" {
+					touchedFamilies[familyKey] = struct{}{}
+					familyCounts[familyKey]--
+				}
+			}
 			store.db.Delete(key)
+			result.Entries++
+		}
+		for familyKey := range touchedFamilies {
+			if familyCounts[familyKey] <= 0 {
+				result.CompletedFamilies++
+			}
 		}
 		return nil
 	})
+	return result, err
+}
+
+func (store *UAFValidateQueueStore) pendingFamilyCountsLocked() (map[string]int, error) {
+	counts := make(map[string]int)
+	if store == nil || store.db == nil {
+		return counts, nil
+	}
+	for _, rec := range store.db.Records {
+		if len(rec.Val) == 0 {
+			continue
+		}
+		var item storedValidateQueueItem
+		if err := json.Unmarshal(rec.Val, &item); err != nil {
+			return nil, err
+		}
+		if familyKey := store.storedItemFamilyKey(&item); familyKey != "" {
+			counts[familyKey]++
+		}
+	}
+	return counts, nil
+}
+
+func (store *UAFValidateQueueStore) storedItemFamilyKey(item *storedValidateQueueItem) string {
+	if item == nil {
+		return ""
+	}
+	if item.VarNameFamilyKey != "" {
+		return item.VarNameFamilyKey
+	}
+	// Legacy queue records predate family metadata. Treat each as its own
+	// fallback unit so old workdirs remain processable without lock inversion.
+	if item.PairKey != "" {
+		return "legacy-pair:" + item.PairKey
+	}
+	return ""
 }
 
 func (store *UAFValidateQueueStore) reloadLatest(exclusive bool) error {

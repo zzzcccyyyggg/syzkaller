@@ -2,6 +2,7 @@ package fuzzer
 
 import (
 	"math"
+	"math/rand"
 	"sync"
 	"sync/atomic"
 	"time"
@@ -11,8 +12,25 @@ import (
 	"github.com/google/syzkaller/pkg/stat"
 )
 
+const (
+	ThresholdPolicyBackpressure = "backpressure"
+	ThresholdPolicyRandom       = "random"
+	ThresholdPolicyFixed        = "fixed"
+)
+
 // ThresholdControllerConfig holds parameters for the dynamic threshold controller.
 type ThresholdControllerConfig struct {
+	// Policy selects the threshold adjustment policy. "backpressure" implements
+	// Algorithm 1, "random" samples independently, and "fixed" only reports stats.
+	Policy string
+
+	// CounterUnit identifies the shared producer/consumer accounting unit.
+	// Both sides must use the same unit for P, C, and Q.
+	CounterUnit string
+
+	// RandomSeed makes the random policy reproducible.
+	RandomSeed int64
+
 	// InitialThresholdUs is the starting threshold value (microseconds).
 	// Default: 1000 (1ms).
 	InitialThresholdUs int64
@@ -65,6 +83,9 @@ type ThresholdControllerConfig struct {
 // DefaultThresholdControllerConfig returns sensible defaults.
 func DefaultThresholdControllerConfig() ThresholdControllerConfig {
 	return ThresholdControllerConfig{
+		Policy:                 ThresholdPolicyBackpressure,
+		CounterUnit:            ddrd.ThresholdCounterUnitQueuePair,
+		RandomSeed:             1,
 		InitialThresholdUs:     1000,  // 1ms
 		MinThresholdUs:         50,    // 50μs
 		MaxThresholdUs:         50000, // 50ms
@@ -105,8 +126,9 @@ type ThresholdController struct {
 	producedEWMA      float64
 	consumedEWMA      float64
 
-	// MRP count provider (from ddrd.Store or uafCorpus)
+	// Cumulative schedule-worthy queue-record count provider.
 	mrpCountFunc func() int
+	random       *rand.Rand
 
 	// Stats
 	statThreshold     *stat.Val
@@ -116,13 +138,28 @@ type ThresholdController struct {
 
 // NewThresholdController creates and returns a new dynamic threshold controller.
 func NewThresholdController(config ThresholdControllerConfig, mrpCountFunc func() int) *ThresholdController {
+	if config.Policy == "" {
+		config.Policy = ThresholdPolicyBackpressure
+	}
+	if config.Policy != ThresholdPolicyBackpressure && config.Policy != ThresholdPolicyRandom &&
+		config.Policy != ThresholdPolicyFixed {
+		log.Logf(0, "[THRESHOLD] unknown policy %q; using %s", config.Policy, ThresholdPolicyBackpressure)
+		config.Policy = ThresholdPolicyBackpressure
+	}
+	if config.CounterUnit != ddrd.ThresholdCounterUnitQueueFamily {
+		config.CounterUnit = ddrd.ThresholdCounterUnitQueuePair
+	}
+	if config.RandomSeed == 0 {
+		config.RandomSeed = 1
+	}
 	if config.InitialThresholdUs <= 0 {
 		config.InitialThresholdUs = 1000
 	}
 	if config.MinThresholdUs <= 0 {
 		config.MinThresholdUs = 50
 	}
-	if config.MaxThresholdUs <= config.MinThresholdUs {
+	if config.MaxThresholdUs < config.MinThresholdUs ||
+		(config.MaxThresholdUs == config.MinThresholdUs && config.Policy != ThresholdPolicyFixed) {
 		config.MaxThresholdUs = 50000
 	}
 	if config.EvalWindowSeconds <= 0 {
@@ -152,6 +189,12 @@ func NewThresholdController(config ThresholdControllerConfig, mrpCountFunc func(
 	if config.StaleValidatorTimeout <= 0 {
 		config.StaleValidatorTimeout = 3 * time.Minute
 	}
+	if config.InitialThresholdUs < config.MinThresholdUs {
+		config.InitialThresholdUs = config.MinThresholdUs
+	}
+	if config.InitialThresholdUs > config.MaxThresholdUs {
+		config.InitialThresholdUs = config.MaxThresholdUs
+	}
 
 	initialMRPCount := 0
 	if mrpCountFunc != nil {
@@ -162,6 +205,7 @@ func NewThresholdController(config ThresholdControllerConfig, mrpCountFunc func(
 		mrpCountFunc: mrpCountFunc,
 		lastEvalTime: time.Now(),
 		lastMRPCount: initialMRPCount,
+		random:       rand.New(rand.NewSource(config.RandomSeed)),
 	}
 	tc.currentThreshold.Store(config.InitialThresholdUs)
 
@@ -210,10 +254,12 @@ func (tc *ThresholdController) Evaluate() {
 	discoveryRate := float64(produced) / elapsedMinutes
 
 	// 2. Read validator stats and compute consumed MRPs C plus pending MRPs Q.
+	// The random baseline intentionally does not observe validator feedback.
 	var validatorStats *ddrd.ValidatorStats
-	if tc.config.Workdir != "" {
+	if tc.config.Policy == ThresholdPolicyBackpressure && tc.config.Workdir != "" {
 		state, err := ddrd.ReadThresholdState(tc.config.Workdir)
-		if err == nil && !state.Validator.LastUpdate.IsZero() {
+		if err == nil && state.Validator.CounterUnit == tc.config.CounterUnit &&
+			!state.Validator.LastUpdate.IsZero() {
 			staleness := now.Sub(state.Validator.LastUpdate)
 			if staleness < tc.config.StaleValidatorTimeout {
 				validatorStats = &state.Validator
@@ -233,23 +279,33 @@ func (tc *ThresholdController) Evaluate() {
 	}
 
 	// 3. Update EWMA producer/consumer counts and compute workload W.
-	rho := tc.config.SmoothingFactor
-	tc.producedEWMA = rho*tc.producedEWMA + (1-rho)*float64(produced)
-	tc.consumedEWMA = rho*tc.consumedEWMA + (1-rho)*float64(consumed)
-	workload := float64(pending) / math.Max(tc.consumedEWMA, tc.config.WorkloadEpsilon)
+	workload := 0.0
+	if tc.config.Policy == ThresholdPolicyBackpressure {
+		rho := tc.config.SmoothingFactor
+		tc.producedEWMA = rho*tc.producedEWMA + (1-rho)*float64(produced)
+		tc.consumedEWMA = rho*tc.consumedEWMA + (1-rho)*float64(consumed)
+		workload = float64(pending) / math.Max(tc.consumedEWMA, tc.config.WorkloadEpsilon)
+	}
 
 	// 4. Determine threshold adjustment using the paper conditions.
 	oldThreshold := tc.currentThreshold.Load()
 	newThreshold := oldThreshold
 	reason := "stable"
 
-	switch {
-	case workload > tc.config.WorkloadHighWatermark && tc.producedEWMA >= tc.consumedEWMA:
-		newThreshold = int64(float64(oldThreshold) * tc.config.TighteningFactor)
-		reason = "paper-backpressure-shrink"
-	case pending == 0 || (workload < tc.config.WorkloadLowWatermark && tc.producedEWMA <= tc.consumedEWMA):
-		newThreshold = oldThreshold + tc.relaxationStep()
-		reason = "paper-backpressure-grow"
+	if tc.config.Policy == ThresholdPolicyRandom {
+		newThreshold = tc.sampleRandomThreshold()
+		reason = "random-uniform"
+	} else if tc.config.Policy == ThresholdPolicyFixed {
+		reason = "fixed"
+	} else {
+		switch {
+		case workload > tc.config.WorkloadHighWatermark && tc.producedEWMA >= tc.consumedEWMA:
+			newThreshold = int64(float64(oldThreshold) * tc.config.TighteningFactor)
+			reason = "paper-backpressure-shrink"
+		case pending == 0 || (workload < tc.config.WorkloadLowWatermark && tc.producedEWMA <= tc.consumedEWMA):
+			newThreshold = oldThreshold + tc.relaxationStep()
+			reason = "paper-backpressure-grow"
+		}
 	}
 
 	// 5. Clamp threshold.
@@ -278,6 +334,7 @@ func (tc *ThresholdController) Evaluate() {
 	// 7. Write fuzzer stats to shared state.
 	if tc.config.Workdir != "" {
 		_ = ddrd.WriteFuzzerStats(tc.config.Workdir, ddrd.FuzzerStats{
+			CounterUnit:          tc.config.CounterUnit,
 			CurrentThresholdUs:   newThreshold,
 			MRPDiscoveryRatePerM: discoveryRate,
 			TotalMRPsDiscovered:  currentMRPCount,
@@ -291,6 +348,14 @@ func (tc *ThresholdController) Evaluate() {
 	if validatorStats != nil {
 		tc.lastConsumedCount = validatorStats.ProcessedCount
 	}
+}
+
+func (tc *ThresholdController) sampleRandomThreshold() int64 {
+	if tc.config.MinThresholdUs >= tc.config.MaxThresholdUs {
+		return tc.config.MinThresholdUs
+	}
+	span := tc.config.MaxThresholdUs - tc.config.MinThresholdUs + 1
+	return tc.config.MinThresholdUs + tc.random.Int63n(span)
 }
 
 func (tc *ThresholdController) relaxationStep() int64 {

@@ -3,6 +3,8 @@ package ddrd
 import (
 	"os"
 	"path/filepath"
+	"sync"
+	"sync/atomic"
 	"testing"
 	"time"
 )
@@ -102,5 +104,53 @@ func TestThresholdStateAtomicWrite(t *testing.T) {
 	mainPath := filepath.Join(workdir, "threshold-state.json")
 	if _, err := os.Stat(mainPath); err != nil {
 		t.Errorf("main state file should exist: %v", err)
+	}
+}
+
+func TestThresholdStateConcurrentWriters(t *testing.T) {
+	workdir := t.TempDir()
+	const iterations = 1000
+	var writers sync.WaitGroup
+	var writeErrors atomic.Int64
+	writers.Add(2)
+
+	go func() {
+		defer writers.Done()
+		for i := 1; i <= iterations; i++ {
+			if err := WriteValidatorStats(workdir, ValidatorStats{
+				PendingCount:   i,
+				ProcessedCount: i,
+				LastUpdate:     time.Now(),
+			}); err != nil {
+				writeErrors.Add(1)
+			}
+		}
+	}()
+	go func() {
+		defer writers.Done()
+		for i := 1; i <= iterations; i++ {
+			if err := WriteFuzzerStats(workdir, FuzzerStats{
+				CurrentThresholdUs:  int64(i),
+				TotalMRPsDiscovered: i,
+				LastUpdate:          time.Now(),
+			}); err != nil {
+				writeErrors.Add(1)
+			}
+		}
+	}()
+	writers.Wait()
+
+	if got := writeErrors.Load(); got != 0 {
+		t.Fatalf("concurrent writes failed %d times", got)
+	}
+	state, err := ReadThresholdState(workdir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if state.Validator.ProcessedCount != iterations {
+		t.Fatalf("validator section lost: got %d, want %d", state.Validator.ProcessedCount, iterations)
+	}
+	if state.Fuzzer.TotalMRPsDiscovered != iterations {
+		t.Fatalf("fuzzer section lost: got %d, want %d", state.Fuzzer.TotalMRPsDiscovered, iterations)
 	}
 }

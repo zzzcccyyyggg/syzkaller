@@ -5,7 +5,6 @@ package uafvalidate
 
 import (
 	"encoding/json"
-	"fmt"
 	"sync"
 	"time"
 
@@ -22,12 +21,14 @@ const (
 	maxSkipProb     = 0.90 // Maximum 90% skip probability
 )
 
-// VarNamePairKey creates a key from FreeAccessName and UseAccessName only (no CallStack)
+// VarNamePairKey creates an order-independent key from the two VarNames.
+// Data races are symmetric, so A-B and B-A must share backoff state.
 func VarNamePairKey(pair *ddrd.MayUAFPair) string {
-	if pair == nil {
-		return ""
-	}
-	return fmt.Sprintf("%016x-%016x", pair.FreeAccessName, pair.UseAccessName)
+	return canonicalVarNameFamilyKey(pair)
+}
+
+func canonicalVarNameFamilyKey(pair *ddrd.MayUAFPair) string {
+	return ddrd.VarNamePairKey(pair)
 }
 
 // VarNameBackoffStats records validation outcomes used to probabilistically

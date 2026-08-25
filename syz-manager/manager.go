@@ -25,6 +25,7 @@ import (
 	"github.com/google/syzkaller/pkg/asset"
 	"github.com/google/syzkaller/pkg/corpus"
 	"github.com/google/syzkaller/pkg/db"
+	"github.com/google/syzkaller/pkg/ddrd"
 	"github.com/google/syzkaller/pkg/flatrpc"
 	"github.com/google/syzkaller/pkg/fuzzer"
 	"github.com/google/syzkaller/pkg/fuzzer/queue"
@@ -117,6 +118,13 @@ type Manager struct {
 	uafValidateQueue *manager.UAFValidateQueueStore
 	uafPairIndex     *manager.RacePairIndexStore
 	uafSharedWorkdir string
+
+	thresholdProducedPairs    atomic.Int64
+	thresholdConsumedPairs    atomic.Int64
+	thresholdProducedFamilies atomic.Int64
+	thresholdConsumedFamilies atomic.Int64
+	thresholdStartedMu        sync.Mutex
+	thresholdStartedQueueKeys map[string]struct{}
 
 	llmSeedMu     sync.Mutex
 	llmSeedLoaded map[string]struct{}
@@ -1448,12 +1456,21 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			SuccessThreshold:           mgr.cfg.Experimental.SuccessThreshold,
 			ExecutionsPerAttempt:       mgr.cfg.Experimental.ExecutionsPerAttempt,
 			// Dynamic Threshold
-			EnableDynamicThreshold:    mgr.cfg.Experimental.EnableDynamicThreshold,
-			DynamicThresholdInitialUs: mgr.cfg.Experimental.DynamicThresholdInitialUs,
-			DynamicThresholdMinUs:     mgr.cfg.Experimental.DynamicThresholdMinUs,
-			DynamicThresholdMaxUs:     mgr.cfg.Experimental.DynamicThresholdMaxUs,
-			DynamicThresholdEvalSec:   mgr.cfg.Experimental.DynamicThresholdEvalSec,
-			Workdir:                   mgr.cfg.Workdir,
+			EnableDynamicThreshold:      mgr.cfg.Experimental.EnableDynamicThreshold,
+			DynamicThresholdPolicy:      mgr.cfg.Experimental.DynamicThresholdPolicy,
+			DynamicThresholdRandomSeed:  mgr.cfg.Experimental.DynamicThresholdRandomSeed,
+			DynamicThresholdInitialUs:   mgr.cfg.Experimental.DynamicThresholdInitialUs,
+			DynamicThresholdMinUs:       mgr.cfg.Experimental.DynamicThresholdMinUs,
+			DynamicThresholdMaxUs:       mgr.cfg.Experimental.DynamicThresholdMaxUs,
+			DynamicThresholdEvalSec:     mgr.cfg.Experimental.DynamicThresholdEvalSec,
+			DynamicThresholdCounterUnit: mgr.cfg.Experimental.DynamicThresholdCounterUnit,
+			Workdir:                     mgr.cfg.Workdir,
+			ScheduleWorthyMRPCount: func() int {
+				if mgr.cfg.Experimental.DynamicThresholdCounterUnit == ddrd.ThresholdCounterUnitQueueFamily {
+					return int(mgr.thresholdProducedFamilies.Load())
+				}
+				return int(mgr.thresholdProducedPairs.Load())
+			},
 		}, rnd, mgr.target)
 		restoredUAFCorpus := mgr.enqueueUAFCorpusSeeds(fuzzerObj)
 		if mgr.cfg.Experimental.StaticInputExploration {
@@ -1464,7 +1481,7 @@ func (mgr *Manager) MachineChecked(features flatrpc.Feature,
 			if fuzzerObj.ActivateUAFMode() {
 				log.Logf(0, "race: static input exploration enabled; skipping startup candidate triage")
 			}
-			mgr.enqueueLLMInputSeeds(fuzzerObj)
+			mgr.enqueueLLMInputSeedsLimited(fuzzerObj, mgr.cfg.Experimental.LLMInputSeedMaxPerPoll)
 			mgr.startLLMInputSeedWatcher(fuzzerObj)
 		} else {
 			fuzzerObj.AddCandidates(candidates)
@@ -1925,16 +1942,30 @@ func (mgr *Manager) persistUAFCorpusEntries(entries []*fuzzer.UAFCorpusEntry) (i
 				return len(refs), queued, err
 			}
 			queuedPairs := make(map[string]uint64)
+			activatedRecords := 0
+			activatedFamilies := 0
 			for _, result := range queueResults {
 				if result.Enqueued {
 					queuedPairs[result.PairKey] = result.Seq
 					queued++
+					if result.RecordActivated {
+						activatedRecords++
+					}
+					if result.FamilyActivated {
+						activatedFamilies++
+					}
 				} else {
 					alreadyPresent++
 				}
 			}
 			if err := mgr.uafPairIndex.MarkQueuedBatch(queuedPairs); err != nil {
 				return len(refs), queued, err
+			}
+			if activatedRecords != 0 {
+				mgr.thresholdProducedPairs.Add(int64(activatedRecords))
+			}
+			if activatedFamilies != 0 {
+				mgr.thresholdProducedFamilies.Add(int64(activatedFamilies))
 			}
 		}
 	}

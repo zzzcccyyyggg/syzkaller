@@ -517,18 +517,24 @@ type Experimental struct {
 	// EnableDynamicThreshold enables dynamic MRP time threshold adjustment
 	// based on validator supply-demand balancing.
 	EnableDynamicThreshold bool `json:"enable_dynamic_threshold,omitempty"`
+	// DynamicThresholdPolicy is "backpressure", "random", or "fixed".
+	DynamicThresholdPolicy string `json:"dynamic_threshold_policy,omitempty"`
+	// DynamicThresholdRandomSeed makes the random threshold policy reproducible.
+	DynamicThresholdRandomSeed int64 `json:"dynamic_threshold_random_seed,omitempty"`
 	// DynamicThresholdInitialUs is the starting threshold (microseconds).
-	// Generic fallback: 1000 (1ms). Current MRPFuzz experiment configs set 2500.
+	// Generic fallback and current MRPFuzz experiment setting: 1000 (1ms).
 	// Overrides NormalThresholdMicros when dynamic threshold is enabled.
 	DynamicThresholdInitialUs int64 `json:"dynamic_threshold_initial_us,omitempty"`
 	// DynamicThresholdMinUs is the minimum threshold (microseconds).
-	// Generic fallback: 50. Current MRPFuzz experiment configs set 500.
+	// Generic fallback: 50. Current MRPFuzz experiment configs also set 50.
 	DynamicThresholdMinUs int64 `json:"dynamic_threshold_min_us,omitempty"`
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
 	// Generic fallback: 50000 (50ms). Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64 `json:"dynamic_threshold_max_us,omitempty"`
 	// DynamicThresholdEvalSec is the evaluation interval (seconds). Paper default: 30.
 	DynamicThresholdEvalSec int `json:"dynamic_threshold_eval_sec,omitempty"`
+	// DynamicThresholdCounterUnit selects pair-record or canonical VarName-family accounting.
+	DynamicThresholdCounterUnit string `json:"dynamic_threshold_counter_unit,omitempty"`
 }
 
 type UAFValidateConfig struct {
@@ -539,6 +545,9 @@ type UAFValidateConfig struct {
 	// When unset, the validator uses the legacy timeout_seconds*(requests+1) bound.
 	MaxBatchTimeoutSeconds int `json:"max_batch_timeout_seconds,omitempty"`
 	RepeatCount            int `json:"repeat_count"`
+	// StablePairMinOccurrences overrides the majority rule for collection.
+	// Zero uses the default majority derived from RepeatCount.
+	StablePairMinOccurrences int `json:"stable_pair_min_occurrences,omitempty"`
 	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
 	// Defaults to 10 if unset or zero.
 	VerifyRepeatTimes             int `json:"verify_repeat_times,omitempty"`
@@ -584,6 +593,25 @@ type UAFValidateConfig struct {
 	// VerifyAccessDelayMinUs floors the kernel-side target access delay during verification.
 	// This does not change barrier start_delay.
 	VerifyAccessDelayMinUs int64 `json:"verify_access_delay_min_us,omitempty"`
+	// VerifyAccessDelayMultiplier scales the observed collection gap for precise
+	// strict/range attempts. It is the manager-side factor; experiment kernels
+	// may apply an additional fixed multiplier.
+	VerifyAccessDelayMultiplier int64 `json:"verify_access_delay_multiplier,omitempty"`
+	// VerifyAccessDelayNormalizeToThreshold scales precise strict/range attempts
+	// by observed_delay/admission_threshold before applying the configured bounds.
+	VerifyAccessDelayNormalizeToThreshold bool `json:"verify_access_delay_normalize_to_threshold,omitempty"`
+	// VerifyAccessDelayTargetUs is the precise-attempt delay at the admission boundary.
+	VerifyAccessDelayTargetUs int64 `json:"verify_access_delay_target_us,omitempty"`
+	// VerifyAccessDelayMaxUs caps the scaled precise-attempt delay. Zero means no cap.
+	VerifyAccessDelayMaxUs int64 `json:"verify_access_delay_max_us,omitempty"`
+	// VerifyStackAccessDelayUs fixes the stack-only delay. Zero keeps floor behavior.
+	VerifyStackAccessDelayUs int64 `json:"verify_stack_access_delay_us,omitempty"`
+	// VerifyStackAccessDelayMultiplier scales the observed collection gap for
+	// stack-only attempts. It takes precedence over VerifyStackAccessDelayUs.
+	VerifyStackAccessDelayMultiplier int64 `json:"verify_stack_access_delay_multiplier,omitempty"`
+	// VerifyStackAccessDelayMinUs overrides the access-delay floor for stack-only attempts.
+	// Zero keeps VerifyAccessDelayMinUs for stack-only attempts as well.
+	VerifyStackAccessDelayMinUs int64 `json:"verify_stack_access_delay_min_us,omitempty"`
 	// TargetMatchMode controls target-pair matching in UAF validation.
 	// Supported values: "sn-fallback" (default), "strict-sn", "sn-range",
 	// "sn-only", "sn-range-only", "stack-only", "site-only".
@@ -651,6 +679,9 @@ type UAFValidateConfig struct {
 	// before saving the snapshot. This "warms up" kernel state (caches, internal structures)
 	// so that subsequent tests start from a more realistic state rather than a fresh boot.
 	SnapshotCorpusWarmup bool `json:"snapshot_corpus_warmup,omitempty"`
+	// CollectionThresholdFloorUs widens validation collection while preserving
+	// the fuzz-time admission threshold as the verification normalization basis.
+	CollectionThresholdFloorUs int64 `json:"collection_threshold_floor_us,omitempty"`
 
 	// EnableVarNameScheduling enables VarName-based round-robin scheduling.
 	// When enabled, entries are grouped by their VarName pairs and scheduled
@@ -658,12 +689,29 @@ type UAFValidateConfig struct {
 	// This ensures fair resource distribution across different VarName pairs,
 	// preventing VarName pairs with many stacks from monopolizing validation.
 	EnableVarNameScheduling bool `json:"enable_varname_scheduling,omitempty"`
+	// MaxConcurrentPerVarName limits concurrently executing validation tasks that
+	// share a canonical (order-independent) VarName family. Zero disables the cap.
+	MaxConcurrentPerVarName int `json:"max_concurrent_per_varname,omitempty"`
+	// EnableCollectionMissBackoff uses repeated collection misses as a separate,
+	// soft task-level signal. It does not modify targeted-scheduling failure Fp.
+	EnableCollectionMissBackoff bool `json:"enable_collection_miss_backoff,omitempty"`
+	// CollectionMissFreeAttempts is the number of consecutive misses that do not
+	// contribute any collection-miss defer probability.
+	CollectionMissFreeAttempts int `json:"collection_miss_free_attempts,omitempty"`
+	// CollectionMissWeight controls how quickly defer probability grows after the
+	// free miss allowance.
+	CollectionMissWeight float64 `json:"collection_miss_weight,omitempty"`
+	// CollectionMissMaxDefer caps collection-miss defer probability.
+	CollectionMissMaxDefer float64 `json:"collection_miss_max_defer,omitempty"`
 
 	// PriorityLowHistory prioritizes entries with fewer replay history records.
 	// When enabled, entries are sorted by ascending history count within each
 	// scheduling group, so entries with less replay overhead are validated first.
 	// Can be combined with EnableVarNameScheduling for fine-grained control.
 	PriorityLowHistory bool `json:"priority_low_history,omitempty"`
+	// EnableThresholdAwareValidationPriority prioritizes queued validation work
+	// whose observed TimeDiff fits the controller's current threshold.
+	EnableThresholdAwareValidationPriority bool `json:"enable_threshold_aware_validation_priority,omitempty"`
 
 	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.
 	// When true (default), only runtime-discovered pairs that also exist in entry.Pairs are
@@ -685,6 +733,10 @@ type UAFValidateConfig struct {
 	// continuous validation task for the same corpus record. Bounded tasks let
 	// queue ack and pair-index status advance incrementally during long runs.
 	MaxPairsPerTask int `json:"max_pairs_per_task,omitempty"`
+	// MaxTasksPerCorpus caps how many validation tasks one corpus record may be
+	// split into. Zero means no cap. When set, this cap takes precedence over
+	// MaxPairsPerTask so broad collection does not replay the same H+G unboundedly.
+	MaxTasksPerCorpus int `json:"max_tasks_per_corpus,omitempty"`
 	// CollectionOnly stops after the replay+collection phase and skips target-pair
 	// verification. It is useful for no-history sensitivity probes that only need
 	// to count runtime-observed pairs.

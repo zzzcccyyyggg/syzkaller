@@ -234,6 +234,12 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 	// Initialize dynamic threshold controller if enabled
 	if cfg.EnableDynamicThreshold && cfg.ModeUAF {
 		tcConfig := DefaultThresholdControllerConfig()
+		if cfg.DynamicThresholdPolicy != "" {
+			tcConfig.Policy = cfg.DynamicThresholdPolicy
+		}
+		if cfg.DynamicThresholdRandomSeed != 0 {
+			tcConfig.RandomSeed = cfg.DynamicThresholdRandomSeed
+		}
 		if cfg.DynamicThresholdInitialUs > 0 {
 			tcConfig.InitialThresholdUs = cfg.DynamicThresholdInitialUs
 		}
@@ -246,13 +252,19 @@ func NewFuzzer(ctx context.Context, cfg *Config, rnd *rand.Rand,
 		if cfg.DynamicThresholdEvalSec > 0 {
 			tcConfig.EvalWindowSeconds = cfg.DynamicThresholdEvalSec
 		}
+		if cfg.DynamicThresholdCounterUnit != "" {
+			tcConfig.CounterUnit = cfg.DynamicThresholdCounterUnit
+		}
 		tcConfig.Workdir = cfg.Workdir
-		f.thresholdController = NewThresholdController(tcConfig, func() int {
-			return f.ddrd.Count()
-		})
+		mrpCountFunc := cfg.ScheduleWorthyMRPCount
+		if mrpCountFunc == nil {
+			mrpCountFunc = func() int { return f.ddrd.Count() }
+		}
+		f.thresholdController = NewThresholdController(tcConfig, mrpCountFunc)
 		go f.thresholdController.Run(ctx.Done())
-		log.Logf(0, "[THRESHOLD] Dynamic threshold controller started: init=%dμs, range=[%d, %d]μs, eval=%ds",
-			tcConfig.InitialThresholdUs, tcConfig.MinThresholdUs, tcConfig.MaxThresholdUs, tcConfig.EvalWindowSeconds)
+		log.Logf(0, "[THRESHOLD] threshold controller started: policy=%s unit=%s init=%dμs range=[%d, %d]μs eval=%ds random_seed=%d",
+			tcConfig.Policy, tcConfig.CounterUnit, tcConfig.InitialThresholdUs, tcConfig.MinThresholdUs,
+			tcConfig.MaxThresholdUs, tcConfig.EvalWindowSeconds, tcConfig.RandomSeed)
 	}
 
 	f.execQueues = newExecQueues(f)
@@ -805,19 +817,29 @@ type Config struct {
 	// EnableDynamicThreshold enables dynamic threshold adjustment based on
 	// fuzzer/validator supply-demand balancing.
 	EnableDynamicThreshold bool
+	// DynamicThresholdPolicy is "backpressure", "random", or "fixed".
+	DynamicThresholdPolicy string
+	// DynamicThresholdRandomSeed makes the random threshold policy reproducible.
+	DynamicThresholdRandomSeed int64
 	// DynamicThresholdInitialUs is the starting threshold (microseconds).
-	// Generic fallback: 1000. Current MRPFuzz experiment configs set 2500.
+	// Generic fallback and current MRPFuzz experiment setting: 1000.
 	DynamicThresholdInitialUs int64
 	// DynamicThresholdMinUs is the minimum threshold (microseconds).
-	// Generic fallback: 50. Current MRPFuzz experiment configs set 500.
+	// Generic fallback and current MRPFuzz experiment setting: 50.
 	DynamicThresholdMinUs int64
 	// DynamicThresholdMaxUs is the maximum threshold (microseconds).
 	// Generic fallback: 50000. Current MRPFuzz experiment configs set 10000.
 	DynamicThresholdMaxUs int64
 	// DynamicThresholdEvalSec is how often to evaluate and adjust (seconds). Paper default: 30.
 	DynamicThresholdEvalSec int
+	// DynamicThresholdCounterUnit is queue-pair-record or queue-varname-family.
+	DynamicThresholdCounterUnit string
 	// Workdir is used for the shared state file between fuzzer and validator.
 	Workdir string
+	// ScheduleWorthyMRPCount returns the cumulative number of pair records
+	// admitted to the validation queue. It keeps Algorithm 1 P in the same unit
+	// as validator C and Q.
+	ScheduleWorthyMRPCount func() int
 }
 
 func (fuzzer *Fuzzer) triageProgCall(p *prog.Prog, info *flatrpc.CallInfo, call int, triage *map[int]*triageCall) {

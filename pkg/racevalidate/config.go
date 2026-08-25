@@ -111,6 +111,9 @@ type Config struct {
 	MaxBatchTimeout  time.Duration
 	Debug            bool
 	RepeatCount      int
+	// StablePairMinOccurrences overrides the collection majority threshold.
+	// Zero derives a majority threshold from RepeatCount.
+	StablePairMinOccurrences int
 	// VerifyRepeatTimes specifies how many times to repeat each pair during verification phase.
 	// Defaults to 10 if unset or zero.
 	VerifyRepeatTimes int
@@ -134,6 +137,10 @@ type Config struct {
 	// allowing natural timing to determine which pairs are stable.
 	// Delays are only applied during the verification phase.
 	DisableCollectionDelay bool
+	// CollectionThresholdFloorUs widens replay collection without changing the
+	// fuzz-time admission threshold or verification-delay normalization. Zero
+	// preserves admission-linked collection.
+	CollectionThresholdFloorUs int64
 	// DisableVerifyDelay disables start_delay during the verification phase.
 	// When enabled (true), verification runs without barrier start delays,
 	// relying only on access_delay (kernel udelay) to create race windows.
@@ -145,6 +152,24 @@ type Config struct {
 	// VerifyAccessDelayMinUs floors the kernel-side target access delay during verification.
 	// It keeps the original barrier start delay intact and only widens the watchpoint window.
 	VerifyAccessDelayMinUs int64
+	// VerifyAccessDelayMultiplier scales the observed gap for strict/range
+	// attempts before floors and caps are applied.
+	VerifyAccessDelayMultiplier int64
+	// VerifyAccessDelayNormalizeToThreshold scales strict/range attempts by the
+	// observed-delay/admission-threshold ratio.
+	VerifyAccessDelayNormalizeToThreshold bool
+	// VerifyAccessDelayTargetUs is the strict/range delay at the threshold boundary.
+	VerifyAccessDelayTargetUs int64
+	// VerifyAccessDelayMaxUs caps normalized strict/range delay. Zero means no cap.
+	VerifyAccessDelayMaxUs int64
+	// VerifyStackAccessDelayUs fixes stack-only delay when non-zero.
+	VerifyStackAccessDelayUs int64
+	// VerifyStackAccessDelayMultiplier scales the observed gap for stack-only
+	// attempts and takes precedence over the fixed stack-only delay.
+	VerifyStackAccessDelayMultiplier int64
+	// VerifyStackAccessDelayMinUs overrides the floor for stack-only attempts. Zero
+	// preserves VerifyAccessDelayMinUs for all target-match modes.
+	VerifyStackAccessDelayMinUs int64
 	// TargetMatchMode controls how the target UAF access is matched in the kernel.
 	// "sn-fallback" first tries exact SN/TID/stack matching, then bounded
 	// stack+SN-range matching, then falls back to stack-only on misses.
@@ -206,10 +231,21 @@ type Config struct {
 	// When enabled, entries are grouped by their VarName pairs and scheduled
 	// in a round-robin fashion, prioritizing VarName pairs with fewer entries.
 	EnableVarNameScheduling bool
+	// MaxConcurrentPerVarName limits active tasks sharing a canonical VarName
+	// family. Waiting tasks remain queued. Zero disables the cap.
+	MaxConcurrentPerVarName int
+	// EnableCollectionMissBackoff applies soft task-level deferral based on
+	// repeated failures to reproduce a stable VarName family during collection.
+	EnableCollectionMissBackoff bool
+	CollectionMissFreeAttempts  int
+	CollectionMissWeight        float64
+	CollectionMissMaxDefer      float64
 
 	// PriorityLowHistory prioritizes entries with fewer replay history records.
 	// Entries are sorted by ascending history count within each scheduling group.
-	PriorityLowHistory bool
+	PriorityLowHistory                     bool
+	EnableThresholdAwareValidationPriority bool
+	CurrentThresholdUs                     func() int64
 
 	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.
 	// When false (default), any runtime-discovered pair meeting the stability threshold is accepted.
@@ -264,6 +300,9 @@ type Config struct {
 
 	EntryResolver  ValidationEntryResolver
 	PairStatusSink PairStatusSink
+	// TaskStarted is called once when a validation worker takes ownership of a
+	// task, before materialization and VM acquisition.
+	TaskStarted func(*fuzzer.UAFCorpusEntry)
 }
 
 func (cfg Config) withDefaults() Config {
@@ -300,5 +339,13 @@ func (cfg Config) withDefaults() Config {
 	if cfg.MinimizationStrategy == "" {
 		cfg.MinimizationStrategy = "binary"
 	}
+	backoff := normalizeReproductionBackoffConfig(ReproductionBackoffConfig{
+		FreeAttempts: cfg.CollectionMissFreeAttempts,
+		Weight:       cfg.CollectionMissWeight,
+		MaxDefer:     cfg.CollectionMissMaxDefer,
+	})
+	cfg.CollectionMissFreeAttempts = backoff.FreeAttempts
+	cfg.CollectionMissWeight = backoff.Weight
+	cfg.CollectionMissMaxDefer = backoff.MaxDefer
 	return cfg
 }

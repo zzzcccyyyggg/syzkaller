@@ -231,6 +231,7 @@ func (e *ExecutorAdapter) runBarrier(parentCtx context.Context, execReq *Executi
 		IsValidationMode:   true,
 		UkcTargetDelaySide: execReq.TargetDelaySideKernel,
 		UkcTargetDelayMode: execReq.TargetDelayModeKernel,
+		TimingThresholdUs:  execReq.TimingThresholdUs,
 	}
 	if execReq.RepeatTimes > 0 {
 		// For barrier mode, we can't easily use syz-execprog's -repeat flag because
@@ -936,15 +937,19 @@ func reportMatchesVarNames(rep *report.Report, want map[string]struct{}) bool {
 		return false
 	}
 	log.Logf(2, "reportMatchesVarNames: checking %d entries against want=%v", len(info.Entries), want)
+	found := make(map[string]struct{}, len(want))
 	for _, entry := range info.Entries {
 		if entry == nil {
 			continue
 		}
 		log.Logf(2, "reportMatchesVarNames: entry.VarName=%q", entry.VarName)
 		if _, ok := want[entry.VarName]; ok {
-			log.Logf(1, "reportMatchesVarNames: MATCHED entry.VarName=%s", entry.VarName)
-			return true
+			found[entry.VarName] = struct{}{}
 		}
+	}
+	if len(found) == len(want) {
+		log.Logf(1, "reportMatchesVarNames: MATCHED both target endpoints")
+		return true
 	}
 	return false
 }
@@ -1174,6 +1179,7 @@ func (e *ExecutorAdapter) runBarrierBatch(parentCtx context.Context, reqs []*Exe
 			IsValidationMode:   true,
 			UkcTargetDelaySide: execReq.TargetDelaySideKernel,
 			UkcTargetDelayMode: execReq.TargetDelayModeKernel,
+			TimingThresholdUs:  execReq.TimingThresholdUs,
 		}
 		// Note: We set DisableDdrd above; rpcserver/runner.go will handle ExecFlags
 		// based on that field when serializing for barrier execution.
@@ -1500,6 +1506,7 @@ func (e *ExecutorAdapter) runAsyncBatch(parentCtx context.Context, reqs []*Execu
 			IsValidationMode:   true,
 			UkcTargetDelaySide: execReq.TargetDelaySideKernel,
 			UkcTargetDelayMode: execReq.TargetDelayModeKernel,
+			TimingThresholdUs:  execReq.TimingThresholdUs,
 		}
 
 		if execReq.TargetPair != nil {

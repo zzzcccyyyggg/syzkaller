@@ -32,6 +32,7 @@ type RacePairRecord struct {
 	CorpusRecordIDs         []string               `json:"corpus_record_ids,omitempty"`
 	PreferredCorpusRecordID string                 `json:"preferred_corpus_record_id,omitempty"`
 	PreferredHistoryRecords int                    `json:"preferred_history_records,omitempty"`
+	AdmissionThresholdUs    int64                  `json:"admission_threshold_us,omitempty"`
 	Source                  int                    `json:"source,omitempty"`
 	Status                  RacePairStatus         `json:"status"`
 	DiscoveredAt            time.Time              `json:"discovered_at"`
@@ -226,6 +227,7 @@ func (store *RacePairIndexStore) observeEntryLocked(entry *fuzzer.UAFCorpusEntry
 				CorpusRecordIDs:         []string{corpusRecordID},
 				PreferredCorpusRecordID: corpusRecordID,
 				PreferredHistoryRecords: len(entry.ReplayHistory),
+				AdmissionThresholdUs:    entry.AdmissionThresholdUs,
 				Source:                  int(entry.Source),
 				Status:                  RacePairDiscovered,
 				DiscoveredAt:            now,
@@ -241,9 +243,15 @@ func (store *RacePairIndexStore) observeEntryLocked(entry *fuzzer.UAFCorpusEntry
 				corpusRecordID, len(entry.ReplayHistory)) {
 				rec.PreferredCorpusRecordID = corpusRecordID
 				rec.PreferredHistoryRecords = len(entry.ReplayHistory)
+				rec.AdmissionThresholdUs = entry.AdmissionThresholdUs
 				if rec.Status == RacePairProcessed {
 					rec.Status = RacePairDiscovered
 				}
+				recordChanged = true
+			}
+			if rec.AdmissionThresholdUs == 0 && rec.PreferredCorpusRecordID == corpusRecordID &&
+				entry.AdmissionThresholdUs > 0 {
+				rec.AdmissionThresholdUs = entry.AdmissionThresholdUs
 				recordChanged = true
 			}
 			if rec.PairID == 0 {

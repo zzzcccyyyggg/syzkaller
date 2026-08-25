@@ -32,12 +32,15 @@ type Executor interface {
 type ExecutorFactory func(ctx context.Context) (Executor, error)
 
 type ExecutionRequest struct {
-	Entry         *fuzzer.UAFCorpusEntry
-	Delays        []int64
-	TargetPair    *ddrd.MayUAFPair
-	RepeatTimes   int
-	DisableDdrd   bool
-	StopOnSuccess bool
+	Entry      *fuzzer.UAFCorpusEntry
+	Delays     []int64
+	TargetPair *ddrd.MayUAFPair
+	// TimingThresholdUs limits MRP collection for this request. Validation
+	// collection uses the entry's fuzz-time admission threshold.
+	TimingThresholdUs int64
+	RepeatTimes       int
+	DisableDdrd       bool
+	StopOnSuccess     bool
 	// ObserveTargetPairOnly records DDRD target-pair observations without counting
 	// them as validation success. Matching crashes still update TriggeredCount.
 	ObserveTargetPairOnly bool
@@ -58,6 +61,14 @@ type StablePairWithDelays struct {
 	Pair          ddrd.MayUAFPair
 	StartDelayUs  int64 // original TimeDiff in microseconds (same as discovery phase)
 	AccessDelayUs int64 // max(original TimeDiff, runtime TimeDiff) in microseconds
+}
+
+type validatedPairMetadata struct {
+	AdmissionThresholdUs  int64
+	CollectionThresholdUs int64
+	ObservedTimeDiffNs    uint64
+	OriginMatch           string
+	Expanded              bool
 }
 
 type snSampleStats struct {
@@ -132,6 +143,9 @@ type StageManager struct {
 	// Layer 2: VarName pair validation backoff statistics store
 	varNameBackoffDB    *db.DB
 	varNameBackoffStore *VarNameBackoffStore
+	// Collection reproduction feedback is intentionally separate from Fp.
+	reproductionBackoffDB    *db.DB
+	reproductionBackoffStore *ReproductionBackoffStore
 
 	mu          sync.Mutex
 	pending     map[string]*validationTask
@@ -141,13 +155,16 @@ type StageManager struct {
 	tasksClosed bool
 
 	// VarName-based scheduling (when EnableVarNameScheduling is true)
-	varNameGroups  map[string][]string        // vnKey → []entryKey (entries containing this VarName)
-	entryStore     map[string]*validationTask // entryKey → task (all registered tasks)
-	entryVarNames  map[string][]string        // entryKey → []vnKey (VarNames in each entry)
-	varNameCounts  map[string]int             // vnKey → count of pending entries
-	sortedVarNames []string                   // vnKeys sorted by count (ascending)
-	currentVNIndex int                        // round-robin index
-	vnScheduleCond *sync.Cond                 // condition variable for task availability
+	varNameGroups     map[string][]string        // vnKey → []entryKey (entries containing this VarName)
+	entryStore        map[string]*validationTask // entryKey → task (all registered tasks)
+	entryVarNames     map[string][]string        // entryKey → []vnKey (VarNames in each entry)
+	entryFamilies     map[string][]string        // entryKey → canonical unordered VarName families
+	varNameCounts     map[string]int             // vnKey → count of pending entries
+	activeFamilies    map[string]int             // canonical family → currently executing tasks
+	scheduledFamilies map[string]struct{}        // canonical families that have received a worker
+	sortedVarNames    []string                   // vnKeys sorted by count (ascending)
+	currentVNIndex    int                        // round-robin index
+	vnScheduleCond    *sync.Cond                 // condition variable for task availability
 
 	// ContinueAfterBackoff support: re-test backoff-skipped entries after initial pass.
 	backoffSkippedEntries []*fuzzer.UAFCorpusEntry // entries skipped by shouldSkipEntry during the backoff-guided pass
@@ -159,24 +176,26 @@ type StageManager struct {
 var zeroSignatureKey = SignatureKey(fuzzer.UAFPairProfile{})
 
 const (
-	crashLostConnection = "lost connection to test machine"
-	crashTimedOut       = "timed out"
-	maxCrashReportSize  = 64 << 10
-	crashReportFallback = "no report captured"
+	crashLostConnection                    = "lost connection to test machine"
+	crashTimedOut                          = "timed out"
+	maxCrashReportSize                     = 64 << 10
+	crashReportFallback                    = "no report captured"
+	defaultValidationCollectionThresholdUs = 10_000
 )
 
 type validationTask struct {
-	entry          *fuzzer.UAFCorpusEntry
-	ref            *ValidationEntryRef
-	signature      fuzzer.UAFPairProfile
-	key            string
-	attempts       int
-	repeats        int
-	historyCount   int                        // number of replay history records
-	pairLatest     map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
-	pairCounts     map[string]int
-	pairOriginalTD map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
-	pairSNSamples  map[string]*snSampleStats
+	entry            *fuzzer.UAFCorpusEntry
+	ref              *ValidationEntryRef
+	signature        fuzzer.UAFPairProfile
+	key              string
+	attempts         int
+	repeats          int
+	historyCount     int                        // number of replay history records
+	pairLatest       map[string]ddrd.MayUAFPair // latest runtime pair (with runtime TimeDiff)
+	pairCounts       map[string]int
+	pairOriginalTD   map[string]uint64 // original TimeDiff from entry.Pairs (nanoseconds)
+	pairSNSamples    map[string]*snSampleStats
+	scheduleFamilies []string // canonical VarName families reserved by the scheduler
 }
 
 func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
@@ -193,6 +212,10 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 			return nil, fmt.Errorf("no executor factory configured")
 		}
 	}
+	stableCount := cfg.StablePairMinOccurrences
+	if stableCount <= 0 {
+		stableCount = requiredStableCount(cfg.RepeatCount)
+	}
 	sm := &StageManager{
 		cfg:      cfg,
 		delay:    NewDelayManager(defaultMaxBarrierDelays, cfg.DelayRetryBudget),
@@ -201,7 +224,7 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		results:  make(chan *ValidationResult, cfg.MaxConcurrent*2),
 		pending:  make(map[string]*validationTask),
 		seenKeys: make(map[string]struct{}),
-		stable:   requiredStableCount(cfg.RepeatCount),
+		stable:   stableCount,
 	}
 
 	// Initialize VarName scheduling structures
@@ -209,11 +232,20 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		sm.varNameGroups = make(map[string][]string)
 		sm.entryStore = make(map[string]*validationTask)
 		sm.entryVarNames = make(map[string][]string)
+		sm.entryFamilies = make(map[string][]string)
 		sm.varNameCounts = make(map[string]int)
+		sm.activeFamilies = make(map[string]int)
+		sm.scheduledFamilies = make(map[string]struct{})
 		sm.vnScheduleCond = sync.NewCond(&sm.mu)
 		log.Logf(0, "uafvalidate: VarName-based scheduling enabled")
+		if cfg.MaxConcurrentPerVarName > 0 {
+			log.Logf(0, "uafvalidate: per-VarName concurrency cap=%d", cfg.MaxConcurrentPerVarName)
+		}
 		if cfg.PriorityLowHistory {
 			log.Logf(0, "uafvalidate: PriorityLowHistory enabled (sort by ascending history count)")
+		}
+		if cfg.EnableThresholdAwareValidationPriority {
+			log.Logf(0, "uafvalidate: threshold-aware validation priority enabled")
 		}
 	}
 
@@ -252,6 +284,22 @@ func NewStageManager(cfg Config, factory ExecutorFactory) *StageManager {
 		} else {
 			sm.varNameBackoffDB = backoffDB
 			sm.varNameBackoffStore = NewVarNameBackoffStore(backoffDB)
+		}
+
+		if cfg.EnableCollectionMissBackoff {
+			reproductionPath := filepath.Join(cfg.Workdir, "collection_miss_backoff.db")
+			reproductionDB, err := db.Open(reproductionPath, true)
+			if err != nil {
+				log.Logf(0, "uafvalidate: failed to open collection-miss backoff db: %v", err)
+			} else {
+				sm.reproductionBackoffDB = reproductionDB
+				sm.reproductionBackoffStore = NewReproductionBackoffStore(reproductionDB,
+					ReproductionBackoffConfig{
+						FreeAttempts: cfg.CollectionMissFreeAttempts,
+						Weight:       cfg.CollectionMissWeight,
+						MaxDefer:     cfg.CollectionMissMaxDefer,
+					})
+			}
 		}
 	}
 
@@ -430,6 +478,9 @@ func (sm *StageManager) handleTask(ctx context.Context, task *validationTask) {
 	if task == nil {
 		return
 	}
+	if sm.cfg.TaskStarted != nil {
+		sm.cfg.TaskStarted(task.lightResultEntry())
+	}
 	if err := sm.materializeTaskEntry(task); err != nil {
 		result := &ValidationResult{
 			Entry:     task.lightResultEntry(),
@@ -556,10 +607,13 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 					sm.cfg.MaxStablePairsPerOrigin,
 					sm.cfg.MaxStablePairsPerEntry,
 				)
+				if sm.reproductionBackoffStore != nil {
+					sm.reproductionBackoffStore.RecordCollection(task.entry, stablePairsWithDelays)
+				}
 				if sm.cfg.TargetVarNamePair != "" {
 					logTargetCollectionSummary(task, result, originalPairs, stablePairsWithDelays, sm.cfg.TargetVarNamePair, sm.stable, sm.cfg.EnableReplay)
 				}
-				logSNDriftSummary(task, stablePairsWithDelays, originalPairs, originMatchMode, sm.cfg.SNFallbackRange)
+				logSNDriftSummary(task, stablePairsWithDelays, originalPairs, originMatchMode, sm.cfg.SNFallbackRange, sm.stable)
 				if sm.cfg.CollectionOnly {
 					log.Logf(0, "uafvalidate: collection-only summary key=%s runtime_pairs=%d stable_pairs=%d repeat=%d/%d replay_enabled=%t history=%d",
 						task.key, len(result.Pairs), len(result.StablePairs), task.repeats+1, sm.cfg.RepeatCount, sm.cfg.EnableReplay, len(task.entry.ReplayHistory))
@@ -572,6 +626,9 @@ func (sm *StageManager) handleTaskRepeats(ctx context.Context, task *validationT
 					result.VerificationSkippedValidatedPairs = summary.SkippedValidatedPairs
 				}
 			} else {
+				if sm.reproductionBackoffStore != nil {
+					sm.reproductionBackoffStore.RecordCollection(task.entry, nil)
+				}
 				if sm.cfg.TargetVarNamePair != "" {
 					logTargetCollectionSummary(task, result, originalPairs, nil, sm.cfg.TargetVarNamePair, sm.stable, sm.cfg.EnableReplay)
 				}
@@ -728,6 +785,18 @@ func (sm *StageManager) shouldSkipEntry(entry *fuzzer.UAFCorpusEntry) (skip bool
 	return false, ""
 }
 
+func (sm *StageManager) shouldDeferCollectionMiss(entry *fuzzer.UAFCorpusEntry) bool {
+	if !sm.cfg.EnableCollectionMissBackoff || sm.reproductionBackoffStore == nil ||
+		sm.cfg.TargetVarNamePair != "" || sm.cfg.TargetCorpusKey != "" {
+		return false
+	}
+	deferEntry, probability := sm.reproductionBackoffStore.ShouldDeferEntry(entry, rand.Float64)
+	if deferEntry {
+		log.Logf(0, "uafvalidate: soft-defer entry after collection misses probability=%.2f", probability)
+	}
+	return deferEntry
+}
+
 func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTask {
 	// Debug: log incoming entry history status
 	if entry != nil {
@@ -786,6 +855,9 @@ func (sm *StageManager) prepareTask(entry *fuzzer.UAFCorpusEntry) *validationTas
 			}
 			return nil
 		}
+	}
+	if sm.shouldDeferCollectionMiss(clone) {
+		return nil
 	}
 
 	key := validationTaskKey(entryKey, clone)
@@ -897,6 +969,9 @@ func (sm *StageManager) prepareTaskRef(ref *ValidationEntryRef) *validationTask 
 			}
 			return nil
 		}
+	}
+	if sm.shouldDeferCollectionMiss(lightEntry) {
+		return nil
 	}
 
 	sm.mu.Lock()
@@ -1040,6 +1115,11 @@ func (sm *StageManager) dispatchVarNameSchedule(task *validationTask) {
 	// Register task in entryStore
 	sm.entryStore[task.key] = task
 	sm.entryVarNames[task.key] = vnKeys
+	families := extractValidationFamilyKeys(task.entry)
+	if len(families) == 0 {
+		families = []string{"__no_pairs__"}
+	}
+	sm.entryFamilies[task.key] = families
 
 	// Add to each VarName group (with optional history-based sorting)
 	for _, vnKey := range vnKeys {
@@ -1119,6 +1199,35 @@ func (sm *StageManager) extractVarNameKeys(entry *fuzzer.UAFCorpusEntry) []strin
 	return keys
 }
 
+// extractValidationFamilyKeys returns order-independent VarName families for
+// concurrency control. The scheduler and backoff store intentionally share the
+// same family identity.
+func extractValidationFamilyKeys(entry *fuzzer.UAFCorpusEntry) []string {
+	if entry == nil {
+		return nil
+	}
+	seen := make(map[string]struct{})
+	var keys []string
+	add := func(pair *ddrd.MayUAFPair) {
+		key := canonicalVarNameFamilyKey(pair)
+		if key == "" {
+			return
+		}
+		if _, exists := seen[key]; exists {
+			return
+		}
+		seen[key] = struct{}{}
+		keys = append(keys, key)
+	}
+	for _, pair := range entry.Pairs {
+		add(pair)
+	}
+	if len(keys) == 0 && (entry.PairBasicInfo.FreeAccessName != 0 || entry.PairBasicInfo.UseAccessName != 0) {
+		add(&entry.PairBasicInfo)
+	}
+	return keys
+}
+
 // rebuildSortedVarNames rebuilds the sorted VarName list by ascending count.
 func (sm *StageManager) rebuildSortedVarNames() {
 	// Collect VarNames with non-zero counts
@@ -1146,6 +1255,9 @@ func (sm *StageManager) pickNextVarNameTask() *validationTask {
 	if len(sm.sortedVarNames) == 0 || len(sm.entryStore) == 0 {
 		return nil
 	}
+	if sm.cfg.EnableThresholdAwareValidationPriority {
+		return sm.pickThresholdAwareTaskLocked()
+	}
 
 	// Try each VarName in round-robin order
 	for attempts := 0; attempts < len(sm.sortedVarNames); attempts++ {
@@ -1161,45 +1273,177 @@ func (sm *StageManager) pickNextVarNameTask() *validationTask {
 			continue
 		}
 
-		// Find first valid entry in this group
-		for len(entryKeys) > 0 {
-			entryKey := entryKeys[0]
-			entryKeys = entryKeys[1:]
-			sm.varNameGroups[vnKey] = entryKeys
-
-			task, ok := sm.entryStore[entryKey]
+		// Find the first valid entry whose canonical families have capacity.
+		// Blocked entries stay in the group and are reconsidered after an active
+		// task completes; they are never dropped by this concurrency cap.
+		for index := 0; index < len(entryKeys); {
+			entryKey := entryKeys[index]
+			_, ok := sm.entryStore[entryKey]
 			if !ok {
-				// Entry already processed, skip
+				entryKeys = append(entryKeys[:index], entryKeys[index+1:]...)
+				sm.varNameGroups[vnKey] = entryKeys
+				continue
+			}
+			if !sm.familyCapacityAvailableLocked(entryKey) {
+				index++
 				continue
 			}
 
-			// Remove entry from all VarName groups
-			for _, otherVN := range sm.entryVarNames[entryKey] {
-				if otherVN != vnKey {
-					sm.removeEntryFromGroup(otherVN, entryKey)
-				}
-			}
-
-			// Update counts
-			for _, vn := range sm.entryVarNames[entryKey] {
-				sm.varNameCounts[vn]--
-			}
-
-			// Remove from stores
-			delete(sm.entryStore, entryKey)
-			delete(sm.entryVarNames, entryKey)
-
-			// Rebuild sorted list (counts changed)
-			sm.rebuildSortedVarNames()
-
-			log.Logf(0, "uafvalidate: vn-pick key=%s from_vn=%s remaining_entries=%d",
-				entryKey, vnKey, len(sm.entryStore))
-
-			return task
+			return sm.activateVarNameTaskLocked(entryKey, vnKey)
 		}
 	}
 
 	return nil
+}
+
+type thresholdTaskPriority struct {
+	tier       int
+	timeDiffNs uint64
+	history    int
+	entryKey   string
+}
+
+func (sm *StageManager) pickThresholdAwareTaskLocked() *validationTask {
+	thresholdUs := int64(0)
+	if sm.cfg.CurrentThresholdUs != nil {
+		thresholdUs = sm.cfg.CurrentThresholdUs()
+	}
+	var best *thresholdTaskPriority
+	for entryKey, task := range sm.entryStore {
+		if task == nil || !sm.familyCapacityAvailableLocked(entryKey) {
+			continue
+		}
+		priority := sm.thresholdPriorityLocked(entryKey, task, thresholdUs)
+		if best == nil || priority.less(*best) {
+			candidate := priority
+			best = &candidate
+		}
+	}
+	if best == nil {
+		return nil
+	}
+	fromVN := ""
+	if names := sm.entryVarNames[best.entryKey]; len(names) != 0 {
+		fromVN = names[0]
+	}
+	log.Logf(0, "uafvalidate: threshold-priority key=%s tier=%d time_diff_ns=%d threshold_us=%d",
+		best.entryKey, best.tier, best.timeDiffNs, thresholdUs)
+	return sm.activateVarNameTaskLocked(best.entryKey, fromVN)
+}
+
+func (sm *StageManager) thresholdPriorityLocked(entryKey string, task *validationTask,
+	thresholdUs int64) thresholdTaskPriority {
+	timeDiffNs := validationTaskMinimumTimeDiffNs(task)
+	inThreshold := thresholdUs <= 0 || (timeDiffNs != 0 && timeDiffNs <= uint64(thresholdUs)*1000)
+	if timeDiffNs == 0 && task != nil && task.entry != nil && task.entry.AdmissionThresholdUs > 0 {
+		inThreshold = thresholdUs <= 0 || task.entry.AdmissionThresholdUs <= thresholdUs
+		timeDiffNs = uint64(task.entry.AdmissionThresholdUs) * 1000
+	}
+	novel := false
+	for _, family := range sm.entryFamilies[entryKey] {
+		if _, seen := sm.scheduledFamilies[family]; !seen {
+			novel = true
+			break
+		}
+	}
+	tier := 3
+	if inThreshold && novel {
+		tier = 0
+	} else if inThreshold {
+		tier = 1
+	} else if novel {
+		tier = 2
+	}
+	return thresholdTaskPriority{
+		tier: tier, timeDiffNs: timeDiffNs, history: task.historyCount, entryKey: entryKey,
+	}
+}
+
+func (priority thresholdTaskPriority) less(other thresholdTaskPriority) bool {
+	if priority.tier != other.tier {
+		return priority.tier < other.tier
+	}
+	if priority.timeDiffNs != other.timeDiffNs {
+		if priority.timeDiffNs == 0 {
+			return false
+		}
+		if other.timeDiffNs == 0 {
+			return true
+		}
+		return priority.timeDiffNs < other.timeDiffNs
+	}
+	if priority.history != other.history {
+		return priority.history < other.history
+	}
+	return priority.entryKey < other.entryKey
+}
+
+func validationTaskMinimumTimeDiffNs(task *validationTask) uint64 {
+	if task == nil {
+		return 0
+	}
+	minimum := uint64(0)
+	add := func(pair *ddrd.MayUAFPair) {
+		if pair == nil || pair.TimeDiff == 0 {
+			return
+		}
+		if minimum == 0 || pair.TimeDiff < minimum {
+			minimum = pair.TimeDiff
+		}
+	}
+	if task.entry != nil {
+		for _, pair := range task.entry.Pairs {
+			add(pair)
+		}
+		add(&task.entry.PairBasicInfo)
+	}
+	if task.ref != nil {
+		add(&task.ref.Pair)
+	}
+	return minimum
+}
+
+func (sm *StageManager) activateVarNameTaskLocked(entryKey, fromVN string) *validationTask {
+	task := sm.entryStore[entryKey]
+	if task == nil {
+		return nil
+	}
+	families := sm.entryFamilies[entryKey]
+	if sm.cfg.MaxConcurrentPerVarName > 0 {
+		task.scheduleFamilies = append([]string(nil), families...)
+		for _, family := range families {
+			sm.activeFamilies[family]++
+		}
+	}
+	for _, family := range families {
+		sm.scheduledFamilies[family] = struct{}{}
+	}
+	for _, vn := range sm.entryVarNames[entryKey] {
+		sm.removeEntryFromGroup(vn, entryKey)
+		sm.varNameCounts[vn]--
+	}
+	delete(sm.entryStore, entryKey)
+	delete(sm.entryVarNames, entryKey)
+	delete(sm.entryFamilies, entryKey)
+	sm.rebuildSortedVarNames()
+	log.Logf(0, "uafvalidate: vn-pick key=%s from_vn=%s remaining_entries=%d",
+		entryKey, fromVN, len(sm.entryStore))
+	return task
+}
+
+// familyCapacityAvailableLocked reports whether every family in an entry can
+// reserve one active slot. Must be called with sm.mu held.
+func (sm *StageManager) familyCapacityAvailableLocked(entryKey string) bool {
+	limit := sm.cfg.MaxConcurrentPerVarName
+	if limit <= 0 {
+		return true
+	}
+	for _, family := range sm.entryFamilies[entryKey] {
+		if sm.activeFamilies[family] >= limit {
+			return false
+		}
+	}
+	return true
 }
 
 // removeEntryFromGroup removes an entry key from a VarName group.
@@ -1218,9 +1462,20 @@ func (sm *StageManager) complete(task *validationTask) {
 		return
 	}
 	sm.mu.Lock()
+	for _, family := range task.scheduleFamilies {
+		if count := sm.activeFamilies[family]; count <= 1 {
+			delete(sm.activeFamilies, family)
+		} else {
+			sm.activeFamilies[family] = count - 1
+		}
+	}
+	task.scheduleFamilies = nil
 	delete(sm.pending, task.key)
 	log.Logf(0, "uafvalidate: complete key=%s pending=%d closed=%t tasksClosed=%t", task.key, len(sm.pending), sm.closed, sm.tasksClosed)
 	sm.maybeCloseTasksLocked()
+	if sm.vnScheduleCond != nil {
+		sm.vnScheduleCond.Broadcast()
+	}
 	sm.mu.Unlock()
 }
 
@@ -1368,15 +1623,18 @@ func (sm *StageManager) buildReplayRequests(task *validationTask) []*ExecutionRe
 // Returns the result of the main (last) request.
 func (sm *StageManager) runBatchReplayAndCollect(ctx context.Context, exec Executor, task *validationTask, delays []int64) (*ExecutionResult, error) {
 	reqs := sm.buildReplayRequests(task)
+	collectionThresholdUs := validationCollectionThresholdUs(task.entry, sm.cfg.CollectionThresholdFloorUs)
 
 	// Add main collection request as the last request
 	mainReq := &ExecutionRequest{
-		Entry:  task.entry,
-		Delays: delays,
+		Entry:             task.entry,
+		Delays:            delays,
+		TimingThresholdUs: collectionThresholdUs,
 	}
 	reqs = append(reqs, mainReq)
 
-	log.Logf(0, "[batch] executing key=%s replay=%d main=1 total=%d", task.key, len(reqs)-1, len(reqs))
+	log.Logf(0, "[batch] executing key=%s replay=%d main=1 total=%d collection_threshold=%dus admission_threshold=%dus",
+		task.key, len(reqs)-1, len(reqs), collectionThresholdUs, task.entry.AdmissionThresholdUs)
 	startTime := time.Now()
 
 	// Run all requests in a single batch (single RPC session)
@@ -1392,6 +1650,80 @@ func (sm *StageManager) runBatchReplayAndCollect(ctx context.Context, exec Execu
 		return results[len(results)-1], nil
 	}
 	return nil, fmt.Errorf("batch execution produced no results")
+}
+
+func validationAdmissionThresholdUs(entry *fuzzer.UAFCorpusEntry) int64 {
+	if entry != nil && entry.AdmissionThresholdUs > 0 {
+		return entry.AdmissionThresholdUs
+	}
+	return defaultValidationCollectionThresholdUs
+}
+
+func validationCollectionThresholdUs(entry *fuzzer.UAFCorpusEntry, floorUs int64) int64 {
+	thresholdUs := validationAdmissionThresholdUs(entry)
+	if floorUs > thresholdUs {
+		return floorUs
+	}
+	return thresholdUs
+}
+
+func makeValidatedPairMetadata(entry *fuzzer.UAFCorpusEntry, pair ddrd.MayUAFPair,
+	collectionThresholdUs int64) validatedPairMetadata {
+	originMatch := classifyValidatedPairOrigin(entry, pair)
+	admissionThresholdUs := int64(0)
+	if entry != nil {
+		admissionThresholdUs = entry.AdmissionThresholdUs
+	}
+	return validatedPairMetadata{
+		AdmissionThresholdUs:  admissionThresholdUs,
+		CollectionThresholdUs: collectionThresholdUs,
+		ObservedTimeDiffNs:    pair.TimeDiff,
+		OriginMatch:           originMatch,
+		Expanded:              originMatch != "exact",
+	}
+}
+
+func classifyValidatedPairOrigin(entry *fuzzer.UAFCorpusEntry, runtime ddrd.MayUAFPair) string {
+	if entry == nil {
+		return "none"
+	}
+	originalPairs := entry.Pairs
+	if len(originalPairs) == 0 && entry.PairBasicInfo.UAFPairID() != 0 {
+		originalPairs = []*ddrd.MayUAFPair{&entry.PairBasicInfo}
+	}
+	for _, original := range originalPairs {
+		if original != nil && samePairIdentity(runtime, *original, true) {
+			return "exact"
+		}
+	}
+	for _, original := range originalPairs {
+		if original != nil && sameVarNamePair(runtime, *original, true) {
+			return "varname"
+		}
+	}
+	return "none"
+}
+
+func samePairIdentity(a, b ddrd.MayUAFPair, allowReverse bool) bool {
+	if a.FreeAccessName == b.FreeAccessName && a.UseAccessName == b.UseAccessName &&
+		a.FreeCallStack == b.FreeCallStack && a.UseCallStack == b.UseCallStack {
+		return true
+	}
+	return allowReverse && a.FreeAccessName == b.UseAccessName && a.UseAccessName == b.FreeAccessName &&
+		a.FreeCallStack == b.UseCallStack && a.UseCallStack == b.FreeCallStack
+}
+
+func sameVarNamePair(a, b ddrd.MayUAFPair, allowReverse bool) bool {
+	if a.FreeAccessName == b.FreeAccessName && a.UseAccessName == b.UseAccessName {
+		return true
+	}
+	return allowReverse && a.FreeAccessName == b.UseAccessName && a.UseAccessName == b.FreeAccessName
+}
+
+func logValidatedPairMetadata(taskKey string, pair ddrd.MayUAFPair, metadata validatedPairMetadata) {
+	log.Logf(0, "uafvalidate: validated pair metadata key=%s pair=%s admission_threshold=%dus collection_threshold=%dus observed_time_diff=%dns origin_match=%s expanded=%t",
+		taskKey, pairKey(pair), metadata.AdmissionThresholdUs, metadata.CollectionThresholdUs,
+		metadata.ObservedTimeDiffNs, metadata.OriginMatch, metadata.Expanded)
 }
 
 // runBatchReplayAndVerify combines replay history + verification request(s) into a single batch execution.
@@ -1712,7 +2044,7 @@ func maxSN(a, b int32) int32 {
 	return a
 }
 
-func logSNDriftSummary(task *validationTask, stablePairs []StablePairWithDelays, originalPairs []*ddrd.MayUAFPair, originMatchMode string, configuredRange int) {
+func logSNDriftSummary(task *validationTask, stablePairs []StablePairWithDelays, originalPairs []*ddrd.MayUAFPair, originMatchMode string, configuredRange, stableThreshold int) {
 	if task == nil || len(stablePairs) == 0 || len(task.pairSNSamples) == 0 {
 		return
 	}
@@ -1816,7 +2148,7 @@ func logSNDriftSummary(task *validationTask, stablePairs []StablePairWithDelays,
 	}
 	log.Logf(0, "uafvalidate: sn-drift summary key=%s stable_pairs=%d samples=%d with_original=%d full_observed=%d/%d repeat=%d stable_threshold=%d exact_sn=%d within_1=%d within_2=%d within_4=%d within_8=%d within_config_range=%d config_range=%s max_abs_delta=%d exact_tid=%d stable_tid=%d multi_tid=%d max_free_tid_values=%d max_use_tid_values=%d",
 		task.key, len(stablePairs), withSamples, withOriginal, fullObserved, withSamples,
-		expectedRepeats, requiredStableCount(expectedRepeats), exactSN, within1, within2, within4, within8,
+		expectedRepeats, stableThreshold, exactSN, within1, within2, within4, within8,
 		withinConfig, configField, maxAbsObserved, exactTID, stableTID, multiTID, maxFreeTIDVals, maxUseTIDVals)
 }
 
@@ -2640,9 +2972,12 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 		for attemptIndex, attempt := range attempts {
 			attemptMode = attempt.mode
 			pairCopy = attempt.pair
-			if sm.cfg.DisableAccessDelay {
-				pairCopy.TimeDiff = 0
-			}
+			baseAccessDelayUs := int64(pair.TimeDiff / 1000)
+			actualAccessDelayUs := verificationAccessDelayUsForModeAndThreshold(
+				baseAccessDelayUs, sm.cfg, attemptMode, validationAdmissionThresholdUs(task.entry))
+			log.Logf(0, "uafvalidate: access-delay-plan key=%s mode=%s observed_dt_us=%d manager_delay_us=%d admission_threshold_us=%d",
+				task.key, attemptMode, baseAccessDelayUs, actualAccessDelayUs, validationAdmissionThresholdUs(task.entry))
+			pairCopy.TimeDiff = uint64(actualAccessDelayUs) * 1000
 			req = &ExecutionRequest{
 				Entry:                 task.entry,
 				Delays:                sm.delay.BuildDelays(task.entry),
@@ -2651,6 +2986,7 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 				DisableDdrd:           !sm.cfg.VerifyCollectPairs,
 				StopOnSuccess:         true,
 				ObserveTargetPairOnly: sm.cfg.VerifyCollectPairs,
+				AccessDelayUs:         actualAccessDelayUs,
 				TargetDelaySide:       sm.cfg.TargetDelaySide,
 				TargetDelaySideKernel: TargetDelaySideID(sm.cfg.TargetDelaySide),
 				TargetDelayMode:       sm.cfg.TargetDelayMode,
@@ -2772,8 +3108,11 @@ func (sm *StageManager) runVerificationPhase(ctx context.Context, task *validati
 				}
 			}
 
-			// Serialize the validated entry including triggering programs and minimized history
-			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
+			// Serialize the validated entry including triggering programs and minimized history.
+			metadata := makeValidatedPairMetadata(task.entry, pair,
+				validationCollectionThresholdUs(task.entry, sm.cfg.CollectionThresholdFloorUs))
+			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory, &metadata)
+			logValidatedPairMetadata(task.key, pair, metadata)
 			sm.markValidated(fullKey, reportData)
 			if sm.cfg.PairStatusSink != nil {
 				sm.cfg.PairStatusSink.MarkPairValidated(pair, reportData)
@@ -2936,13 +3275,11 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 			startDelays = nil
 			actualStartDelayUs = 0
 		}
-		actualAccessDelayUs := verificationAccessDelayUs(spd.AccessDelayUs, sm.cfg)
-
 		// ========== Execute verification ==========
-		log.Logf(1, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus access_delay=%dus",
+		log.Logf(1, "uafvalidate: verifying pair %d/%d for key=%s vnkey=%016x-%016x-%016x-%016x start_delay=%dus base_access_delay=%dus",
 			i+1, len(stablePairs), task.key,
 			pair.FreeAccessName, pair.UseAccessName, pair.FreeCallStack, pair.UseCallStack,
-			actualStartDelayUs, actualAccessDelayUs)
+			actualStartDelayUs, spd.AccessDelayUs)
 
 		var (
 			pairCopy    ddrd.MayUAFPair
@@ -2956,6 +3293,10 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 		for attemptIndex, attempt := range attempts {
 			attemptMode = attempt.mode
 			pairCopy = attempt.pair
+			actualAccessDelayUs := verificationAccessDelayUsForModeAndThreshold(
+				spd.AccessDelayUs, sm.cfg, attemptMode, validationAdmissionThresholdUs(task.entry))
+			log.Logf(0, "uafvalidate: access-delay-plan key=%s mode=%s observed_dt_us=%d manager_delay_us=%d admission_threshold_us=%d",
+				task.key, attemptMode, spd.AccessDelayUs, actualAccessDelayUs, validationAdmissionThresholdUs(task.entry))
 			pairCopy.TimeDiff = uint64(actualAccessDelayUs) * 1000 // Convert to nanoseconds for ukcDelayMicros
 
 			req = &ExecutionRequest{
@@ -2973,8 +3314,8 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				TargetDelayMode:       sm.cfg.TargetDelayMode,
 				TargetDelayModeKernel: TargetDelayModeID(sm.cfg.TargetDelayMode),
 			}
-			log.Logf(1, "uafvalidate: target match attempt key=%s mode=%s target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
-				task.key, attemptMode, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
+			log.Logf(1, "uafvalidate: target match attempt key=%s mode=%s access_delay=%dus target_delay_side=%s target_delay_mode=%s stack=(free:%016x use:%016x) sn=(free:%d use:%d) sn_range=(free:%d-%d use:%d-%d) tid=(free:%d use:%d)",
+				task.key, attemptMode, actualAccessDelayUs, req.TargetDelaySide, req.TargetDelayMode, pairCopy.FreeCallStack, pairCopy.UseCallStack,
 				pairCopy.FreeSN, pairCopy.UseSN, pairCopy.FreeSNMin, pairCopy.FreeSNMax,
 				pairCopy.UseSNMin, pairCopy.UseSNMax, pairCopy.FreeTid, pairCopy.UseTid)
 			execRes, runErr = sm.runVerificationAttempt(ctx, task, req, attemptMode)
@@ -3100,8 +3441,11 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 				}
 			}
 
-			// Serialize the validated entry including triggering programs and minimized history
-			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory)
+			// Serialize the validated entry including triggering programs and minimized history.
+			metadata := makeValidatedPairMetadata(task.entry, pair,
+				validationCollectionThresholdUs(task.entry, sm.cfg.CollectionThresholdFloorUs))
+			reportData := serializeValidatedEntryWithHistory(execRes, task.entry, minimizedHistory, &metadata)
+			logValidatedPairMetadata(task.key, pair, metadata)
 
 			// In debug mode, only log but don't update databases
 			if debugMode {
@@ -3186,13 +3530,58 @@ func (sm *StageManager) runVerificationPhaseWithDelays(ctx context.Context, task
 }
 
 func verificationAccessDelayUs(accessDelayUs int64, cfg Config) int64 {
-	if cfg.VerifyAccessDelayMinUs > 0 && accessDelayUs < cfg.VerifyAccessDelayMinUs {
-		accessDelayUs = cfg.VerifyAccessDelayMinUs
-	}
+	return verificationAccessDelayUsForMode(accessDelayUs, cfg, "")
+}
+
+func verificationAccessDelayUsForMode(accessDelayUs int64, cfg Config, attemptMode string) int64 {
+	return verificationAccessDelayUsForModeAndThreshold(accessDelayUs, cfg, attemptMode, 0)
+}
+
+func verificationAccessDelayUsForModeAndThreshold(accessDelayUs int64, cfg Config,
+	attemptMode string, admissionThresholdUs int64) int64 {
 	if cfg.DisableAccessDelay {
 		return 0
 	}
+	mode := NormalizeTargetMatchMode(attemptMode)
+	if mode == TargetMatchModeStackOnly && cfg.VerifyStackAccessDelayMultiplier > 0 {
+		accessDelayUs = saturatingDelayMultiply(accessDelayUs, cfg.VerifyStackAccessDelayMultiplier)
+	} else if mode == TargetMatchModeStackOnly && cfg.VerifyStackAccessDelayUs > 0 {
+		return cfg.VerifyStackAccessDelayUs
+	}
+	if isPreciseDelayMode(mode) && cfg.VerifyAccessDelayMultiplier > 0 {
+		accessDelayUs = saturatingDelayMultiply(accessDelayUs, cfg.VerifyAccessDelayMultiplier)
+	} else if isPreciseDelayMode(mode) && cfg.VerifyAccessDelayNormalizeToThreshold &&
+		admissionThresholdUs > 0 && cfg.VerifyAccessDelayTargetUs > 0 {
+		accessDelayUs = saturatingDelayMultiply(accessDelayUs, cfg.VerifyAccessDelayTargetUs) /
+			admissionThresholdUs
+	}
+	floorUs := cfg.VerifyAccessDelayMinUs
+	if mode == TargetMatchModeStackOnly &&
+		cfg.VerifyStackAccessDelayMinUs > 0 {
+		floorUs = cfg.VerifyStackAccessDelayMinUs
+	}
+	if floorUs > 0 && accessDelayUs < floorUs {
+		accessDelayUs = floorUs
+	}
+	if isPreciseDelayMode(mode) && cfg.VerifyAccessDelayMaxUs > 0 &&
+		accessDelayUs > cfg.VerifyAccessDelayMaxUs {
+		accessDelayUs = cfg.VerifyAccessDelayMaxUs
+	}
 	return accessDelayUs
+}
+
+func saturatingDelayMultiply(delayUs, multiplier int64) int64 {
+	if delayUs <= 0 || multiplier <= 0 {
+		return 0
+	}
+	if delayUs > math.MaxInt64/multiplier {
+		return math.MaxInt64
+	}
+	return delayUs * multiplier
+}
+
+func isPreciseDelayMode(mode string) bool {
+	return mode == TargetMatchModeStrictSN || mode == TargetMatchModeSNRange
 }
 
 // buildStartDelaysFromPair builds barrier start delays array using the given start delay for proc 0
@@ -3302,12 +3691,13 @@ func serializeCrashReport(res *ExecutionResult) []byte {
 //	<program source>
 //	...
 func serializeValidatedEntry(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry) []byte {
-	return serializeValidatedEntryWithHistory(res, entry, nil)
+	return serializeValidatedEntryWithHistory(res, entry, nil, nil)
 }
 
 // serializeValidatedEntryWithHistory serializes the validated entry with optional minimized history.
 // If minimizedHistory is nil, uses entry.ReplayHistory.
-func serializeValidatedEntryWithHistory(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry, minimizedHistory []*fuzzer.BarrierExecutionRecord) []byte {
+func serializeValidatedEntryWithHistory(res *ExecutionResult, entry *fuzzer.UAFCorpusEntry,
+	minimizedHistory []*fuzzer.BarrierExecutionRecord, metadata *validatedPairMetadata) []byte {
 	var buf bytes.Buffer
 
 	// Section 1: Crash Report
@@ -3348,6 +3738,17 @@ func serializeValidatedEntryWithHistory(res *ExecutionResult, entry *fuzzer.UAFC
 	buf.WriteString(fmt.Sprintf("GroupSize: %d\n", entry.Barrier.GroupSize))
 	if len(entry.Barrier.ProcList) > 0 {
 		buf.WriteString(fmt.Sprintf("ProcList: %v\n", entry.Barrier.ProcList))
+	}
+
+	buf.WriteString("\n=== VALIDATION METADATA ===\n")
+	if metadata != nil {
+		buf.WriteString(fmt.Sprintf("AdmissionThresholdUs: %d\n", metadata.AdmissionThresholdUs))
+		buf.WriteString(fmt.Sprintf("CollectionThresholdUs: %d\n", metadata.CollectionThresholdUs))
+		buf.WriteString(fmt.Sprintf("ObservedTimeDiffNs: %d\n", metadata.ObservedTimeDiffNs))
+		buf.WriteString(fmt.Sprintf("OriginMatch: %s\n", metadata.OriginMatch))
+		buf.WriteString(fmt.Sprintf("Expanded: %t\n", metadata.Expanded))
+	} else {
+		buf.WriteString("<not recorded>\n")
 	}
 
 	// Section 4: Replay Plan (delays)

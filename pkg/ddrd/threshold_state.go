@@ -5,7 +5,13 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"syscall"
 	"time"
+)
+
+const (
+	ThresholdCounterUnitQueuePair   = "queue-pair-record"
+	ThresholdCounterUnitQueueFamily = "queue-varname-family"
 )
 
 // ThresholdSharedState is the cross-process communication file between fuzzer and validator.
@@ -18,6 +24,7 @@ type ThresholdSharedState struct {
 
 // ValidatorStats is written by the validation process.
 type ValidatorStats struct {
+	CounterUnit        string    `json:"counter_unit,omitempty"`
 	PendingCount       int       `json:"pending_count"`
 	ProcessedCount     int       `json:"processed_count"`
 	SuccessCount       int       `json:"success_count"`
@@ -28,6 +35,7 @@ type ValidatorStats struct {
 
 // FuzzerStats is written by the fuzzing process.
 type FuzzerStats struct {
+	CounterUnit          string    `json:"counter_unit,omitempty"`
 	CurrentThresholdUs   int64     `json:"current_threshold_us"`
 	MRPDiscoveryRatePerM float64   `json:"mrp_discovery_rate_per_min"`
 	TotalMRPsDiscovered  int       `json:"total_mrps_discovered"`
@@ -59,22 +67,41 @@ func ReadThresholdState(workdir string) (*ThresholdSharedState, error) {
 
 // WriteValidatorStats atomically updates the validator section of the shared state.
 func WriteValidatorStats(workdir string, stats ValidatorStats) error {
-	state, _ := ReadThresholdState(workdir)
-	if state == nil {
-		state = &ThresholdSharedState{}
-	}
-	state.Validator = stats
-	return writeThresholdState(workdir, state)
+	return withThresholdStateLock(workdir, func() error {
+		state, _ := ReadThresholdState(workdir)
+		if state == nil {
+			state = &ThresholdSharedState{}
+		}
+		state.Validator = stats
+		return writeThresholdState(workdir, state)
+	})
 }
 
 // WriteFuzzerStats atomically updates the fuzzer section of the shared state.
 func WriteFuzzerStats(workdir string, stats FuzzerStats) error {
-	state, _ := ReadThresholdState(workdir)
-	if state == nil {
-		state = &ThresholdSharedState{}
+	return withThresholdStateLock(workdir, func() error {
+		state, _ := ReadThresholdState(workdir)
+		if state == nil {
+			state = &ThresholdSharedState{}
+		}
+		state.Fuzzer = stats
+		return writeThresholdState(workdir, state)
+	})
+}
+
+func withThresholdStateLock(workdir string, update func() error) error {
+	lockPath := ThresholdStatePath(workdir) + ".lock"
+	lockFile, err := os.OpenFile(lockPath, os.O_CREATE|os.O_RDWR, 0644)
+	if err != nil {
+		return fmt.Errorf("open threshold state lock: %w", err)
 	}
-	state.Fuzzer = stats
-	return writeThresholdState(workdir, state)
+	defer lockFile.Close()
+
+	if err := syscall.Flock(int(lockFile.Fd()), syscall.LOCK_EX); err != nil {
+		return fmt.Errorf("lock threshold state: %w", err)
+	}
+	defer syscall.Flock(int(lockFile.Fd()), syscall.LOCK_UN)
+	return update()
 }
 
 func writeThresholdState(workdir string, state *ThresholdSharedState) error {

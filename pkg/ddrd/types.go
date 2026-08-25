@@ -1,6 +1,7 @@
 package ddrd
 
 import (
+	"fmt"
 	"math/bits"
 
 	"github.com/google/syzkaller/pkg/hash"
@@ -131,4 +132,22 @@ func UnorderedVarNamePairID(name1, name2 uint64) uint64 {
 		name1, name2 = name2, name1
 	}
 	return (name1 * 0x9E3779B97F4A7C15) ^ name2
+}
+
+// CanonicalVarNamePairKey returns an order-independent, collision-free string
+// key for one pair of static access names.
+func CanonicalVarNamePairKey(name1, name2 uint64) string {
+	if name1 > name2 {
+		name1, name2 = name2, name1
+	}
+	return fmt.Sprintf("%016x-%016x", name1, name2)
+}
+
+// VarNamePairKey returns the canonical family key for a concrete pair while
+// deliberately ignoring its stack contexts.
+func VarNamePairKey(pair *MayUAFPair) string {
+	if pair == nil {
+		return ""
+	}
+	return CanonicalVarNamePairKey(pair.FreeAccessName, pair.UseAccessName)
 }

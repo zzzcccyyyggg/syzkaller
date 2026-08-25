@@ -30,6 +30,9 @@ func TestThresholdControllerZeroConfigUsesDefaultEvalWindow(t *testing.T) {
 
 func TestThresholdControllerPaperDefaults(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
+	if config.CounterUnit != ddrd.ThresholdCounterUnitQueuePair {
+		t.Fatalf("CounterUnit: got %q, want %q", config.CounterUnit, ddrd.ThresholdCounterUnitQueuePair)
+	}
 
 	if config.EvalWindowSeconds != 30 {
 		t.Fatalf("EvalWindowSeconds: got %d, want 30", config.EvalWindowSeconds)
@@ -51,6 +54,161 @@ func TestThresholdControllerPaperDefaults(t *testing.T) {
 	}
 	if config.RelaxationStepFraction != 0.05 {
 		t.Fatalf("RelaxationStepFraction: got %v, want 0.05", config.RelaxationStepFraction)
+	}
+}
+
+func TestThresholdControllerUsesVarNameFamilyUnit(t *testing.T) {
+	workdir := t.TempDir()
+	config := DefaultThresholdControllerConfig()
+	config.CounterUnit = ddrd.ThresholdCounterUnitQueueFamily
+	config.EvalWindowSeconds = 1
+	config.Workdir = workdir
+	counter := 1
+	tc := NewThresholdController(config, func() int { return counter })
+	tc.ForceThreshold(10000)
+
+	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
+		CounterUnit:  ddrd.ThresholdCounterUnitQueueFamily,
+		PendingCount: 100,
+		LastUpdate:   time.Now(),
+	})
+	counter = 1000
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
+	tc.Evaluate()
+
+	if tc.CurrentThreshold() >= 10000 {
+		t.Fatalf("family workload did not shrink threshold: got %d", tc.CurrentThreshold())
+	}
+	state, err := ddrd.ReadThresholdState(workdir)
+	if err != nil {
+		t.Fatalf("failed to read threshold state: %v", err)
+	}
+	if state.Fuzzer.CounterUnit != ddrd.ThresholdCounterUnitQueueFamily {
+		t.Fatalf("fuzzer counter unit = %q, want %q",
+			state.Fuzzer.CounterUnit, ddrd.ThresholdCounterUnitQueueFamily)
+	}
+}
+
+func TestThresholdControllerRandomPolicyIsDeterministicAndBounded(t *testing.T) {
+	config := DefaultThresholdControllerConfig()
+	config.Policy = ThresholdPolicyRandom
+	config.RandomSeed = 1592594996
+	config.InitialThresholdUs = 1000
+	config.MinThresholdUs = 50
+	config.MaxThresholdUs = 10000
+	config.EvalWindowSeconds = 1
+
+	first := NewThresholdController(config, func() int { return 0 })
+	second := NewThresholdController(config, func() int { return 0 })
+	changed := false
+	for i := 0; i < 20; i++ {
+		for _, controller := range []*ThresholdController{first, second} {
+			controller.mu.Lock()
+			controller.lastEvalTime = time.Now().Add(-2 * time.Second)
+			controller.mu.Unlock()
+			controller.Evaluate()
+		}
+		got := first.CurrentThreshold()
+		if got != second.CurrentThreshold() {
+			t.Fatalf("same seed diverged at sample %d: %d vs %d", i, got, second.CurrentThreshold())
+		}
+		if got < config.MinThresholdUs || got > config.MaxThresholdUs {
+			t.Fatalf("sample %d out of bounds: %d", i, got)
+		}
+		changed = changed || got != config.InitialThresholdUs
+	}
+	if !changed {
+		t.Fatal("random policy never changed the threshold")
+	}
+}
+
+func TestThresholdControllerRandomPolicyIsUniform(t *testing.T) {
+	config := DefaultThresholdControllerConfig()
+	config.Policy = ThresholdPolicyRandom
+	config.RandomSeed = 1592594996
+	config.MinThresholdUs = 100
+	config.MaxThresholdUs = 2000
+
+	controller := NewThresholdController(config, func() int { return 0 })
+	const samples = 10000
+	var total int64
+	for i := 0; i < samples; i++ {
+		total += controller.sampleRandomThreshold()
+	}
+	mean := float64(total) / samples
+	if mean < 1030 || mean > 1070 {
+		t.Fatalf("random threshold mean %.2f is not near uniform midpoint 1050", mean)
+	}
+}
+
+func TestThresholdControllerRandomPolicyIgnoresValidatorFeedback(t *testing.T) {
+	configA := DefaultThresholdControllerConfig()
+	configA.Policy = ThresholdPolicyRandom
+	configA.RandomSeed = 7
+	configA.EvalWindowSeconds = 1
+	configA.Workdir = t.TempDir()
+	configB := configA
+	configB.Workdir = t.TempDir()
+
+	writeTestValidatorStats(t, configA.Workdir, ddrd.ValidatorStats{
+		PendingCount:   100000,
+		ProcessedCount: 0,
+		LastUpdate:     time.Now(),
+	})
+	writeTestValidatorStats(t, configB.Workdir, ddrd.ValidatorStats{
+		PendingCount:   0,
+		ProcessedCount: 100000,
+		LastUpdate:     time.Now(),
+	})
+
+	first := NewThresholdController(configA, func() int { return 10 })
+	second := NewThresholdController(configB, func() int { return 10 })
+	for _, controller := range []*ThresholdController{first, second} {
+		controller.mu.Lock()
+		controller.lastEvalTime = time.Now().Add(-2 * time.Second)
+		controller.mu.Unlock()
+		controller.Evaluate()
+	}
+	if first.CurrentThreshold() != second.CurrentThreshold() {
+		t.Fatalf("random policy depended on validator feedback: %d vs %d",
+			first.CurrentThreshold(), second.CurrentThreshold())
+	}
+}
+
+func TestThresholdControllerFixedPolicyReportsWithoutAdjusting(t *testing.T) {
+	workdir := t.TempDir()
+	config := DefaultThresholdControllerConfig()
+	config.Policy = ThresholdPolicyFixed
+	config.InitialThresholdUs = 1000
+	config.MinThresholdUs = 1000
+	config.MaxThresholdUs = 1000
+	config.EvalWindowSeconds = 1
+	config.Workdir = workdir
+
+	produced := 0
+	tc := NewThresholdController(config, func() int { return produced })
+	produced = 17
+	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
+		PendingCount: 100000,
+		LastUpdate:   time.Now(),
+	})
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
+	tc.Evaluate()
+
+	if got := tc.CurrentThreshold(); got != 1000 {
+		t.Fatalf("fixed threshold changed: got %d, want 1000", got)
+	}
+	state, err := ddrd.ReadThresholdState(workdir)
+	if err != nil {
+		t.Fatalf("failed to read threshold state: %v", err)
+	}
+	if state.Fuzzer.TotalMRPsDiscovered != 17 ||
+		state.Fuzzer.CounterUnit != ddrd.ThresholdCounterUnitQueuePair {
+		t.Fatalf("unexpected fixed-policy fuzzer stats: %+v", state.Fuzzer)
 	}
 }
 
@@ -208,6 +366,33 @@ func TestThresholdControllerIgnoresStaleValidatorStats(t *testing.T) {
 	}
 }
 
+func TestThresholdControllerIgnoresMismatchedCounterUnit(t *testing.T) {
+	workdir := t.TempDir()
+	config := DefaultThresholdControllerConfig()
+	config.EvalWindowSeconds = 1
+	config.Workdir = workdir
+
+	counter := 0
+	tc := NewThresholdController(config, func() int { return counter })
+	initial := tc.CurrentThreshold()
+	writeTestValidatorStats(t, workdir, ddrd.ValidatorStats{
+		CounterUnit:    "validation-task",
+		PendingCount:   100000,
+		ProcessedCount: 0,
+		LastUpdate:     time.Now(),
+	})
+
+	tc.mu.Lock()
+	tc.lastEvalTime = time.Now().Add(-2 * time.Second)
+	tc.mu.Unlock()
+	tc.Evaluate()
+
+	if tc.CurrentThreshold() < initial {
+		t.Fatalf("mismatched counter unit triggered shrink: got %d, initial %d",
+			tc.CurrentThreshold(), initial)
+	}
+}
+
 func TestThresholdControllerForceThreshold(t *testing.T) {
 	config := DefaultThresholdControllerConfig()
 	tc := NewThresholdController(config, func() int { return 0 })
@@ -248,6 +433,9 @@ func TestThresholdControllerWritesFuzzerStats(t *testing.T) {
 
 func writeTestValidatorStats(t *testing.T, workdir string, stats ddrd.ValidatorStats) {
 	t.Helper()
+	if stats.CounterUnit == "" {
+		stats.CounterUnit = ddrd.ThresholdCounterUnitQueuePair
+	}
 	state := &ddrd.ThresholdSharedState{Validator: stats}
 	data, err := json.MarshalIndent(state, "", "  ")
 	if err != nil {

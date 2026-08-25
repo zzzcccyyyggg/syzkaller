@@ -47,12 +47,13 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	}
 	pairs := []*ddrd.MayUAFPair{primary, secondary}
 	entry := &fuzzer.UAFCorpusEntry{
-		Prog:          progMain.Clone(),
-		Programs:      []*prog.Prog{progMain.Clone(), progAlt.Clone()},
-		PairBasicInfo: *primary,
-		Pairs:         pairs,
-		Signals:       ddrd.FromUAFPairs(pairs, ddrd.UAFSignalPrioHigh),
-		Barrier:       fuzzer.BarrierSnapshot{Participants: 0x3, ProcList: []int{0, 1}},
+		Prog:                 progMain.Clone(),
+		Programs:             []*prog.Prog{progMain.Clone(), progAlt.Clone()},
+		AdmissionThresholdUs: 2500,
+		PairBasicInfo:        *primary,
+		Pairs:                pairs,
+		Signals:              ddrd.FromUAFPairs(pairs, ddrd.UAFSignalPrioHigh),
+		Barrier:              fuzzer.BarrierSnapshot{Participants: 0x3, ProcList: []int{0, 1}},
 		ReplayPlan: fuzzer.UAFCorpusReplayPlan{
 			DelaysMicros: []int64{1500, 2500},
 		},
@@ -76,6 +77,9 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	}
 
 	got := loaded[0]
+	if got.AdmissionThresholdUs != entry.AdmissionThresholdUs {
+		t.Fatalf("admission threshold = %d, want %d", got.AdmissionThresholdUs, entry.AdmissionThresholdUs)
+	}
 	if got.Prog != nil {
 		t.Fatalf("expected primary program to be omitted when barrier programs are persisted")
 	}
@@ -133,6 +137,10 @@ func TestUAFCorpusStoreProgramsAndPlan(t *testing.T) {
 	}
 	if materialized == nil {
 		t.Fatalf("materialized entry is nil")
+	}
+	if materialized.AdmissionThresholdUs != entry.AdmissionThresholdUs {
+		t.Fatalf("streamed admission threshold = %d, want %d",
+			materialized.AdmissionThresholdUs, entry.AdmissionThresholdUs)
 	}
 	if len(materialized.Pairs) != 1 || materialized.Pairs[0] == nil || *materialized.Pairs[0] != *primary {
 		t.Fatalf("materialized pair mismatch: got=%+v want=%+v", materialized.Pairs, primary)

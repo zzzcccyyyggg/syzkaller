@@ -175,14 +175,22 @@ func TestUAFValidateQueueStorePrefersEntryWithShorterReplayHistory(t *testing.T)
 		{Timestamp: time.Unix(0, 4), GroupID: 2},
 	}
 
-	recordShort := observeQueueEntry(t, store, shortHistory, "record-short")
 	recordLong := observeQueueEntry(t, store, longHistory, "record-long")
+	recordShort := observeQueueEntry(t, store, shortHistory, "record-short")
 
-	if _, _, _, err := store.EnqueueRecord(recordLong); err != nil {
+	longResults, err := store.EnqueueRecords([]*RacePairRecord{recordLong})
+	if err != nil {
 		t.Fatalf("enqueue longHistory failed: %v", err)
 	}
-	if _, _, _, err := store.EnqueueRecord(recordShort); err != nil {
+	if len(longResults) != 1 || !longResults[0].RecordActivated {
+		t.Fatalf("initial enqueue activation = %+v, want one activated record", longResults)
+	}
+	shortResults, err := store.EnqueueRecords([]*RacePairRecord{recordShort})
+	if err != nil {
 		t.Fatalf("enqueue shortHistory failed: %v", err)
+	}
+	if len(shortResults) != 1 || !shortResults[0].Enqueued || shortResults[0].RecordActivated {
+		t.Fatalf("replacement activation = %+v, want enqueued without activation", shortResults)
 	}
 	if _, _, _, err := store.EnqueueRecord(recordLong); err != nil {
 		t.Fatalf("re-enqueue longHistory failed: %v", err)
@@ -448,10 +456,11 @@ func TestUAFValidateQueueStoreGroupsEntriesByCorpusRecord(t *testing.T) {
 	pairA := &ddrd.MayUAFPair{Signal: 1, FreeAccessName: 0x10, UseAccessName: 0x20, FreeCallStack: 0x30, UseCallStack: 0x40}
 	pairB := &ddrd.MayUAFPair{Signal: 2, FreeAccessName: 0x11, UseAccessName: 0x21, FreeCallStack: 0x31, UseCallStack: 0x41}
 	entry := &fuzzer.UAFCorpusEntry{
-		PairBasicInfo: *pairA,
-		Pairs:         []*ddrd.MayUAFPair{pairA, pairB},
-		ReplayHistory: []*fuzzer.BarrierExecutionRecord{{Timestamp: time.Unix(0, 1), GroupID: 1}},
-		Timestamp:     time.Unix(0, 1),
+		PairBasicInfo:        *pairA,
+		Pairs:                []*ddrd.MayUAFPair{pairA, pairB},
+		AdmissionThresholdUs: 2500,
+		ReplayHistory:        []*fuzzer.BarrierExecutionRecord{{Timestamp: time.Unix(0, 1), GroupID: 1}},
+		Timestamp:            time.Unix(0, 1),
 	}
 
 	records, err := store.pairIndex.ObserveEntry(entry, "record-shared")
@@ -485,6 +494,14 @@ func TestUAFValidateQueueStoreGroupsEntriesByCorpusRecord(t *testing.T) {
 	if group.HistoryCount != len(entry.ReplayHistory) {
 		t.Fatalf("unexpected grouped history count %d", group.HistoryCount)
 	}
+	if group.AdmissionThresholdUs != entry.AdmissionThresholdUs {
+		t.Fatalf("group admission threshold = %d, want %d", group.AdmissionThresholdUs, entry.AdmissionThresholdUs)
+	}
+	for _, item := range group.Items {
+		if item.AdmissionThresholdUs != entry.AdmissionThresholdUs {
+			t.Fatalf("item admission threshold = %d, want %d", item.AdmissionThresholdUs, entry.AdmissionThresholdUs)
+		}
+	}
 }
 
 func TestSplitQueuedUAFCorpusGroupsByPairLimit(t *testing.T) {
@@ -507,7 +524,7 @@ func TestSplitQueuedUAFCorpusGroupsByPairLimit(t *testing.T) {
 		})
 	}
 
-	chunks := SplitQueuedUAFCorpusGroups([]*QueuedUAFCorpusGroup{group}, 2)
+	chunks := SplitQueuedUAFCorpusGroups([]*QueuedUAFCorpusGroup{group}, 2, 0)
 	if len(chunks) != 3 {
 		t.Fatalf("expected 3 chunks, got %d", len(chunks))
 	}
@@ -530,6 +547,44 @@ func TestSplitQueuedUAFCorpusGroupsByPairLimit(t *testing.T) {
 	for i, key := range gotQueueKeys {
 		want := fmt.Sprintf("queue-%d", i)
 		if key != want {
+			t.Fatalf("queue key %d = %q, want %q", i, key, want)
+		}
+	}
+}
+
+func TestSplitQueuedUAFCorpusGroupsCapsTasksPerCorpus(t *testing.T) {
+	group := &QueuedUAFCorpusGroup{CorpusRecordID: "record-shared"}
+	for i := 0; i < 7; i++ {
+		pair := ddrd.MayUAFPair{
+			Signal:         uint64(i + 1),
+			FreeAccessName: uint64(0x10 + i),
+			UseAccessName:  uint64(0x20 + i),
+			FreeCallStack:  uint64(0x30 + i),
+			UseCallStack:   uint64(0x40 + i),
+		}
+		appendQueuedGroupItem(group, &QueuedUAFCorpusEntry{
+			Key:            fmt.Sprintf("queue-%d", i),
+			Seq:            uint64(i + 1),
+			PairKey:        fmt.Sprintf("pair-%d", i),
+			CorpusRecordID: group.CorpusRecordID,
+			Pair:           pair,
+		})
+	}
+
+	chunks := SplitQueuedUAFCorpusGroups([]*QueuedUAFCorpusGroup{group}, 2, 3)
+	if len(chunks) != 3 {
+		t.Fatalf("got %d chunks, want 3", len(chunks))
+	}
+	wantSizes := []int{3, 3, 1}
+	var keys []string
+	for i, chunk := range chunks {
+		if len(chunk.PairKeys) != wantSizes[i] {
+			t.Fatalf("chunk %d has %d pairs, want %d", i, len(chunk.PairKeys), wantSizes[i])
+		}
+		keys = append(keys, chunk.QueueKeys...)
+	}
+	for i, key := range keys {
+		if want := fmt.Sprintf("queue-%d", i); key != want {
 			t.Fatalf("queue key %d = %q, want %q", i, key, want)
 		}
 	}
@@ -619,6 +674,59 @@ func TestUAFValidateQueueStoreAckBatch(t *testing.T) {
 	}
 	if stats.Pending != 0 {
 		t.Fatalf("pending after AckBatch = %d, want 0", stats.Pending)
+	}
+}
+
+func TestUAFValidateQueueStoreFamilyLifecycle(t *testing.T) {
+	target, err := prog.GetTarget("test", "64")
+	if err != nil {
+		t.Fatalf("failed to get target: %v", err)
+	}
+	store, err := NewUAFValidateQueueStore(t.TempDir(), target)
+	if err != nil {
+		t.Fatalf("failed to create queue store: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := store.Close(); err != nil {
+			t.Fatalf("failed to close queue store: %v", err)
+		}
+	})
+
+	entryA := testQueueEntry(0x30, 0x40, 0x50, 0x60, time.Unix(0, 1))
+	entryB := testQueueEntry(0x30, 0x40, 0x51, 0x61, time.Unix(0, 2))
+	recordA := observeQueueEntry(t, store, entryA, "record-a")
+	recordB := observeQueueEntry(t, store, entryB, "record-b")
+	results, err := store.EnqueueRecords([]*RacePairRecord{recordA, recordB})
+	if err != nil {
+		t.Fatalf("EnqueueRecords failed: %v", err)
+	}
+	if len(results) != 2 {
+		t.Fatalf("EnqueueRecords returned %d results, want 2", len(results))
+	}
+	if !results[0].FamilyActivated || results[1].FamilyActivated {
+		t.Fatalf("family activation flags = %v/%v, want true/false",
+			results[0].FamilyActivated, results[1].FamilyActivated)
+	}
+	if families, err := store.FamilyCount(); err != nil || families != 1 {
+		t.Fatalf("FamilyCount = %d, %v; want 1, nil", families, err)
+	}
+
+	firstAck, err := store.AckBatchWithStats([]string{results[0].Key})
+	if err != nil {
+		t.Fatalf("first AckBatchWithStats failed: %v", err)
+	}
+	if firstAck.Entries != 1 || firstAck.CompletedFamilies != 0 {
+		t.Fatalf("first ack = %+v, want one entry and no completed family", firstAck)
+	}
+	secondAck, err := store.AckBatchWithStats([]string{results[1].Key})
+	if err != nil {
+		t.Fatalf("second AckBatchWithStats failed: %v", err)
+	}
+	if secondAck.Entries != 1 || secondAck.CompletedFamilies != 1 {
+		t.Fatalf("second ack = %+v, want one entry and one completed family", secondAck)
+	}
+	if families, err := store.FamilyCount(); err != nil || families != 0 {
+		t.Fatalf("FamilyCount after ack = %d, %v; want 0, nil", families, err)
 	}
 }
 

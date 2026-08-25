@@ -27,9 +27,10 @@ func TestRacePairIndexStoreTracksPairStateByHash(t *testing.T) {
 		UseCallStack:   0x40,
 	}
 	entry := &fuzzer.UAFCorpusEntry{
-		PairBasicInfo: *pair,
-		Pairs:         []*ddrd.MayUAFPair{pair},
-		Timestamp:     time.Unix(0, 1),
+		PairBasicInfo:        *pair,
+		Pairs:                []*ddrd.MayUAFPair{pair},
+		AdmissionThresholdUs: 2500,
+		Timestamp:            time.Unix(0, 1),
 	}
 
 	records, err := store.ObserveEntry(entry, "corpus-a")
@@ -42,6 +43,10 @@ func TestRacePairIndexStoreTracksPairStateByHash(t *testing.T) {
 	key := ddrd.RacePairKeyString(pair)
 	if records[0].PairKey != key {
 		t.Fatalf("pair key mismatch: got %q want %q", records[0].PairKey, key)
+	}
+	if records[0].AdmissionThresholdUs != entry.AdmissionThresholdUs {
+		t.Fatalf("admission threshold = %d, want %d",
+			records[0].AdmissionThresholdUs, entry.AdmissionThresholdUs)
 	}
 	if !store.ShouldQueue(records[0]) {
 		t.Fatalf("newly discovered pair should be queueable")

@@ -397,14 +397,15 @@ func (r *StreamingUAFCorpusReader) deserializeEntry(data []byte) (*fuzzer.UAFCor
 	}
 
 	entry := &fuzzer.UAFCorpusEntry{
-		CallIdx:        stored.CallIdx,
-		PairBasicInfo:  stored.Pair,
-		Signals:        sliceToSignal(stored.Signals),
-		Barrier:        stored.Barrier,
-		Timestamp:      stored.Timestamp,
-		Source:         fuzzer.PairSource(stored.Source),
-		AsyncMode:      stored.AsyncMode,
-		AsyncRaceCalls: stored.AsyncRaceCalls,
+		CallIdx:              stored.CallIdx,
+		AdmissionThresholdUs: stored.AdmissionThresholdUs,
+		PairBasicInfo:        stored.Pair,
+		Signals:              sliceToSignal(stored.Signals),
+		Barrier:              stored.Barrier,
+		Timestamp:            stored.Timestamp,
+		Source:               fuzzer.PairSource(stored.Source),
+		AsyncMode:            stored.AsyncMode,
+		AsyncRaceCalls:       stored.AsyncRaceCalls,
 	}
 
 	if len(stored.Pairs) != 0 {

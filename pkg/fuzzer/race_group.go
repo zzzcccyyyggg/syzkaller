@@ -37,7 +37,7 @@ type RaceGroupConfig struct {
 	AffinityWeight      float64 // Weight for affinity-based selection
 
 	// VarName Pair Registry
-	MaxStacksPerVarPair int // Max unique stack pairs per VarName pair (default: 100)
+	MaxStacksPerVarPair int // Max unique stack pairs per VarName pair (default: 10)
 
 	// A/B Testing: Random Baseline Mode
 	// When enabled, disables affinity learning
@@ -59,7 +59,7 @@ func DefaultRaceGroupConfig() RaceGroupConfig {
 		AffinityWeight:      0.2, // 20% weight for affinity
 
 		// VarName Pair Registry
-		MaxStacksPerVarPair: DefaultMaxStacksPerVarPair, // 100 stacks per VarName pair
+		MaxStacksPerVarPair: DefaultMaxStacksPerVarPair,
 	}
 }
 
@@ -327,15 +327,13 @@ func HasSharedNamespace(p1, p2 *prog.Prog) bool {
 	return false
 }
 
-
-
 // ============================================================================
-// VarName Pair Registry - Limits stacks per VarName pair (default: 100)
+// VarName Pair Registry - Limits stacks per VarName pair (default: 10)
 // ============================================================================
 
 // DefaultMaxStacksPerVarPair is the default maximum number of different stack pairs
 // to record for each (VarName1, VarName2) combination.
-const DefaultMaxStacksPerVarPair = 100
+const DefaultMaxStacksPerVarPair = DefaultMaxStacksPerVarnamePair
 
 // VarNamePairRegistry limits the number of stack pairs recorded per VarName pair.
 // This prevents unbounded growth while keeping diverse stack information.
@@ -364,7 +362,7 @@ type VarNamePairRegistry struct {
 
 // NewVarNamePairRegistry creates a new VarName pair registry.
 // maxStacks specifies the maximum number of different stack pairs per VarName pair.
-// If maxStacks <= 0, DefaultMaxStacksPerVarPair (100) is used.
+// If maxStacks <= 0, DefaultMaxStacksPerVarPair is used.
 func NewVarNamePairRegistry(maxStacks int) *VarNamePairRegistry {
 	if maxStacks <= 0 {
 		maxStacks = DefaultMaxStacksPerVarPair

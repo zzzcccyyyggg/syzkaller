@@ -437,6 +437,57 @@ func TestHandleDiscoveredBarrierPairsBypassesSoloFilterByDefault(t *testing.T) {
 	}
 }
 
+func TestHandleDiscoveredBarrierPairsEnforcesStackLimitBeforePersistence(t *testing.T) {
+	target, err := getTestTarget()
+	if err != nil {
+		t.Fatal(err)
+	}
+	p1, err := target.Deserialize([]byte("syz_test_fuzzer1()\n"), prog.NonStrict)
+	if err != nil {
+		t.Fatal(err)
+	}
+	p2 := p1.Clone()
+	req := &queue.Request{Prog: p1, ExecOpts: setFlags(flatrpc.ExecFlagCollectSignal)}
+	req.SetBarrier(0x3)
+	if err := req.SetBarrierPrograms([]*prog.Prog{p1, p2}); err != nil {
+		t.Fatal(err)
+	}
+
+	fuzzer := &Fuzzer{
+		Config: &Config{ModeUAF: true, MaxStacksPerVarNamePair: 2},
+		target: target,
+	}
+	raceConfig := DefaultRaceGroupConfig()
+	raceConfig.MaxStacksPerVarPair = 2
+	fuzzer.raceGroup = NewRaceGroupManager(raceConfig)
+	u := &uafMode{
+		fuzzer:  fuzzer,
+		queue:   &queue.PlainQueue{},
+		entries: make(map[string]*barrierSeed),
+		corpus:  newUAFCorpus(2),
+		pairs:   make(map[uint64]struct{}),
+	}
+	fuzzer.uaf = u
+
+	for index := uint64(0); index < 3; index++ {
+		fuzzer.handleDiscoveredBarrierPairs(req, &queue.Result{
+			Executor: queue.ExecutorID{VM: 1},
+		}, []*ddrd.MayUAFPair{
+			testMayUAFPair(0x10, 0x20, 0x100+index, 0x200+index),
+		}, SourceFuzz)
+	}
+
+	if got := len(u.entries); got != 2 {
+		t.Fatalf("persistable entries = %d, want stack cap 2", got)
+	}
+	if got := len(fuzzer.PendingUAFCorpusEntries()); got != 2 {
+		t.Fatalf("pending corpus entries = %d, want stack cap 2", got)
+	}
+	if varnames, stacks := fuzzer.raceGroup.GetVarPairStats(); varnames != 1 || stacks != 2 {
+		t.Fatalf("registry stats varnames=%d stacks=%d, want 1/2", varnames, stacks)
+	}
+}
+
 func TestPendingEntriesCompactsSyncedSeeds(t *testing.T) {
 	entry := &UAFCorpusEntry{
 		Pairs: []*ddrd.MayUAFPair{

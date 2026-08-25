@@ -35,18 +35,19 @@ type UAFCorpusStoreStats struct {
 }
 
 type storedUAFCorpusEntry struct {
-	Program       []byte                 `json:"program"`
-	Programs      [][]byte               `json:"programs,omitempty"`
-	CallIdx       int                    `json:"call_idx"`
-	Pair          ddrd.MayUAFPair        `json:"pair"`
-	Pairs         []ddrd.MayUAFPair      `json:"pairs,omitempty"`
-	Signals       []uint64               `json:"signals,omitempty"`
-	Barrier       fuzzer.BarrierSnapshot `json:"barrier"`
-	ReplayPlan    *storedReplayPlan      `json:"replay_plan,omitempty"`
-	Profile       *storedPairProfile     `json:"profile,omitempty"`
-	ReplayHistory []storedBarrierRecord  `json:"replay_history,omitempty"`
-	Timestamp     time.Time              `json:"timestamp"`
-	Source        int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
+	Program              []byte                 `json:"program"`
+	Programs             [][]byte               `json:"programs,omitempty"`
+	CallIdx              int                    `json:"call_idx"`
+	AdmissionThresholdUs int64                  `json:"admission_threshold_us,omitempty"`
+	Pair                 ddrd.MayUAFPair        `json:"pair"`
+	Pairs                []ddrd.MayUAFPair      `json:"pairs,omitempty"`
+	Signals              []uint64               `json:"signals,omitempty"`
+	Barrier              fuzzer.BarrierSnapshot `json:"barrier"`
+	ReplayPlan           *storedReplayPlan      `json:"replay_plan,omitempty"`
+	Profile              *storedPairProfile     `json:"profile,omitempty"`
+	ReplayHistory        []storedBarrierRecord  `json:"replay_history,omitempty"`
+	Timestamp            time.Time              `json:"timestamp"`
+	Source               int                    `json:"source,omitempty"` // 0=fuzz, 1=timing
 
 	// AsyncMode entries use intra-process threaded execution instead of cross-process barrier.
 	AsyncMode      bool   `json:"async_mode,omitempty"`
@@ -242,13 +243,14 @@ func (store *UAFCorpusStore) AddWithRefs(entries []*fuzzer.UAFCorpusEntry) ([]Ra
 
 func serializeUAFCorpusEntry(entry *fuzzer.UAFCorpusEntry) ([]byte, error) {
 	stored := storedUAFCorpusEntry{
-		CallIdx:        entry.CallIdx,
-		Pair:           entry.PairBasicInfo,
-		Barrier:        entry.Barrier,
-		Timestamp:      entry.Timestamp,
-		Source:         int(entry.Source),
-		AsyncMode:      entry.AsyncMode,
-		AsyncRaceCalls: entry.AsyncRaceCalls,
+		CallIdx:              entry.CallIdx,
+		AdmissionThresholdUs: entry.AdmissionThresholdUs,
+		Pair:                 entry.PairBasicInfo,
+		Barrier:              entry.Barrier,
+		Timestamp:            entry.Timestamp,
+		Source:               int(entry.Source),
+		AsyncMode:            entry.AsyncMode,
+		AsyncRaceCalls:       entry.AsyncRaceCalls,
 	}
 	if entry.Prog != nil && (len(entry.Programs) == 0 || entry.AsyncMode) {
 		stored.Program = entry.Prog.Serialize()
@@ -350,14 +352,15 @@ func (store *UAFCorpusStore) deserialize(data []byte) (*fuzzer.UAFCorpusEntry, e
 		return nil, err
 	}
 	entry := &fuzzer.UAFCorpusEntry{
-		CallIdx:        stored.CallIdx,
-		PairBasicInfo:  stored.Pair,
-		Signals:        sliceToSignal(stored.Signals),
-		Barrier:        stored.Barrier,
-		Timestamp:      stored.Timestamp,
-		Source:         fuzzer.PairSource(stored.Source),
-		AsyncMode:      stored.AsyncMode,
-		AsyncRaceCalls: stored.AsyncRaceCalls,
+		CallIdx:              stored.CallIdx,
+		AdmissionThresholdUs: stored.AdmissionThresholdUs,
+		PairBasicInfo:        stored.Pair,
+		Signals:              sliceToSignal(stored.Signals),
+		Barrier:              stored.Barrier,
+		Timestamp:            stored.Timestamp,
+		Source:               fuzzer.PairSource(stored.Source),
+		AsyncMode:            stored.AsyncMode,
+		AsyncRaceCalls:       stored.AsyncRaceCalls,
 	}
 	if len(stored.Pairs) != 0 {
 		entry.Pairs = make([]*ddrd.MayUAFPair, 0, len(stored.Pairs))

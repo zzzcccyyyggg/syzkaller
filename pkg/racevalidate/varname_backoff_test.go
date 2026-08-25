@@ -106,6 +106,16 @@ func TestVarNamePairKey(t *testing.T) {
 	if key != key2 {
 		t.Errorf("Different CallStack should produce same VarNamePairKey: %s vs %s", key, key2)
 	}
+
+	reversed := &ddrd.MayUAFPair{
+		FreeAccessName: pair.UseAccessName,
+		UseAccessName:  pair.FreeAccessName,
+		FreeCallStack:  pair.UseCallStack,
+		UseCallStack:   pair.FreeCallStack,
+	}
+	if reversedKey := VarNamePairKey(reversed); reversedKey != key {
+		t.Errorf("Reversed pair key = %s, want canonical key %s", reversedKey, key)
+	}
 }
 
 func TestBackoffScoreProgression(t *testing.T) {
@@ -229,6 +239,18 @@ func TestVarNameBackoffStore(t *testing.T) {
 	if !skip || prob != 1.0 || !stats.Verified {
 		t.Errorf("Verified pair should be skipped unconditionally: skip=%t prob=%.3f verified=%t",
 			skip, prob, stats.Verified)
+	}
+
+	reversed := &ddrd.MayUAFPair{
+		FreeAccessName: pair.UseAccessName,
+		UseAccessName:  pair.FreeAccessName,
+		FreeCallStack:  pair.UseCallStack,
+		UseCallStack:   pair.FreeCallStack,
+	}
+	skip, prob, reverseStats := store.ShouldSkip(reversed, func() float64 { return 0.99 })
+	if !skip || prob != 1.0 || !reverseStats.Verified {
+		t.Fatalf("reverse direction did not share verified state: skip=%t prob=%.2f stats=%+v",
+			skip, prob, reverseStats)
 	}
 }
 

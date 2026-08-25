@@ -383,6 +383,12 @@ func (cfg *Config) initUAFValidate() error {
 	if validate.MaxReplayHistory < 0 {
 		return fmt.Errorf("experimental.uaf_validate.max_replay_history must be >= 0")
 	}
+	if validate.MaxConcurrentPerVarName < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_concurrent_per_varname must be >= 0")
+	}
+	if validate.CollectionThresholdFloorUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.collection_threshold_floor_us must be >= 0")
+	}
 	if validate.TimeoutSeconds <= 0 {
 		validate.TimeoutSeconds = 90
 	}
@@ -392,8 +398,42 @@ func (cfg *Config) initUAFValidate() error {
 	if validate.VerifyAccessDelayMinUs < 0 {
 		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_min_us must be >= 0")
 	}
+	if validate.VerifyAccessDelayMultiplier < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_multiplier must be >= 0")
+	}
+	if validate.VerifyAccessDelayTargetUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_target_us must be >= 0")
+	}
+	if validate.VerifyAccessDelayMaxUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_max_us must be >= 0")
+	}
+	if validate.VerifyStackAccessDelayUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_stack_access_delay_us must be >= 0")
+	}
+	if validate.VerifyStackAccessDelayMultiplier < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_stack_access_delay_multiplier must be >= 0")
+	}
+	if validate.VerifyStackAccessDelayMinUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_stack_access_delay_min_us must be >= 0")
+	}
+	if validate.VerifyAccessDelayNormalizeToThreshold && validate.VerifyAccessDelayTargetUs == 0 {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_target_us must be > 0 when threshold normalization is enabled")
+	}
+	if validate.VerifyAccessDelayNormalizeToThreshold && validate.VerifyAccessDelayMultiplier > 0 {
+		return fmt.Errorf("experimental.uaf_validate threshold normalization and fixed access-delay multiplier are mutually exclusive")
+	}
+	if validate.VerifyStackAccessDelayUs > 0 && validate.VerifyStackAccessDelayMultiplier > 0 {
+		return fmt.Errorf("experimental.uaf_validate fixed stack delay and stack access-delay multiplier are mutually exclusive")
+	}
+	if validate.VerifyAccessDelayMaxUs > 0 && validate.VerifyAccessDelayMinUs > validate.VerifyAccessDelayMaxUs {
+		return fmt.Errorf("experimental.uaf_validate.verify_access_delay_min_us must not exceed verify_access_delay_max_us")
+	}
 	if validate.RepeatCount <= 0 {
 		validate.RepeatCount = 1
+	}
+	if validate.StablePairMinOccurrences < 0 ||
+		validate.StablePairMinOccurrences > validate.RepeatCount {
+		return fmt.Errorf("experimental.uaf_validate.stable_pair_min_occurrences must be in [0, repeat_count]")
 	}
 	if validate.TargetMatchMode == "" {
 		validate.TargetMatchMode = "sn-fallback"
@@ -441,6 +481,9 @@ func (cfg *Config) initUAFValidate() error {
 	}
 	if validate.MaxPairsPerTask == 0 {
 		validate.MaxPairsPerTask = 32
+	}
+	if validate.MaxTasksPerCorpus < 0 {
+		return fmt.Errorf("experimental.uaf_validate.max_tasks_per_corpus must be >= 0")
 	}
 	if validate.ExecutorProgramTimeoutSeconds < 0 {
 		return fmt.Errorf("experimental.uaf_validate.executor_program_timeout_seconds must be >= 0")

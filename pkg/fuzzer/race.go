@@ -42,7 +42,7 @@ type uafMode struct {
 // combinations tracked for each (FreeAccessName, UseAccessName) pair.
 // This matches the M1'/M2/M3 framework design in dedup_races.py.
 // Can be overridden by config.MaxStacksPerVarNamePair.
-const DefaultMaxStacksPerVarnamePair = 20
+const DefaultMaxStacksPerVarnamePair = 10
 
 type uafCorpus struct {
 	mu                  sync.RWMutex
@@ -79,21 +79,22 @@ type barrierSeed struct {
 }
 
 type serializedSeedEntry struct {
-	Program        []byte
-	Programs       [][]byte
-	CallIdx        int
-	Pairs          []ddrd.MayUAFPair
-	PairBasicInfo  ddrd.MayUAFPair
-	Signals        []uint64
-	Barrier        BarrierSnapshot
-	ReplayPlan     UAFCorpusReplayPlan
-	Profile        UAFPairProfile
-	Timestamp      time.Time
-	Kind           barrierSeedKind
-	Source         PairSource
-	ReplayHistory  []serializedBarrierExecutionRecord
-	AsyncMode      bool
-	AsyncRaceCalls [2]int
+	Program              []byte
+	Programs             [][]byte
+	CallIdx              int
+	AdmissionThresholdUs int64
+	Pairs                []ddrd.MayUAFPair
+	PairBasicInfo        ddrd.MayUAFPair
+	Signals              []uint64
+	Barrier              BarrierSnapshot
+	ReplayPlan           UAFCorpusReplayPlan
+	Profile              UAFPairProfile
+	Timestamp            time.Time
+	Kind                 barrierSeedKind
+	Source               PairSource
+	ReplayHistory        []serializedBarrierExecutionRecord
+	AsyncMode            bool
+	AsyncRaceCalls       [2]int
 }
 
 type serializedBarrierExecutionRecord struct {
@@ -105,18 +106,21 @@ type serializedBarrierExecutionRecord struct {
 
 // UAFCorpusEntry represents a single stored UAF seed within the fuzzer.
 type UAFCorpusEntry struct {
-	Prog          *prog.Prog
-	Programs      []*prog.Prog
-	CallIdx       int
-	Pairs         []*ddrd.MayUAFPair
-	PairBasicInfo ddrd.MayUAFPair
-	Signals       ddrd.UAFSignal
-	Barrier       BarrierSnapshot
-	ReplayPlan    UAFCorpusReplayPlan
-	Profile       UAFPairProfile
-	Timestamp     time.Time
-	Kind          barrierSeedKind
-	Source        PairSource // SourceFuzz or SourceTiming
+	Prog     *prog.Prog
+	Programs []*prog.Prog
+	CallIdx  int
+	// AdmissionThresholdUs is the MRP threshold used by the fuzz execution
+	// that admitted this entry into the schedule-worthy corpus.
+	AdmissionThresholdUs int64
+	Pairs                []*ddrd.MayUAFPair
+	PairBasicInfo        ddrd.MayUAFPair
+	Signals              ddrd.UAFSignal
+	Barrier              BarrierSnapshot
+	ReplayPlan           UAFCorpusReplayPlan
+	Profile              UAFPairProfile
+	Timestamp            time.Time
+	Kind                 barrierSeedKind
+	Source               PairSource // SourceFuzz or SourceTiming
 	// ReplayHistory contains the execution history leading up to this pair's discovery.
 	// This is used during validation to replay the system state before testing.
 	ReplayHistory []*BarrierExecutionRecord
@@ -468,10 +472,21 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 		return
 	}
 
-	// Determine history count before recording pairs
+	// Determine history count before recording pairs in the VarName registry.
+	// Recording first would make every retained stack look already known.
 	var historyCount int
 	if u.historyBuffer != nil && u.fuzzer.raceGroup != nil {
 		historyCount = u.determineHistoryCount(batch)
+	}
+
+	// Enforce the per-VarName stack budget before creating a corpus entry.
+	// Previously the uafCorpus accounting applied the limit after the entry had
+	// already become eligible for manager persistence and validation.
+	if u.fuzzer.raceGroup != nil {
+		batch = u.fuzzer.raceGroup.FilterRacePairs(batch)
+		if len(batch) == 0 {
+			return
+		}
 	}
 
 	isThreadBarrier := isThreadBarrierRequest(req)
@@ -501,6 +516,9 @@ func (u *uafMode) handleDiscoveredPairs(req *queue.Request, res *queue.Result, p
 	// entry.Prog only to drop it once Programs is populated.
 	entry := newUAFCorpusEntry(nil, batch, barrier, now)
 	entry.Kind = seedKindUAF
+	if req != nil {
+		entry.AdmissionThresholdUs = req.TimingThresholdUs
+	}
 	entry.Programs = programs
 	entry.ReplayPlan = plan.clone()
 	entry.Source = source
@@ -1046,17 +1064,18 @@ func newSerializedSeedEntry(entry *UAFCorpusEntry, includeReplayHistory bool) *s
 		return nil
 	}
 	blob := &serializedSeedEntry{
-		CallIdx:        entry.CallIdx,
-		PairBasicInfo:  entry.PairBasicInfo,
-		Signals:        entry.SignalsSlice(),
-		Barrier:        entry.Barrier.clone(),
-		ReplayPlan:     entry.ReplayPlan.clone(),
-		Profile:        entry.Profile,
-		Timestamp:      entry.Timestamp,
-		Kind:           entry.Kind,
-		Source:         entry.Source,
-		AsyncMode:      entry.AsyncMode,
-		AsyncRaceCalls: entry.AsyncRaceCalls,
+		CallIdx:              entry.CallIdx,
+		AdmissionThresholdUs: entry.AdmissionThresholdUs,
+		PairBasicInfo:        entry.PairBasicInfo,
+		Signals:              entry.SignalsSlice(),
+		Barrier:              entry.Barrier.clone(),
+		ReplayPlan:           entry.ReplayPlan.clone(),
+		Profile:              entry.Profile,
+		Timestamp:            entry.Timestamp,
+		Kind:                 entry.Kind,
+		Source:               entry.Source,
+		AsyncMode:            entry.AsyncMode,
+		AsyncRaceCalls:       entry.AsyncRaceCalls,
 	}
 	if includeReplayHistory {
 		blob.ReplayHistory = seedSerializeReplayHistory(entry.ReplayHistory)
@@ -1083,17 +1102,18 @@ func (blob *serializedSeedEntry) materialize(target *prog.Target) (*UAFCorpusEnt
 		return nil, nil
 	}
 	entry := &UAFCorpusEntry{
-		CallIdx:        blob.CallIdx,
-		PairBasicInfo:  blob.PairBasicInfo,
-		Signals:        sliceToSignal(blob.Signals),
-		Barrier:        blob.Barrier.clone(),
-		ReplayPlan:     blob.ReplayPlan.clone(),
-		Profile:        blob.Profile,
-		Timestamp:      blob.Timestamp,
-		Kind:           blob.Kind,
-		Source:         blob.Source,
-		AsyncMode:      blob.AsyncMode,
-		AsyncRaceCalls: blob.AsyncRaceCalls,
+		CallIdx:              blob.CallIdx,
+		AdmissionThresholdUs: blob.AdmissionThresholdUs,
+		PairBasicInfo:        blob.PairBasicInfo,
+		Signals:              sliceToSignal(blob.Signals),
+		Barrier:              blob.Barrier.clone(),
+		ReplayPlan:           blob.ReplayPlan.clone(),
+		Profile:              blob.Profile,
+		Timestamp:            blob.Timestamp,
+		Kind:                 blob.Kind,
+		Source:               blob.Source,
+		AsyncMode:            blob.AsyncMode,
+		AsyncRaceCalls:       blob.AsyncRaceCalls,
 	}
 	if target != nil && len(blob.Program) != 0 {
 		p, err := target.Deserialize(blob.Program, prog.NonStrict)
