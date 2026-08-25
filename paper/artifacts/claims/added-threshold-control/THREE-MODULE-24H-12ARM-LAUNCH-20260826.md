@@ -54,3 +54,17 @@ At approximately 10 minutes:
   about 474GiB.
 
 The formal specification is `THREE-MODULE-24H-12ARM-SPEC-20260826.md`.
+
+## Runtime incident: F2FS Dynamic fuzz VMs
+
+At `2026-08-26 03:30:02 +12:00`, F2FS Dynamic stopped increasing its global
+`calls executed` counter after repeated kernel RCU-stall crashes and VM
+reboots. The arm, validator, LLM producer, and both fuzz QEMU processes
+remained alive, but the counter stayed at 31,096 for about ten minutes. A
+single fuzz VM restart did not restore scheduling. Restarting the second fuzz
+VM at approximately `03:40` cleared the stale execution state; calls increased
+to 31,219 and the watcher returned to `calls_stall_warning=false` by `03:41:46`.
+
+No manager, validation process, LLM producer, workdir, corpus, or queue was
+restarted. Final throughput accounting must retain this interval as real wall
+clock overhead rather than subtracting it.
