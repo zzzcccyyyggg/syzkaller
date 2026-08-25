@@ -48,3 +48,19 @@ The runner was synchronized with the already-tested compatibility fix that emits
 new queue-control fields only when enabled.  The valid v3 run passed artifact
 hash checks, reached 6 fuzz and 6 validation VMs, increased `calls executed`,
 collected stable pairs, and entered target verification.
+
+## Density conclusion
+
+The completed 12-VM arm consumed 2,617 queue records and drained its queue,
+while the 6-VM arm consumed 1,649 records and retained 87 pending records on the
+same six validation CPUs. Both found five canonical VarName families; the
+12-VM arm covered ten Stack pairs versus six. Validation includes substantial
+snapshot, SSH, replay, and I/O wait, so two 2-vCPU validation VMs per physical
+CPU provide better aggregate utilization despite guest-vCPU oversubscription.
+
+Future scaled configurations should preserve this density:
+
+```text
+validation VMs = 2 * validation physical CPUs
+fuzz VMs       = 1 * fuzz physical CPUs
+```
