@@ -114,15 +114,24 @@ manager StackOnly multiplier = 40
 kernel multiplier          = 10
 effective precise lambda   = 2000
 effective StackOnly lambda = 400
-manager precise delay cap  = 2000000us
-effective precise delay cap = 20s
+manager precise delay cap  = 1000000us
+effective precise delay cap = 10s
 syscall/program/task/batch timeout = 40s/300s/300s/1200s
 ```
 
-At the 10ms observation endpoint, precise/range validation can request a 2s
-manager delay, which the kernel multiplies to 20s. StackOnly validation can
-request at most 400ms at the manager and 4s in the kernel. A short QEMU stress
-run at the 20s precise cap is required before the four formal arms start.
+At the 10ms observation endpoint, the uncapped precise/range request is 2s at
+the manager and 20s in the kernel. The safety cap limits this to 1s at the
+manager and 10s in the kernel. StackOnly validation can request at most 400ms
+at the manager and 4s in the kernel.
+
+The forced-20s QEMU preflight
+`20260825-local-f2fs-fixed10000-delay20s-stress-smoke-v1` kept both validation
+VMs alive but completed no verification in ten minutes: `processed` remained
+6 while `pending` grew to 215. The forced-10s preflight
+`20260825-local-f2fs-fixed10000-delay10s-stress-smoke-v1` completed strict,
+range, and stack-only attempts without a timeout, guest stall, or panic. The
+10s cap is therefore a functional safety limit, not a change to the threshold
+range.
 
 ## Frozen inputs and builds
 
