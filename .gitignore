@@ -76,3 +76,4 @@ paper/results/
 
 # Local generated backups.
 sys/linux/*.bak-*
+paper/artifacts/cleanup/

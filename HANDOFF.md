@@ -218,8 +218,10 @@ grow if Q == 0 or (W < 10 and Pbar <= Cbar)
 ```text
 normal_threshold_micros = 10000
 enable_dynamic_threshold = true
-dynamic_threshold_initial_us = 2500
-dynamic_threshold_min_us = 500
+dynamic_threshold_policy = backpressure
+dynamic_threshold_random_seed = 1592594996
+dynamic_threshold_initial_us = 1000
+dynamic_threshold_min_us = 50
 dynamic_threshold_max_us = 10000
 dynamic_threshold_eval_sec = 30
 enable_timing_exploration = false
@@ -230,7 +232,7 @@ enable_affinity_table = false
 
 必须保留的准确表述：
 
-- PDF 没有给出数值化的 `tau_initial/tau_min/tau_max`。`2500/500/10000us` 是当前仓库的实验默认，不应写成“论文指定值”。
+- PDF 没有给出数值化的 `tau_initial/tau_min/tau_max`。当前 rebuttal 实验计划为 `1000/50/10000us`；旧实验使用 `2500/500/10000us`。两者都不应写成“论文指定值”。
 - `pkg/fuzzer/threshold_controller.go` 自身还有一套 fallback default：`1000/50/50000us`；正常由 generator 生成配置时会被上面的实验值覆盖。比较或复现时必须保存完整 cfg。
 - 当前 `P` 来自 `f.ddrd.Count()` 的增量，即进程内 unique pair ID 数；`C/Q` 来自 validator scheduling stage 的 `ProcessedCount/PendingCount`。两边是否严格使用同一种 MRP record 单位尚未证明，正式消融前要审计。
 - validator 每 15s 写共享 `threshold-state.json`；fuzzer 每 30s 读取并调整阈值。两个进程都通过同一 `.tmp` 文件做 read-modify-write/rename，尚无跨进程锁。这里存在 lost-update 的可能性，但目前只是风险，必须先做并发压力或集成测试，不能先宣称有 bug。
