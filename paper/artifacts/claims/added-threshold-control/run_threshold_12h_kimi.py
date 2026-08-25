@@ -98,8 +98,9 @@ MODULE_SPECS: dict[str, dict[str, Any]] = {
         "required_syscalls": ("syz_open_dev$floppy",),
         "overrides": "exp/floppy/overrides.json",
         "overrides_sha256": "892a4390b00827af9c460c883f1deeb569b4764a5de7f9f410eeaa9ecaaaa918",
-        "bzimage_sha256": "e46770010a09d23555ac0ac74d03ddf1e8776e92bbeec0f07edb4f8680e7846a",
-        "vmlinux_sha256": "a8b8e4f0bc90032750ba625a8746722240afbe262c4b0c5c090d77ee1cbbe6eb",
+        "kernel_dir": "kernels/output-versions/floppy-targetdelay-latest-20260530-135147/floppy",
+        "bzimage_sha256": "4be5acd505b131e9e5bccefa17e91c03aab5d6432cfb91e59e5dc9d83064c7f7",
+        "vmlinux_sha256": "4885a9b0bcba5f68edc990ee201aab2a0b5afb14f3ced2469a964b8a7054a2ca",
         "qemu_args": "-enable-kvm -drive file={root}/images/floppy.qcow2,format=qcow2,if=floppy",
         "extra_artifacts": {
             "images/floppy.qcow2": "f2f6f56a6a3921f7ccf85365672a8fd646631257eff9475928a6419f44d64259",
@@ -241,7 +242,8 @@ class VariantRunner:
         self.init_corpus = ROOT / self.module_spec["corpus"]
         self.module_syscalls = ROOT / self.module_spec["syscalls"]
         self.module_overrides = ROOT / self.module_spec["overrides"]
-        self.kernel_dir = KERNEL_OUTPUT / self.module
+        kernel_dir = self.module_spec.get("kernel_dir")
+        self.kernel_dir = ROOT / kernel_dir if kernel_dir else KERNEL_OUTPUT / self.module
         self.frozen_artifacts = dict(COMMON_FROZEN_ARTIFACT_SHA256)
         self.frozen_artifacts.update(
             {
