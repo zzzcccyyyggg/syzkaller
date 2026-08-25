@@ -34,9 +34,9 @@ producers use CPUs `16-19`. CPUs `20-31` remain available to the host.
 ## Frozen inputs
 
 ```text
-manager = bin/syz-manager-local-formal-920ea264e
-manager SHA256 = 84623419c2aa2577de0abba60facbd63b03de95114a60c629944421c31ef7832
-executor SHA256 = 99fd19c794c05765d67f0a5efc24b0098c6309ff41719de9539b83065f3a75cc
+manager = bin/syz-manager-local-formal-c30d8ea60
+manager SHA256 = 272291cb71420673e0d3f0bd8d0ed50608fb4ceb59c90f7602b074fa5d257299
+executor SHA256 = 1990510583668b46562f889396b05a2a2e10c34573f5b03193f6ff452d2edced
 PTMX bzImage SHA256 = 35b102dae9fd9645e0059cc3b91d4d877b1ce1bdf63a9579fdd85e5977e7c594
 PTMX vmlinux SHA256 = 6fc4ae61e043b031de37549d085a88d750db2be559d9321daa3276dd6b0c648a
 initial corpus SHA256 = 9e7aefe1f39f6565fe35501268c6fdc3c2835ba53212289a7e7bfa2be60119c9
@@ -60,8 +60,13 @@ initial corpus SHA256 = 9e7aefe1f39f6565fe35501268c6fdc3c2835ba53212289a7e7bfa2b
 ```bash
 python3 paper/artifacts/claims/added-threshold-control/run_ptmx_24h_4arm.py \
   --mode launch \
-  --run-prefix 20260826-local-ptmx-formal24h-v1
+  --run-prefix 20260826-local-ptmx-formal24h-v2
 ```
 
 The user explicitly approved starting one local PTMX formal matrix after the
 remote three-module formal matrix was launched.
+
+The initial `v1` launch was rejected during boot because its newly built
+manager and pre-existing executor carried different syzkaller revision stamps.
+It produced no experiment data. Both binaries were rebuilt from commit
+`c30d8ea60` and the formal matrix was restarted from clean `v2` run IDs.
