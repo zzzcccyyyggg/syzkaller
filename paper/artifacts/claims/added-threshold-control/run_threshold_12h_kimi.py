@@ -431,6 +431,7 @@ class VariantRunner:
         exp.update(
             {
                 "race_mode": True,
+                "fuzz_vm_stall_timeout_seconds": self.args.fuzz_vm_stall_timeout_seconds,
                 "barrier_mode": True,
                 "barrier_procs": [0, 1],
                 "disable_race_validate_queue": False,
@@ -620,6 +621,9 @@ class VariantRunner:
                 "fuzz_vm_mem_mib": self.args.fuzz_vm_mem_mib,
                 "validate_vm_mem_mib": self.args.validate_vm_mem_mib,
                 "vm_running_time_seconds": self.args.vm_running_time_seconds,
+                "fuzz_vm_stall_timeout_seconds": self.args.fuzz_vm_stall_timeout_seconds,
+                "global_stall_timeout_seconds": self.args.stall_timeout,
+                "abort_on_global_stall": self.args.abort_on_global_stall,
                 "qemu": {
                     "path": self.qemu_path,
                     "version": self.qemu_version,
@@ -938,6 +942,7 @@ class VariantRunner:
             if self.last_calls is None or calls > self.last_calls:
                 self.last_calls = calls
                 self.last_calls_progress = time.monotonic()
+        calls_stalled_seconds = time.monotonic() - self.last_calls_progress
         fuzz_qemu = self.qemu_count(fuzz.pid)
         validate_qemu = self.qemu_count(validate.pid)
         self.max_fuzz_qemu = max(self.max_fuzz_qemu, fuzz_qemu)
@@ -964,6 +969,12 @@ class VariantRunner:
             "kimi_state": self.kimi_state(),
             "memory_available_gib": round(available, 3),
             "disk_free_gib": round(shutil.disk_usage(ROOT).free / (1024**3), 3),
+            "calls_stalled_seconds": round(calls_stalled_seconds, 3),
+            "calls_stall_warning": bool(
+                self.last_calls is not None
+                and self.args.stall_timeout > 0
+                and calls_stalled_seconds > self.args.stall_timeout
+            ),
         }
         append_jsonl(self.watcher_dir / "ticks.jsonl", tick)
         return tick
@@ -1033,7 +1044,9 @@ class VariantRunner:
                         failure = f"disk free {disk_free:.2f} GiB below abort floor"
                         break
                     if (
-                        elapsed > self.args.boot_grace
+                        self.args.abort_on_global_stall
+                        and elapsed > self.args.boot_grace
+                        and self.args.stall_timeout > 0
                         and self.last_calls is not None
                         and time.monotonic() - self.last_calls_progress > self.args.stall_timeout
                     ):
@@ -1141,12 +1154,14 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--fuzz-vm-mem-mib", type=int, default=1024)
     parser.add_argument("--validate-vm-mem-mib", type=int, default=1024)
     parser.add_argument("--vm-running-time-seconds", type=int, default=3600)
+    parser.add_argument("--fuzz-vm-stall-timeout-seconds", type=int, default=120)
     parser.add_argument("--allow-existing-experiments", action="store_true")
     parser.add_argument("--validate-start-delay", type=int, default=30)
     parser.add_argument("--kimi-start-delay", type=int, default=30)
     parser.add_argument("--watch-interval", type=int, default=30)
     parser.add_argument("--boot-grace", type=int, default=300)
     parser.add_argument("--stall-timeout", type=int, default=240)
+    parser.add_argument("--abort-on-global-stall", action="store_true")
     parser.add_argument("--min-start-memory-gib", type=float, default=45.0)
     parser.add_argument("--abort-memory-gib", type=float, default=8.0)
     parser.add_argument("--min-start-disk-gib", type=float, default=50.0)
@@ -1238,6 +1253,10 @@ def parse_args() -> argparse.Namespace:
         parser.error("VM counts must be positive")
     if args.vm_running_time_seconds <= 0:
         parser.error("--vm-running-time-seconds must be positive")
+    if args.fuzz_vm_stall_timeout_seconds < 0:
+        parser.error("--fuzz-vm-stall-timeout-seconds must be non-negative")
+    if args.stall_timeout < 0:
+        parser.error("--stall-timeout must be non-negative")
     if args.fuzz_vm_mem_mib <= 0 or args.validate_vm_mem_mib <= 0:
         parser.error("VM memory values must be positive")
     return args

@@ -278,6 +278,10 @@ type Experimental struct {
 
 	// Enable the DDRD race/barrier fuzzing mode that prioritizes MRP results.
 	RaceMode bool `json:"race_mode,omitempty"`
+	// FuzzVMStallTimeoutSeconds restarts only the affected fuzz VM when it has
+	// in-flight executions but returns no execution result for this duration.
+	// Zero disables the per-VM watchdog.
+	FuzzVMStallTimeoutSeconds int `json:"fuzz_vm_stall_timeout_seconds,omitempty"`
 	// RaceExecOnly keeps race/barrier execution and kernel LOG_MODE tracing
 	// enabled, but skips may-race pair analysis/output in the executor. This is
 	// intended for throughput experiments that measure instrumented exec cost

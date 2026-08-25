@@ -279,6 +279,9 @@ func (cfg *Config) normalizeRaceModeAliases() {
 }
 
 func (cfg *Config) initBarrierMask() error {
+	if cfg.Experimental.FuzzVMStallTimeoutSeconds < 0 {
+		return fmt.Errorf("experimental.fuzz_vm_stall_timeout_seconds must be >= 0")
+	}
 	if cfg.Experimental.StaticInputExploration && !cfg.Experimental.RaceMode {
 		return fmt.Errorf("experimental.static_input_exploration requires race_mode to be enabled")
 	}

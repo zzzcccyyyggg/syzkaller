@@ -764,6 +764,18 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 	}
 	injectExec := make(chan bool, 10)
 	serv.CreateInstance(inst.Index(), injectExec, updInfo)
+	stalled := serv.InstanceStalled(inst.Index())
+	runCtx, cancel := context.WithCancel(ctx)
+	watchDone := make(chan struct{})
+	go func() {
+		defer close(watchDone)
+		select {
+		case <-stalled:
+			log.Logf(0, "VM %v: execution stalled, restarting only this instance", inst.Index())
+			cancel()
+		case <-runCtx.Done():
+		}
+	}()
 
 	runOpts := []func(*vm.RunOptions){
 		vm.WithExitCondition(vm.ExitTimeout),
@@ -778,7 +790,9 @@ func (mgr *Manager) fuzzerInstance(ctx context.Context, inst *vm.Instance, updIn
 	if opt := mgr.dataRaceFilterOption(); opt != nil {
 		runOpts = append(runOpts, opt)
 	}
-	reps, vmInfo, err := mgr.runInstanceInner(ctx, inst, runOpts...)
+	reps, vmInfo, err := mgr.runInstanceInner(runCtx, inst, runOpts...)
+	cancel()
+	<-watchDone
 	var extraExecs []report.ExecutorInfo
 	var rep *report.Report
 	if len(reps) != 0 {

@@ -107,6 +107,37 @@ a 24-hour endpoint result. A further retry should first add per-VM progress
 recovery or diagnose the hanging fuzz programs; merely extending the global
 watchdog again would conceal lost experimental time.
 
+### Per-VM recovery fix
+
+The lifecycle fix moves stall ownership into `syz-manager`. Each fuzz VM now
+tracks in-flight executions and its last `ExecResult`. If one VM has no result
+for the configured interval, only that instance's RPC/run context is canceled;
+the dispatcher recreates the same instance while the fuzz manager, other VMs,
+validator, and LLM producer remain alive. The Python experiment runner records
+global calls-stall warnings but does not abort unless the opt-in
+`--abort-on-global-stall` flag is supplied.
+
+```text
+test manager = bin/syz-manager-per-vm-watchdog
+SHA256       = 9e5dbda4cdd5c7942ebd9bee24810c2b0dc939686dc902699d91e5b77c9e2943
+```
+
+Two QEMU tests passed:
+
+- `20260825-local-f2fs-fixed10000-pervm-watchdog30-smoke-v4` used an aggressive
+  30-second interval. It performed four isolated VM recoveries, including one
+  deliberately frozen fuzz QEMU. The affected instances were recreated and
+  reconnected while the manager PID and validator remained unchanged; calls
+  resumed and increased by 1778 during the 10-minute smoke.
+- `20260825-local-f2fs-fixed10000-pervm-watchdog120-smoke-v1` used the proposed
+  120-second formal interval without fault injection. It ran 15 minutes, kept
+  both fuzz VMs available, tolerated one ordinary kernel-crash restart without
+  a watchdog false positive, and increased calls by 6074.
+
+The 120-second value is the candidate for a future Fixed-10000 v3. Starting v3
+requires a new frozen four-arm build/config record; it must not be silently
+mixed into the already-running v1 arms.
+
 ## Operations
 
 Per-run state and watcher records are under:

@@ -71,3 +71,12 @@ func TestRaceModeInitializesBarrierMask(t *testing.T) {
 		t.Fatal("expected race_mode to keep legacy UAFMode enabled internally")
 	}
 }
+
+func TestFuzzVMStallTimeoutRejectsNegativeValue(t *testing.T) {
+	cfg := &Config{
+		Experimental: Experimental{FuzzVMStallTimeoutSeconds: -1},
+	}
+	if err := cfg.initBarrierMask(); err == nil {
+		t.Fatal("expected a negative fuzz VM stall timeout to be rejected")
+	}
+}

@@ -15,6 +15,7 @@ import (
 	"strings"
 	"sync"
 	"sync/atomic"
+	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/cover/backend"
@@ -47,11 +48,12 @@ type Config struct {
 	FilterSignal      bool
 	PrintMachineCheck bool
 	// Abort early on syz-executor not replying to requests and print extra debugging information.
-	DebugTimeouts bool
-	Procs         int
-	Slowdown      int
-	pcBase        uint64
-	localModules  []*vminfo.KernelModule
+	DebugTimeouts      bool
+	RunnerStallTimeout time.Duration
+	Procs              int
+	Slowdown           int
+	pcBase             uint64
+	localModules       []*vminfo.KernelModule
 
 	// RPCServer closes the channel once the machine check has begun. Used for fault injection during testing.
 	machineCheckStarted chan struct{}
@@ -78,6 +80,7 @@ type Server interface {
 	TriagedCorpus()
 	Serve(context.Context) error
 	CreateInstance(id int, injectExec chan<- bool, updInfo dispatcher.UpdateInfo) chan error
+	InstanceStalled(id int) <-chan struct{}
 	ShutdownInstance(id int, crashed bool, extraExecs ...report.ExecutorInfo) ([]ExecRecord, []byte)
 	StopFuzzing(id int)
 	DistributeSignalDelta(plus signal.Signal)
@@ -195,12 +198,13 @@ func New(cfg *RemoteConfig) (Server, error) {
 		// gVisor coverage is not a trace, so producing edges won't work.
 		UseCoverEdges: cfg.Experimental.CoverEdges && cfg.Type != targets.GVisor,
 		// gVisor/Starnix are not Linux, so filtering against Linux ranges won't work.
-		FilterSignal:      cfg.Type != targets.GVisor && cfg.Type != targets.Starnix,
-		PrintMachineCheck: true,
-		Procs:             cfg.Procs,
-		Slowdown:          cfg.Timeouts.Slowdown,
-		pcBase:            pcBase,
-		localModules:      cfg.LocalModules,
+		FilterSignal:       cfg.Type != targets.GVisor && cfg.Type != targets.Starnix,
+		PrintMachineCheck:  true,
+		RunnerStallTimeout: time.Duration(cfg.Experimental.FuzzVMStallTimeoutSeconds) * time.Second,
+		Procs:              cfg.Procs,
+		Slowdown:           cfg.Timeouts.Slowdown,
+		pcBase:             pcBase,
+		localModules:       cfg.LocalModules,
 	}, cfg.Manager), nil
 }
 
@@ -569,11 +573,13 @@ func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispa
 		hanged:        make(map[int64]bool),
 		barrierGroups: make(map[int64]*barrierGroup),
 		// Executor may report proc IDs that are larger than serv.cfg.Procs.
-		lastExec: MakeLastExecuting(prog.MaxPids, 6),
-		stats:    serv.runnerStats,
-		procs:    serv.cfg.Procs,
-		updInfo:  updInfo,
-		resultCh: make(chan error, 1),
+		lastExec:     MakeLastExecuting(prog.MaxPids, 6),
+		stats:        serv.runnerStats,
+		procs:        serv.cfg.Procs,
+		updInfo:      updInfo,
+		resultCh:     make(chan error, 1),
+		stalledCh:    make(chan struct{}),
+		stallTimeout: serv.cfg.RunnerStallTimeout,
 	}
 	serv.mu.Lock()
 	defer serv.mu.Unlock()
@@ -582,6 +588,16 @@ func (serv *server) CreateInstance(id int, injectExec chan<- bool, updInfo dispa
 	}
 	serv.runners[id] = runner
 	return runner.resultCh
+}
+
+func (serv *server) InstanceStalled(id int) <-chan struct{} {
+	serv.mu.Lock()
+	defer serv.mu.Unlock()
+	runner := serv.runners[id]
+	if runner == nil {
+		panic(fmt.Sprintf("stall channel requested for unknown instance %v", id))
+	}
+	return runner.stalledCh
 }
 
 // stopInstance prevents further request exchange requests.

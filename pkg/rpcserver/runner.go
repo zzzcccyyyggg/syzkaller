@@ -12,6 +12,7 @@ import (
 	"os"
 	"slices"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
@@ -75,6 +76,10 @@ type Runner struct {
 	lastExec      *LastExecuting
 	updInfo       dispatcher.UpdateInfo
 	resultCh      chan error
+	stalledCh     chan struct{}
+	stallTimeout  time.Duration
+	inflightExecs atomic.Int64
+	lastProgress  atomic.Int64
 
 	barrierGroups      map[int64]*barrierGroup
 	nextBarrierGroupID int64
@@ -229,6 +234,8 @@ func (runner *Runner) ConnectionLoop() error {
 		return nil
 	}
 	defer close(runner.finished)
+	stopWatchdog := runner.startStallWatchdog()
+	defer stopWatchdog()
 
 	var infoc chan []byte
 	defer func() {
@@ -399,7 +406,11 @@ func (runner *Runner) handleExecutingMessage(msg *flatrpc.ExecutingMessage) erro
 	case runner.injectExec <- true:
 	default:
 	}
+	if !runner.executing[msg.Id] {
+		runner.inflightExecs.Add(1)
+	}
 	runner.executing[msg.Id] = true
+	runner.lastProgress.Store(int64(osutil.MonotonicNano()))
 	return nil
 }
 
@@ -413,7 +424,11 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		return fmt.Errorf("can't find executed request %v", msg.Id)
 	}
 	delete(runner.requests, msg.Id)
+	if runner.executing[msg.Id] {
+		runner.inflightExecs.Add(-1)
+	}
 	delete(runner.executing, msg.Id)
+	runner.lastProgress.Store(int64(osutil.MonotonicNano()))
 	runner.prepareProgramResult(ctx, msg)
 	runner.recordProgramCallResult(ctx, msg.Info)
 	analysis := ddrd.FromProgInfo(msg.Info)
@@ -494,6 +509,55 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 	}
 	// log.Logf(0, "runner %d: result processing done req=%d proc=%d barrier=%t barrier_id=%d duration=%s", runner.id, msg.Id, msg.Proc, isBarrier, barrierID, time.Since(start))
 	return nil
+}
+
+func (runner *Runner) startStallWatchdog() func() {
+	if runner.stallTimeout <= 0 {
+		return func() {}
+	}
+	done := make(chan struct{})
+	interval := min(runner.stallTimeout/4, 10*time.Second)
+	if interval <= 0 {
+		interval = time.Millisecond
+	}
+	go func() {
+		ticker := time.NewTicker(interval)
+		defer ticker.Stop()
+		for {
+			select {
+			case <-ticker.C:
+				now := osutil.MonotonicNano()
+				if !runner.executionStalled(now) {
+					continue
+				}
+				log.Logf(0, "runner %d: no execution result for %s with %d in-flight requests; restarting VM",
+					runner.id, runner.stallTimeout, runner.inflightExecs.Load())
+				runner.mu.Lock()
+				conn := runner.conn
+				runner.mu.Unlock()
+				if conn != nil {
+					close(runner.stalledCh)
+					conn.Close()
+				}
+				return
+			case <-done:
+				return
+			case <-runner.finished:
+				return
+			}
+		}
+	}()
+	return func() {
+		close(done)
+	}
+}
+
+func (runner *Runner) executionStalled(now time.Duration) bool {
+	if runner.stallTimeout <= 0 || runner.inflightExecs.Load() <= 0 {
+		return false
+	}
+	last := time.Duration(runner.lastProgress.Load())
+	return last > 0 && now-last >= runner.stallTimeout
 }
 
 func ctxProgram(ctx *requestContext) *prog.Prog {

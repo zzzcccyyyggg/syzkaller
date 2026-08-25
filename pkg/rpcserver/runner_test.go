@@ -5,6 +5,7 @@ package rpcserver
 
 import (
 	"testing"
+	"time"
 
 	"github.com/google/syzkaller/pkg/cover"
 	"github.com/google/syzkaller/pkg/flatrpc"
@@ -14,6 +15,29 @@ import (
 	"github.com/google/syzkaller/prog"
 	"github.com/google/syzkaller/sys/targets"
 )
+
+func TestRunnerExecutionStallTracksPerVMProgress(t *testing.T) {
+	runner := &Runner{stallTimeout: 2 * time.Minute}
+	start := 10 * time.Minute
+	runner.inflightExecs.Store(2)
+	runner.lastProgress.Store(int64(start))
+
+	if runner.executionStalled(start + 2*time.Minute - time.Nanosecond) {
+		t.Fatal("runner reported a stall before the timeout")
+	}
+	if !runner.executionStalled(start + 2*time.Minute) {
+		t.Fatal("runner did not report a stall at the timeout")
+	}
+
+	runner.lastProgress.Store(int64(start + 90*time.Second))
+	if runner.executionStalled(start + 2*time.Minute) {
+		t.Fatal("recent VM progress did not reset the stall window")
+	}
+	runner.inflightExecs.Store(0)
+	if runner.executionStalled(start + 10*time.Minute) {
+		t.Fatal("idle VM without in-flight executions was reported stalled")
+	}
+}
 
 func TestRunnerCallStatsCountAttemptsAndResultFlags(t *testing.T) {
 	p := parseRunnerTestProg(t, "syz_test_fuzzer1()\nsyz_test_fuzzer1()\nsyz_test_fuzzer1()")
