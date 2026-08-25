@@ -1,0 +1,5 @@
+run_id,variant,status,final,elapsed_seconds,calls_executed,exec_total,pairs_fuzz,varnames_fuzz,uaf_corpus,initial_threshold_us,final_threshold_us,threshold_adjustments,validator_pending,validator_processed,validator_success,validator_task_successes,validator_verify_completions,validator_datarace_hits,storage_total,storage_processed,storage_validated,storage_invalid,storage_with_history,fuzz_qemu_alive_at_final,validate_qemu_alive_at_final
+20260821-ptmx-dynamic-kimi-pilot30m-v1,dynamic,complete,True,1816.338,8322,1725,1765,905,84,2500,500,3,268,1,0,1,99,0,1765,0,0,6,1704,0,0
+20260821-ptmx-fixed500-kimi-pilot30m-v1-retry1,fixed-500,complete,True,1816.434,8561,1751,1337,741,103,500,500,0,221,1,0,1,87,0,1362,8,0,3,1346,0,0
+20260821-ptmx-fixed2500-kimi-pilot30m-v1,fixed-2500,complete,True,1818.315,8352,1717,3467,1581,137,2500,2500,0,508,0,0,1,98,0,3467,0,0,4,3438,0,0
+20260821-ptmx-fixed10000-kimi-pilot30m-v1,fixed-10000,complete,True,1818.478,8023,1663,4296,1747,123,10000,10000,0,591,1,0,2,82,0,4296,8,0,3,4162,0,0

@@ -9,3 +9,7 @@ debug-preflight/
 */parallel/logs/*.log
 latest-phase2a
 latest-phase2b
+
+# Run directories are local artifacts. Previously tracked summaries remain
+# tracked, while newly generated runs stay out of Git.
+/*/

@@ -114,7 +114,7 @@ modules_str() {
 log_safe4_profile() {
     log_info "4 模块保守模式: $(modules_str "${SAFE4_MODULES[@]}")"
     log_info "资源配置: SYSTEM_RESERVED_CORES=${SAFE4_SYSTEM_RESERVED_CORES:-8}, CORES_PER_MODULE=${SAFE4_CORES_PER_MODULE:-2}, EXP_FUZZ_VM_COUNT=${SAFE4_FUZZ_VM_COUNT:-2}, EXP_VALIDATE_VM_COUNT=${SAFE4_VALIDATE_VM_COUNT:-2}, EXP_FUZZ_VM_COUNT_BTRFS=${SAFE4_BTRFS_FUZZ_VM_COUNT:-2}, EXP_VALIDATE_VM_COUNT_BTRFS=${SAFE4_BTRFS_VALIDATE_VM_COUNT:-1}"
-    log_info "fuzz 主线: dynamic_threshold=true, initial=2500us, range=[500,10000]us, eval=30s, timing=false, solo_filter=false"
+    log_info "fuzz 主线: threshold_policy=backpressure, initial=1000us, range=[50,10000]us, eval=30s, timing=false, solo_filter=false"
 }
 
 warn_validate_watchers() {

@@ -186,8 +186,10 @@ sudo scripts/run_experiment.sh validate --all
 - fuzz 侧默认打开动态时间阈值:
   - `normal_threshold_micros=10000`
   - `enable_dynamic_threshold=true`
-  - `dynamic_threshold_initial_us=2500`
-  - `dynamic_threshold_min_us=500`
+  - `dynamic_threshold_policy=backpressure`
+  - `dynamic_threshold_random_seed=1592594996`
+  - `dynamic_threshold_initial_us=1000`
+  - `dynamic_threshold_min_us=50`
   - `dynamic_threshold_max_us=10000`
   - `dynamic_threshold_eval_sec=30`
 - 旧 timing exploration 路径默认关闭:

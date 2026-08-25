@@ -232,8 +232,10 @@ def update_fuzz_config(
     exp["enable_timing_exploration"] = False
     exp["timing_exploration_ratio"] = 0
     exp["enable_dynamic_threshold"] = True
-    exp["dynamic_threshold_initial_us"] = 2500
-    exp["dynamic_threshold_min_us"] = 500
+    exp["dynamic_threshold_policy"] = "backpressure"
+    exp["dynamic_threshold_random_seed"] = 1592594996
+    exp["dynamic_threshold_initial_us"] = 1000
+    exp["dynamic_threshold_min_us"] = 50
     exp["dynamic_threshold_max_us"] = 10000
     exp["dynamic_threshold_eval_sec"] = 30
     exp["static_input_exploration"] = True

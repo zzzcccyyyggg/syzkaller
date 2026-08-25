@@ -22,7 +22,13 @@ DEFAULT_BASE_URL = "https://api.deepseek.com"
 DEFAULT_MODEL = "deepseek-v4-pro"
 DEFAULT_KIMI_BASE_URL = "https://kimi.a7m.com.cn/v1"
 DEFAULT_KIMI_MODEL = "kimi-k2.6"
+DEFAULT_KIMI_CLI_BIN = "/home/zzzccc/.kimi-code/bin/kimi"
+DEFAULT_KIMI_CLI_MODEL = "my-kimi-code/k3"
 DEFAULT_CODEX_MODEL = "gpt-5.4"
+DEFAULT_GROK_CLI_BIN = "/home/zzzccc/.grok/bin/grok"
+DEFAULT_GROK_CLI_MODEL = "grok-4.5"
+DEFAULT_OPENAI_BASE_URL = "https://api.openai.com/v1"
+DEFAULT_OPENAI_MODEL = "gpt-5.4"
 DEFAULT_MOUNT = "/mnt/kccwf"
 
 
@@ -37,7 +43,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-calls", type=int, default=8, help="max syscalls per generated single program")
     parser.add_argument("--mount-prefix", default=DEFAULT_MOUNT)
     parser.add_argument("--source", default="fuzz", choices=["fuzz", "timing", "all"], help="UAF corpus source filter")
-    parser.add_argument("--provider", choices=["deepseek", "kimi", "codex"], default=os.environ.get("LLM_PROVIDER", "deepseek"))
+    parser.add_argument("--provider", choices=["deepseek", "kimi", "kimi-cli", "codex", "grok-cli", "openai-responses"], default=os.environ.get("LLM_PROVIDER", "deepseek"))
     parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL", os.environ.get("DEEPSEEK_BASE_URL", "")))
     parser.add_argument("--model", default=os.environ.get("LLM_MODEL", os.environ.get("DEEPSEEK_MODEL", "")))
     parser.add_argument("--temperature", type=float, default=0.25)
@@ -50,9 +56,16 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-profile", default=os.environ.get("CODEX_PROFILE", ""))
     parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default=os.environ.get("CODEX_SANDBOX", "read-only"))
     parser.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], default=os.environ.get("CODEX_REASONING_EFFORT", "medium"))
+    parser.add_argument("--kimi-cli-bin", default=os.environ.get("KIMI_CLI_BIN", DEFAULT_KIMI_CLI_BIN))
+    parser.add_argument("--kimi-cli-model", default=os.environ.get("KIMI_CLI_MODEL", DEFAULT_KIMI_CLI_MODEL))
+    parser.add_argument("--grok-cli-bin", default=os.environ.get("GROK_CLI_BIN", DEFAULT_GROK_CLI_BIN))
+    parser.add_argument("--grok-cli-model", default=os.environ.get("GROK_CLI_MODEL", DEFAULT_GROK_CLI_MODEL))
+    parser.add_argument("--grok-reasoning-effort", choices=["low", "medium", "high"], default=os.environ.get("GROK_REASONING_EFFORT", "low"))
+    parser.add_argument("--openai-auth-json", default=os.environ.get("OPENAI_AUTH_JSON", ""))
+    parser.add_argument("--openai-reasoning-effort", choices=["none", "low", "medium", "high", "xhigh"], default=os.environ.get("OPENAI_REASONING_EFFORT", "medium"))
     parser.add_argument("--dry-run", action="store_true", help="only sample entries and write prompts")
     parser.add_argument("--api-key-stdin", action="store_true", help="read API key from stdin instead of environment")
-    parser.add_argument("--checker", default="./tools/syz-llm-candidate-check", help="go package/path for the local checker")
+    parser.add_argument("--checker", default="./bin/syz-llm-candidate-check", help="checker executable or Go package path")
     return parser.parse_args()
 
 
@@ -60,6 +73,12 @@ def effective_model(args: argparse.Namespace) -> str:
     provider = getattr(args, "provider", "deepseek")
     if provider == "codex":
         return getattr(args, "codex_model", "") or DEFAULT_CODEX_MODEL
+    if provider == "kimi-cli":
+        return getattr(args, "kimi_cli_model", "") or DEFAULT_KIMI_CLI_MODEL
+    if provider == "grok-cli":
+        return getattr(args, "grok_cli_model", "") or DEFAULT_GROK_CLI_MODEL
+    if provider == "openai-responses":
+        return getattr(args, "model", "") or DEFAULT_OPENAI_MODEL
     model = getattr(args, "model", "")
     if model:
         return model
@@ -74,6 +93,8 @@ def effective_base_url(args: argparse.Namespace) -> str:
         return base_url
     if getattr(args, "provider", "deepseek") == "kimi":
         return os.environ.get("KIMI_BASE_URL", DEFAULT_KIMI_BASE_URL)
+    if getattr(args, "provider", "deepseek") == "openai-responses":
+        return os.environ.get("OPENAI_BASE_URL", DEFAULT_OPENAI_BASE_URL)
     return DEFAULT_BASE_URL
 
 
@@ -540,8 +561,19 @@ def build_prompt(
 def read_api_key(args: argparse.Namespace) -> str:
     if args.dry_run:
         return ""
-    if getattr(args, "provider", "deepseek") == "codex":
+    if getattr(args, "provider", "deepseek") in ("codex", "kimi-cli", "grok-cli"):
         return ""
+    if getattr(args, "provider", "deepseek") == "openai-responses":
+        auth_json = getattr(args, "openai_auth_json", "")
+        if auth_json:
+            data = json.loads(pathlib.Path(auth_json).expanduser().read_text(encoding="utf-8"))
+            key = str(data.get("OPENAI_API_KEY") or "").strip()
+            if key:
+                return key
+        key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not key:
+            raise SystemExit("missing OpenAI API key: set OPENAI_API_KEY or --openai-auth-json")
+        return key
     if args.api_key_stdin:
         key = sys.stdin.readline().strip()
     else:
@@ -556,14 +588,223 @@ def read_api_key(args: argparse.Namespace) -> str:
 
 
 def call_llm(args: argparse.Namespace, api_key: str, system: str, user: str) -> str:
+    content, _ = call_llm_with_usage(args, api_key, system, user)
+    return content
+
+
+def call_llm_with_usage(
+    args: argparse.Namespace,
+    api_key: str,
+    system: str,
+    user: str,
+) -> tuple[str, dict[str, Any]]:
     provider = getattr(args, "provider", "deepseek")
     if provider == "codex":
-        return call_codex(args, system, user)
+        return call_codex_with_usage(args, system, user)
+    if provider == "kimi-cli":
+        return call_kimi_cli(args, system, user), {}
+    if provider == "grok-cli":
+        return call_grok_cli_with_usage(args, system, user)
+    if provider == "openai-responses":
+        return call_openai_responses_with_usage(args, api_key, system, user)
     if provider == "deepseek":
-        return call_deepseek(args, api_key, system, user)
+        return call_deepseek(args, api_key, system, user), {}
     if provider == "kimi":
-        return call_openai_compatible(args, api_key, system, user, "Kimi")
+        return call_openai_compatible(args, api_key, system, user, "Kimi"), {}
     raise RuntimeError(f"unknown LLM provider: {provider}")
+
+
+USAGE_INT_FIELDS = (
+    "input_tokens",
+    "cache_read_input_tokens",
+    "cache_creation_input_tokens",
+    "output_tokens",
+    "reasoning_tokens",
+    "total_tokens",
+    "model_calls",
+)
+
+
+def normalize_token_usage(raw: dict[str, Any]) -> dict[str, Any]:
+    aliases = {
+        "input_tokens": ("input_tokens", "inputTokens", "prompt_tokens"),
+        "cache_read_input_tokens": (
+            "cache_read_input_tokens",
+            "cached_input_tokens",
+            "cachedReadTokens",
+            "inputCacheRead",
+        ),
+        "cache_creation_input_tokens": (
+            "cache_creation_input_tokens",
+            "cache_write_input_tokens",
+            "cacheCreationTokens",
+            "inputCacheCreation",
+        ),
+        "output_tokens": ("output_tokens", "outputTokens", "completion_tokens", "output"),
+        "reasoning_tokens": ("reasoning_tokens", "reasoning_output_tokens", "reasoningTokens"),
+        "total_tokens": ("total_tokens", "totalTokens"),
+        "model_calls": ("model_calls", "modelCalls"),
+    }
+    usage: dict[str, Any] = {}
+    for field, names in aliases.items():
+        for name in names:
+            value = raw.get(name)
+            if isinstance(value, (int, float)) and not isinstance(value, bool):
+                usage[field] = int(value)
+                break
+    if "input_tokens" not in usage and isinstance(raw.get("inputOther"), (int, float)):
+        usage["input_tokens"] = (
+            int(raw.get("inputOther", 0))
+            + int(raw.get("inputCacheRead", 0))
+            + int(raw.get("inputCacheCreation", 0))
+        )
+    if "total_tokens" not in usage and "input_tokens" in usage and "output_tokens" in usage:
+        usage["total_tokens"] = usage["input_tokens"] + usage["output_tokens"]
+    if usage and "model_calls" not in usage:
+        usage["model_calls"] = 1
+    return usage
+
+
+def add_token_usage(total: dict[str, Any], usage: dict[str, Any]) -> None:
+    for field in USAGE_INT_FIELDS:
+        value = usage.get(field)
+        if isinstance(value, (int, float)) and not isinstance(value, bool):
+            total[field] = int(total.get(field, 0)) + int(value)
+    cost = usage.get("cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        total["cost_usd"] = float(total.get("cost_usd", 0.0)) + float(cost)
+
+
+def call_kimi_cli(args: argparse.Namespace, system: str, user: str) -> str:
+    prompt = textwrap.dedent(
+        f"""
+        Act only as a JSON generator. Do not use tools or inspect the filesystem.
+
+        SYSTEM INSTRUCTIONS:
+        {system}
+
+        USER REQUEST:
+        {user}
+
+        Return only the requested JSON object.
+        """
+    ).strip()
+    cmd = [
+        getattr(args, "kimi_cli_bin", DEFAULT_KIMI_CLI_BIN),
+        "--model",
+        effective_model(args),
+        "--prompt",
+        prompt,
+        "--output-format",
+        "text",
+    ]
+    with tempfile.TemporaryDirectory(prefix="mrpfuzz-kimi-cli-") as tmpdir:
+        proc = subprocess.run(
+            cmd,
+            cwd=tmpdir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=getattr(args, "timeout_sec", 600),
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Kimi CLI request failed with exit code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}".format(
+                code=proc.returncode,
+                stdout=proc.stdout[-4000:],
+                stderr=proc.stderr[-4000:],
+            )
+        )
+    content = proc.stdout.strip()
+    if not content:
+        raise RuntimeError("Kimi CLI returned empty output")
+    return content
+
+
+def call_grok_cli(args: argparse.Namespace, system: str, user: str) -> str:
+    content, _ = call_grok_cli_with_usage(args, system, user)
+    return content
+
+
+def grok_cli_prompt(system: str, user: str) -> str:
+    return textwrap.dedent(
+        f"""
+        Act only as a JSON generator. Do not use tools or inspect the filesystem.
+
+        SYSTEM INSTRUCTIONS:
+        {system}
+
+        USER REQUEST:
+        {user}
+
+        Return only the requested JSON object.
+        """
+    ).strip()
+
+
+def call_grok_cli_with_usage(
+    args: argparse.Namespace,
+    system: str,
+    user: str,
+) -> tuple[str, dict[str, Any]]:
+    prompt = grok_cli_prompt(system, user)
+    with tempfile.TemporaryDirectory(prefix="mrpfuzz-grok-cli-") as tmpdir:
+        tmp = pathlib.Path(tmpdir)
+        prompt_path = tmp / "prompt.txt"
+        prompt_path.write_text(prompt, encoding="utf-8")
+        cmd = [
+            getattr(args, "grok_cli_bin", DEFAULT_GROK_CLI_BIN),
+            "--leader-socket", str(tmp / "leader.sock"),
+            "--cwd", tmpdir,
+            "--model", effective_model(args),
+            "--reasoning-effort", getattr(args, "grok_reasoning_effort", "low"),
+            "--sandbox", "read-only",
+            "--disable-web-search",
+            "--no-subagents",
+            "--max-turns", "1",
+            "--permission-mode", "dontAsk",
+            "--output-format", "json",
+            "--json-schema", json.dumps(codex_schema(), separators=(",", ":")),
+            "--prompt-file", str(prompt_path),
+            "--verbatim",
+        ]
+        proc = subprocess.run(
+            cmd,
+            cwd=tmpdir,
+            text=True,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            timeout=getattr(args, "timeout_sec", 600),
+        )
+    if proc.returncode != 0:
+        raise RuntimeError(
+            "Grok CLI request failed with exit code {code}\nSTDOUT:\n{stdout}\nSTDERR:\n{stderr}".format(
+                code=proc.returncode,
+                stdout=proc.stdout[-4000:],
+                stderr=proc.stderr[-4000:],
+            )
+        )
+    try:
+        payload = json.loads(proc.stdout)
+    except json.JSONDecodeError as exc:
+        raise RuntimeError(f"Grok CLI returned invalid JSON: {exc}; output={proc.stdout[-4000:]}") from exc
+    usage = normalize_token_usage(payload.get("usage") or {})
+    cost = payload.get("total_cost_usd")
+    if isinstance(cost, (int, float)) and not isinstance(cost, bool):
+        usage["cost_usd"] = float(cost)
+    for source, target in (("sessionId", "session_id"), ("requestId", "request_id")):
+        value = payload.get(source)
+        if value:
+            usage[target] = str(value)
+    usage["model"] = effective_model(args)
+
+    structured = payload.get("structuredOutput")
+    if structured is not None:
+        return json.dumps(structured), usage
+    content = str(payload.get("text", "")).strip()
+    if not content:
+        raise RuntimeError("Grok CLI returned empty output")
+    return content, usage
 
 
 def call_deepseek(args: argparse.Namespace, api_key: str, system: str, user: str) -> str:
@@ -660,6 +901,73 @@ def call_openai_compatible(args: argparse.Namespace, api_key: str, system: str, 
     return content
 
 
+def call_openai_responses_with_usage(
+    args: argparse.Namespace,
+    api_key: str,
+    system: str,
+    user: str,
+) -> tuple[str, dict[str, Any]]:
+    url = effective_base_url(args).rstrip("/") + "/responses"
+    payload: dict[str, Any] = {
+        "model": effective_model(args),
+        "input": [
+            {"role": "system", "content": [{"type": "input_text", "text": system}]},
+            {"role": "user", "content": [{"type": "input_text", "text": user}]},
+        ],
+        "reasoning": {"effort": getattr(args, "openai_reasoning_effort", "medium")},
+        "text": {
+            "format": {
+                "type": "json_schema",
+                "name": "mrpfuzz_variants",
+                "strict": True,
+                "schema": codex_schema(),
+            }
+        },
+        "store": False,
+    }
+    max_tokens = effective_max_tokens(args)
+    if max_tokens > 0:
+        payload["max_output_tokens"] = max_tokens
+    try:
+        response = requests.post(
+            url,
+            headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+            json=payload,
+            timeout=getattr(args, "timeout_sec", 600),
+        )
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        body = ""
+        if getattr(exc, "response", None) is not None:
+            body = exc.response.text[:1000]
+        raise RuntimeError(f"OpenAI Responses request failed: {exc}; body={body}") from exc
+    data = response.json()
+    content = str(data.get("output_text") or "").strip()
+    if not content:
+        for item in data.get("output") or []:
+            if item.get("type") != "message":
+                continue
+            for part in item.get("content") or []:
+                if part.get("type") == "output_text" and part.get("text"):
+                    content = str(part["text"]).strip()
+                    break
+            if content:
+                break
+    if not content:
+        raise RuntimeError(f"OpenAI Responses returned no output text; status={data.get('status')}")
+
+    raw_usage = data.get("usage") or {}
+    usage = normalize_token_usage(raw_usage)
+    input_details = raw_usage.get("input_tokens_details") or {}
+    output_details = raw_usage.get("output_tokens_details") or {}
+    usage["cache_read_input_tokens"] = int(input_details.get("cached_tokens", 0) or 0)
+    usage["cache_creation_input_tokens"] = int(input_details.get("cache_write_tokens", 0) or 0)
+    usage["reasoning_tokens"] = int(output_details.get("reasoning_tokens", 0) or 0)
+    usage["model"] = str(data.get("model") or effective_model(args))
+    usage["response_id"] = str(data.get("id") or "")
+    return content, usage
+
+
 def codex_schema() -> dict[str, Any]:
     return {
         "type": "object",
@@ -706,6 +1014,15 @@ def codex_prompt(system: str, user: str) -> str:
 
 
 def call_codex(args: argparse.Namespace, system: str, user: str) -> str:
+    content, _ = call_codex_with_usage(args, system, user)
+    return content
+
+
+def call_codex_with_usage(
+    args: argparse.Namespace,
+    system: str,
+    user: str,
+) -> tuple[str, dict[str, Any]]:
     with tempfile.TemporaryDirectory(prefix="mrpfuzz-codex-") as tmpdir:
         tmp = pathlib.Path(tmpdir)
         schema_path = tmp / "schema.json"
@@ -717,6 +1034,7 @@ def call_codex(args: argparse.Namespace, system: str, user: str) -> str:
             "never",
             "exec",
             "--ephemeral",
+            "--json",
             "-C",
             os.getcwd(),
             "-s",
@@ -750,11 +1068,30 @@ def call_codex(args: argparse.Namespace, system: str, user: str) -> str:
                     stderr=proc.stderr[-4000:],
                 )
             )
+        usage: dict[str, Any] = {}
+        for line in proc.stdout.splitlines():
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            if event.get("type") == "turn.completed":
+                usage = normalize_token_usage(event.get("usage") or {})
+        usage["model"] = effective_model(args)
+        content = ""
         if output_path.exists():
             content = output_path.read_text(encoding="utf-8").strip()
-            if content:
-                return content
-        return proc.stdout.strip()
+        if not content:
+            for line in proc.stdout.splitlines():
+                try:
+                    event = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+                item = event.get("item") or {}
+                if event.get("type") == "item.completed" and item.get("type") == "agent_message":
+                    content = str(item.get("text") or "").strip()
+        if not content:
+            raise RuntimeError("Codex returned no final agent message")
+        return content, usage
 
 
 def extract_json_object(text: str) -> dict[str, Any] | list[Any]:
@@ -805,7 +1142,8 @@ def run_checker(args: argparse.Namespace, cfg: dict[str, Any], variants: list[di
         "max_calls": args.max_calls,
         "variants": variants,
     }
-    cmd = ["go", "run", args.checker]
+    checker = pathlib.Path(args.checker)
+    cmd = [str(checker)] if checker.is_file() and os.access(checker, os.X_OK) else ["go", "run", args.checker]
     proc = subprocess.run(cmd, text=True, input=json.dumps(payload), stdout=subprocess.PIPE, stderr=subprocess.PIPE)
     if proc.returncode != 0:
         raise RuntimeError(f"checker failed:\nSTDOUT:\n{proc.stdout}\nSTDERR:\n{proc.stderr}")
@@ -924,7 +1262,7 @@ def main() -> int:
         "target": cfg.get("target"),
         "provider": args.provider,
         "model": effective_model(args),
-        "base_url": args.base_url if args.provider == "deepseek" else "",
+        "base_url": args.base_url if args.provider in ("deepseek", "openai-responses") else "",
         "codex_bin": args.codex_bin if args.provider == "codex" else "",
         "codex_profile": args.codex_profile if args.provider == "codex" else "",
         "codex_sandbox": args.codex_sandbox if args.provider == "codex" else "",

@@ -20,11 +20,14 @@ from pilot import (
     DEFAULT_BASE_URL,
     DEFAULT_CODEX_MODEL,
     DEFAULT_KIMI_BASE_URL,
+    DEFAULT_KIMI_CLI_BIN,
+    DEFAULT_KIMI_CLI_MODEL,
     DEFAULT_KIMI_MODEL,
     DEFAULT_MODEL,
     DEFAULT_MOUNT,
     build_prompt,
-    call_llm,
+    add_token_usage,
+    call_llm_with_usage,
     effective_model,
     extract_json_object,
     load_config,
@@ -52,7 +55,7 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--parallel-calls", type=int, default=2, help="number of concurrent LLM calls per round")
     parser.add_argument("--max-rounds", type=int, default=0, help="0 means run until killed")
     parser.add_argument("--max-total-accepted", type=int, default=0, help="0 means no cap")
-    parser.add_argument("--provider", choices=["deepseek", "kimi", "codex"], default=os.environ.get("LLM_PROVIDER", "deepseek"))
+    parser.add_argument("--provider", choices=["deepseek", "kimi", "kimi-cli", "codex", "grok-cli", "openai-responses"], default=os.environ.get("LLM_PROVIDER", "deepseek"))
     parser.add_argument("--base-url", default=os.environ.get("LLM_BASE_URL", os.environ.get("DEEPSEEK_BASE_URL", "")))
     parser.add_argument("--model", default=os.environ.get("LLM_MODEL", os.environ.get("DEEPSEEK_MODEL", "")))
     parser.add_argument("--temperature", type=float, default=0.2)
@@ -65,10 +68,17 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--codex-profile", default=os.environ.get("CODEX_PROFILE", ""))
     parser.add_argument("--codex-sandbox", choices=["read-only", "workspace-write", "danger-full-access"], default=os.environ.get("CODEX_SANDBOX", "read-only"))
     parser.add_argument("--codex-reasoning-effort", choices=["low", "medium", "high", "xhigh"], default=os.environ.get("CODEX_REASONING_EFFORT", "medium"))
+    parser.add_argument("--kimi-cli-bin", default=os.environ.get("KIMI_CLI_BIN", DEFAULT_KIMI_CLI_BIN))
+    parser.add_argument("--kimi-cli-model", default=os.environ.get("KIMI_CLI_MODEL", DEFAULT_KIMI_CLI_MODEL))
+    parser.add_argument("--grok-cli-bin", default=os.environ.get("GROK_CLI_BIN", "/home/zzzccc/.grok/bin/grok"))
+    parser.add_argument("--grok-cli-model", default=os.environ.get("GROK_CLI_MODEL", "grok-4.5"))
+    parser.add_argument("--grok-reasoning-effort", choices=["low", "medium", "high"], default=os.environ.get("GROK_REASONING_EFFORT", "low"))
+    parser.add_argument("--openai-auth-json", default=os.environ.get("OPENAI_AUTH_JSON", ""))
+    parser.add_argument("--openai-reasoning-effort", choices=["none", "low", "medium", "high", "xhigh"], default=os.environ.get("OPENAI_REASONING_EFFORT", "medium"))
     parser.add_argument("--api-key-file", default=os.environ.get("LLM_API_KEY_FILE", os.environ.get("DEEPSEEK_API_KEY_FILE", "")))
     parser.add_argument("--api-key-index", type=int, default=int(os.environ.get("DEEPSEEK_API_KEY_INDEX", "-1")))
     parser.add_argument("--api-key-alias", default=os.environ.get("DEEPSEEK_API_KEY_ALIAS", ""))
-    parser.add_argument("--checker", default="./tools/syz-llm-candidate-check")
+    parser.add_argument("--checker", default="./bin/syz-llm-candidate-check")
     return parser.parse_args()
 
 
@@ -104,8 +114,19 @@ def save_state(path: pathlib.Path, state: dict[str, Any]) -> None:
 
 
 def api_key_from_args(args: argparse.Namespace) -> tuple[str, str, int, int]:
-    if args.provider == "codex":
-        return "", f"codex:{effective_model(args)}", -1, 0
+    if args.provider in ("codex", "kimi-cli", "grok-cli"):
+        return "", f"{args.provider}:{effective_model(args)}", -1, 0
+    if args.provider == "openai-responses":
+        auth_json = pathlib.Path(args.openai_auth_json).expanduser() if args.openai_auth_json else None
+        key = ""
+        if auth_json:
+            data = json.loads(auth_json.read_text(encoding="utf-8"))
+            key = str(data.get("OPENAI_API_KEY") or "").strip()
+        if not key:
+            key = os.environ.get("OPENAI_API_KEY", "").strip()
+        if not key:
+            raise SystemExit("missing OpenAI API key: set OPENAI_API_KEY or --openai-auth-json")
+        return key, args.api_key_alias or "openai-responses", -1, 1
     key_file = args.api_key_file
     if not key_file and args.provider == "kimi":
         key_file = os.environ.get("KIMI_API_KEY_FILE", "")
@@ -185,7 +206,7 @@ def generate_entry_variants(
     write_text(out_dir / "prompts" / f"{prefix}.system.txt", system + "\n")
     write_text(out_dir / "prompts" / f"{prefix}.user.txt", user + "\n")
     try:
-        content = call_llm(args, api_key, system, user)
+        content, usage = call_llm_with_usage(args, api_key, system, user)
     except Exception as exc:
         error = str(exc)
         return {
@@ -200,11 +221,18 @@ def generate_entry_variants(
     try:
         raw_json = extract_json_object(content)
     except Exception as exc:
-        return {"entry_key": key, "json_failure": str(exc), "api_elapsed_sec": elapsed, "variants": []}
+        return {
+            "entry_key": key,
+            "json_failure": str(exc),
+            "api_elapsed_sec": elapsed,
+            "usage": usage,
+            "variants": [],
+        }
     write_text(out_dir / "raw" / f"{prefix}.json", json.dumps(raw_json, indent=2) + "\n")
     return {
         "entry_key": key,
         "api_elapsed_sec": elapsed,
+        "usage": usage,
         "variants": normalize_variants(raw_json, key),
     }
 
@@ -225,7 +253,17 @@ def run_round(
         "provider": args.provider,
         "model": effective_model(args),
         "thinking": args.thinking,
-        "reasoning_effort": args.reasoning_effort if args.thinking == "enabled" else "",
+        "reasoning_effort": (
+            args.grok_reasoning_effort
+            if args.provider == "grok-cli"
+            else args.codex_reasoning_effort
+            if args.provider == "codex"
+            else args.openai_reasoning_effort
+            if args.provider == "openai-responses"
+            else args.reasoning_effort
+            if args.thinking == "enabled"
+            else ""
+        ),
         "max_tokens": args.max_tokens,
         "eligible_entries": 0,
         "selected": [],
@@ -289,6 +327,8 @@ def run_round(
                 "variants": len(result.get("variants") or []),
                 "status": "ok",
             }
+            if result.get("usage"):
+                call_info["usage"] = result["usage"]
             if result.get("api_failure"):
                 call_info["status"] = "api_failure"
                 if result.get("rate_limited"):
@@ -308,6 +348,10 @@ def run_round(
             processed_keys.append(key)
 
     round_info["variants_returned"] = len(variants)
+    round_usage: dict[str, Any] = {}
+    for call in round_info["api_calls"]:
+        add_token_usage(round_usage, call.get("usage") or {})
+    round_info["usage"] = round_usage
     if variants:
         checker_out = run_checker(args, cfg, variants)
         write_text(out_dir / "checks" / f"round-{round_idx:04d}.json", json.dumps(checker_out, indent=2) + "\n")
@@ -339,11 +383,18 @@ def main() -> int:
         "target": cfg.get("target"),
         "provider": args.provider,
         "model": effective_model(args),
-        "base_url": args.base_url if args.provider == "deepseek" else "",
+        "base_url": args.base_url if args.provider in ("deepseek", "openai-responses") else "",
         "codex_bin": args.codex_bin if args.provider == "codex" else "",
         "codex_profile": args.codex_profile if args.provider == "codex" else "",
         "codex_sandbox": args.codex_sandbox if args.provider == "codex" else "",
         "codex_reasoning_effort": args.codex_reasoning_effort if args.provider == "codex" else "",
+        "kimi_cli_bin": args.kimi_cli_bin if args.provider == "kimi-cli" else "",
+        "kimi_cli_model": args.kimi_cli_model if args.provider == "kimi-cli" else "",
+        "grok_cli_bin": args.grok_cli_bin if args.provider == "grok-cli" else "",
+        "grok_cli_model": args.grok_cli_model if args.provider == "grok-cli" else "",
+        "grok_reasoning_effort": args.grok_reasoning_effort if args.provider == "grok-cli" else "",
+        "openai_auth_json": args.openai_auth_json if args.provider == "openai-responses" else "",
+        "openai_reasoning_effort": args.openai_reasoning_effort if args.provider == "openai-responses" else "",
         "temperature": args.temperature,
         "thinking": args.thinking,
         "reasoning_effort": args.reasoning_effort if args.thinking == "enabled" else "",
@@ -378,6 +429,8 @@ def main() -> int:
         totals["api_failures"] = int(totals.get("api_failures", 0)) + len(info.get("api_failures", []))
         totals["rate_limited"] = int(totals.get("rate_limited", 0)) + int(info.get("rate_limited", 0))
         totals["json_failures"] = int(totals.get("json_failures", 0)) + len(info.get("json_failures", []))
+        total_usage = totals.setdefault("usage", {})
+        add_token_usage(total_usage, info.get("usage") or {})
         save_state(state_path, state)
 
         api_elapsed = [

@@ -1,0 +1,4 @@
+run_id,variant,timestamp,old_threshold_us,new_threshold_us,reason,P,C,Q,Pbar,Cbar,W
+20260821-ptmx-dynamic-kimi-pilot30m-v1,dynamic,2026/08/21 05:05:44,2500,1250,paper-backpressure-shrink,449,0,45,89.8,0.0,45.0
+20260821-ptmx-dynamic-kimi-pilot30m-v1,dynamic,2026/08/21 05:06:14,1250,625,paper-backpressure-shrink,121,0,74,96.04,0.0,74.0
+20260821-ptmx-dynamic-kimi-pilot30m-v1,dynamic,2026/08/21 05:06:44,625,500,paper-backpressure-shrink,305,0,111,137.83,0.0,111.0

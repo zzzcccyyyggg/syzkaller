@@ -1,0 +1,74 @@
+{
+  "generated_at": "2026-08-23T04:00:12.681468+12:00",
+  "runs": [
+    {
+      "run_id": "20260823-ptmx-fullfuzz-fixed100-r2s1-proportional-6fvm12vvm-1g-grokcli45lowx4-2h-v2",
+      "provider": "grok-cli",
+      "usage_quality": "exact-cli-session-recovery",
+      "expected_successful_calls": 101,
+      "recovered_calls": 101,
+      "missing_calls": 0,
+      "usage": {
+        "input_tokens": 2855591,
+        "cache_read_input_tokens": 578048,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 328651,
+        "reasoning_tokens": 240205,
+        "total_tokens": 3184242,
+        "model_calls": 101,
+        "cost_usd": 2.278138176
+      }
+    },
+    {
+      "run_id": "20260823-ptmx-fullfuzz-random100-2000uniform-r2s1-proportional-6fvm12vvm-1g-grokcli45lowx4-2h-v2",
+      "provider": "grok-cli",
+      "usage_quality": "exact-cli-session-recovery",
+      "expected_successful_calls": 261,
+      "recovered_calls": 261,
+      "missing_calls": 0,
+      "usage": {
+        "input_tokens": 7379160,
+        "cache_read_input_tokens": 1522688,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 831473,
+        "reasoning_tokens": 609473,
+        "total_tokens": 8210633,
+        "model_calls": 261,
+        "cost_usd": 5.833920055999998
+      }
+    },
+    {
+      "run_id": "20260822-ptmx-fullfuzz-dynamic100-2000-r2s1-proportional-6fvm12vvm-1g-kimi4-2h-v2",
+      "provider": "kimi-cli",
+      "usage_quality": "exact-cli-session-recovery",
+      "expected_successful_calls": 133,
+      "recovered_calls": 133,
+      "missing_calls": 0,
+      "usage": {
+        "input_tokens": 3277845,
+        "cache_read_input_tokens": 2553600,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 193393,
+        "total_tokens": 3471238,
+        "model_calls": 133
+      }
+    },
+    {
+      "run_id": "20260822-ptmx-fullfuzz-fixed2000-r2s1-proportional-6fvm12vvm-1g-kimi4-2h-v2",
+      "provider": "kimi-cli",
+      "usage_quality": "exact-cli-session-recovery",
+      "expected_successful_calls": 310,
+      "recovered_calls": 310,
+      "missing_calls": 0,
+      "usage": {
+        "input_tokens": 7628338,
+        "cache_read_input_tokens": 5952000,
+        "cache_creation_input_tokens": 0,
+        "output_tokens": 409917,
+        "total_tokens": 8038255,
+        "model_calls": 310
+      }
+    }
+  ],
+  "unsupported_providers": []
+}

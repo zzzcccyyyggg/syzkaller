@@ -214,6 +214,34 @@ def parse_replay_plan(body):
     return plan
 
 
+def parse_validation_metadata(body):
+    """Extract threshold and origin provenance from new validated records."""
+    match = re.search(
+        r'=== VALIDATION METADATA ===\n(.*?)(?==== REPLAY PLAN ===)',
+        body,
+        re.DOTALL,
+    )
+    if not match:
+        return {}
+    result = {}
+    integer_fields = {
+        'AdmissionThresholdUs': 'admission_threshold_us',
+        'CollectionThresholdUs': 'collection_threshold_us',
+        'ObservedTimeDiffNs': 'observed_time_diff_ns',
+    }
+    for field, key in integer_fields.items():
+        value = re.search(rf'^{field}:\s*(\d+)$', match.group(1), re.MULTILINE)
+        if value:
+            result[key] = int(value.group(1))
+    origin = re.search(r'^OriginMatch:\s*(\S+)$', match.group(1), re.MULTILINE)
+    if origin:
+        result['origin_match'] = origin.group(1)
+    expanded = re.search(r'^Expanded:\s*(true|false)$', match.group(1), re.MULTILINE)
+    if expanded:
+        result['expanded'] = expanded.group(1) == 'true'
+    return result
+
+
 def parse_replay_history(body):
     """Extract REPLAY HISTORY section.
     
@@ -288,6 +316,7 @@ def parse_one_record(key, body):
     crash_report = parse_crash_report(body)
     prog0, prog1 = parse_programs(body)
     barrier_info = parse_barrier_info(body)
+    validation_metadata = parse_validation_metadata(body)
     replay_plan = parse_replay_plan(body)
     replay_history = parse_replay_history(body)
     
@@ -302,6 +331,7 @@ def parse_one_record(key, body):
         "callstack_hashes": callstack_hashes,
         "kernel_functions": kernel_functions,
         "callstacks": callstacks,
+        "validation": validation_metadata,
     }
     
     return {

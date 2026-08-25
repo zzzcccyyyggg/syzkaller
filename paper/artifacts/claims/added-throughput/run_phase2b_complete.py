@@ -26,7 +26,7 @@ from datetime import datetime
 from pathlib import Path
 
 
-DDRD_ROOT = Path("/home/zzzccc/BASS/DDRD-syzkaller")
+DDRD_ROOT = Path(__file__).resolve().parents[4]
 SEGFUZZ_ROOT = Path("/home/zzzccc/BASS/segfuzz")
 SEGFUZZ_GO_ROOT = SEGFUZZ_ROOT / "gotools/src/github.com/google/segfuzz"
 ARTIFACT_ROOT = DDRD_ROOT / "paper/artifacts/claims/added-throughput"
