@@ -392,6 +392,9 @@ func (cfg *Config) initUAFValidate() error {
 	if validate.CollectionThresholdFloorUs < 0 {
 		return fmt.Errorf("experimental.uaf_validate.collection_threshold_floor_us must be >= 0")
 	}
+	if validate.ThresholdPriorityInitialUs < 0 {
+		return fmt.Errorf("experimental.uaf_validate.threshold_priority_initial_us must be >= 0")
+	}
 	if validate.TimeoutSeconds <= 0 {
 		validate.TimeoutSeconds = 90
 	}

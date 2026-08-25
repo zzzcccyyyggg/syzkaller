@@ -245,6 +245,7 @@ type Config struct {
 	// Entries are sorted by ascending history count within each scheduling group.
 	PriorityLowHistory                     bool
 	EnableThresholdAwareValidationPriority bool
+	ThresholdPriorityInitialUs             int64
 	CurrentThresholdUs                     func() int64
 
 	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.

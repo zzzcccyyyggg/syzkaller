@@ -80,3 +80,14 @@ func TestFuzzVMStallTimeoutRejectsNegativeValue(t *testing.T) {
 		t.Fatal("expected a negative fuzz VM stall timeout to be rejected")
 	}
 }
+
+func TestThresholdPriorityInitialRejectsNegativeValue(t *testing.T) {
+	cfg := &Config{
+		Experimental: Experimental{
+			UAFValidate: &UAFValidateConfig{ThresholdPriorityInitialUs: -1},
+		},
+	}
+	if err := cfg.initUAFValidate(); err == nil {
+		t.Fatal("expected a negative threshold-priority initial value to be rejected")
+	}
+}

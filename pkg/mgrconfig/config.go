@@ -716,6 +716,9 @@ type UAFValidateConfig struct {
 	// EnableThresholdAwareValidationPriority prioritizes queued validation work
 	// whose observed TimeDiff fits the controller's current threshold.
 	EnableThresholdAwareValidationPriority bool `json:"enable_threshold_aware_validation_priority,omitempty"`
+	// ThresholdPriorityInitialUs is used only until the shared dynamic-threshold
+	// state becomes readable. Zero pauses threshold-aware dispatch during startup.
+	ThresholdPriorityInitialUs int64 `json:"threshold_priority_initial_us,omitempty"`
 
 	// RequireOriginMatch controls whether stable pairs must exist in the original corpus pairs.
 	// When true (default), only runtime-discovered pairs that also exist in entry.Pairs are

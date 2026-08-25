@@ -1007,6 +1007,53 @@ func TestThresholdAwareSchedulerRestoresWideCandidatesWhenThresholdGrows(t *test
 	}
 }
 
+func TestThresholdAwareSchedulerUsesInitialThresholdDuringStartup(t *testing.T) {
+	currentThresholdUs := int64(0)
+	mgr := NewStageManager(Config{
+		EnableThresholdAwareValidationPriority: true,
+		ThresholdPriorityInitialUs:             1_000,
+		CurrentThresholdUs: func() int64 {
+			return currentThresholdUs
+		},
+	}, nil)
+	if got := mgr.priorityThresholdUs(); got != 1_000 {
+		t.Fatalf("startup threshold=%d, want configured initial 1000", got)
+	}
+	currentThresholdUs = 50
+	if got := mgr.priorityThresholdUs(); got != 50 {
+		t.Fatalf("live threshold=%d, want 50", got)
+	}
+}
+
+func TestThresholdAwareSchedulerPausesWithoutAnyThreshold(t *testing.T) {
+	mgr := NewStageManager(Config{
+		MaxConcurrent:                          1,
+		EnableVarNameScheduling:                true,
+		EnableThresholdAwareValidationPriority: true,
+		CurrentThresholdUs: func() int64 {
+			return 0
+		},
+	}, nil)
+	pair := ddrd.MayUAFPair{
+		FreeAccessName: 0x10, UseAccessName: 0x20,
+		FreeCallStack: 0x30, UseCallStack: 0x40, TimeDiff: 50_000,
+	}
+	pairCopy := pair
+	if !mgr.Enqueue(&fuzzer.UAFCorpusEntry{
+		PairBasicInfo:    pair,
+		Pairs:            []*ddrd.MayUAFPair{&pairCopy},
+		ValidateQueueKey: "startup", ValidatePairKey: "startup", CorpusRecordID: "startup",
+	}) {
+		t.Fatal("failed to enqueue startup task")
+	}
+	mgr.mu.Lock()
+	task := mgr.pickNextVarNameTask()
+	mgr.mu.Unlock()
+	if task != nil {
+		t.Fatalf("scheduled task without live or initial threshold: %+v", task)
+	}
+}
+
 type flakyExecutor struct {
 	mu    sync.Mutex
 	runs  int

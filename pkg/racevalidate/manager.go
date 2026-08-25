@@ -1304,9 +1304,9 @@ type thresholdTaskPriority struct {
 }
 
 func (sm *StageManager) pickThresholdAwareTaskLocked() *validationTask {
-	thresholdUs := int64(0)
-	if sm.cfg.CurrentThresholdUs != nil {
-		thresholdUs = sm.cfg.CurrentThresholdUs()
+	thresholdUs := sm.priorityThresholdUs()
+	if thresholdUs <= 0 {
+		return nil
 	}
 	var best *thresholdTaskPriority
 	for entryKey, task := range sm.entryStore {
@@ -1329,6 +1329,17 @@ func (sm *StageManager) pickThresholdAwareTaskLocked() *validationTask {
 	log.Logf(0, "uafvalidate: threshold-priority key=%s tier=%d time_diff_ns=%d threshold_us=%d",
 		best.entryKey, best.tier, best.timeDiffNs, thresholdUs)
 	return sm.activateVarNameTaskLocked(best.entryKey, fromVN)
+}
+
+func (sm *StageManager) priorityThresholdUs() int64 {
+	thresholdUs := int64(0)
+	if sm.cfg.CurrentThresholdUs != nil {
+		thresholdUs = sm.cfg.CurrentThresholdUs()
+	}
+	if thresholdUs <= 0 {
+		thresholdUs = sm.cfg.ThresholdPriorityInitialUs
+	}
+	return thresholdUs
 }
 
 func (sm *StageManager) thresholdPriorityLocked(entryKey string, task *validationTask,

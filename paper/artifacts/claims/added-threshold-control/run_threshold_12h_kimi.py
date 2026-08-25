@@ -526,6 +526,11 @@ class VariantRunner:
             }
         )
         uaf = validate_exp.setdefault("uaf_validate", {})
+        priority_initial_threshold_us = (
+            1000 if self.args.variant not in ("fixed", "fixed-1000")
+            else 1000 if self.args.variant == "fixed-1000"
+            else self.args.fixed_threshold_us
+        )
         uaf.update(
             {
                 "max_concurrent": self.args.validate_vm_count,
@@ -571,6 +576,7 @@ class VariantRunner:
                 "max_stable_pairs_per_origin": self.args.max_stable_pairs_per_origin,
                 "origin_match_mode": "varname",
                 "continue_after_hb": True,
+                "threshold_priority_initial_us": priority_initial_threshold_us,
             }
         )
         if self.args.max_concurrent_per_varname > 0:
@@ -683,6 +689,11 @@ class VariantRunner:
                 "max_concurrent_per_varname": self.args.max_concurrent_per_varname,
                 "enable_threshold_aware_validation_priority": (
                     self.args.enable_threshold_aware_validation_priority
+                ),
+                "threshold_priority_initial_us": (
+                    1000 if self.args.variant not in ("fixed", "fixed-1000")
+                    else 1000 if self.args.variant == "fixed-1000"
+                    else self.args.fixed_threshold_us
                 ),
                 "collection_threshold_floor_us": self.args.collection_threshold_floor_us,
                 "enable_collection_miss_backoff": self.args.enable_collection_miss_backoff,
