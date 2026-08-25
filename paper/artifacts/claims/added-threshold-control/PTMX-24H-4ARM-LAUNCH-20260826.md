@@ -53,3 +53,32 @@ syzkaller revision stamp, so all four fuzz managers correctly rejected the RPC
 connection. The failed directories remain marked `failed` for auditability and
 must not be included in result aggregation. The matching binary pair was built
 and all formal arms were restarted from clean `v2` run IDs.
+
+## V2 early cutoff and V3 repeat
+
+The user requested an immediate independent repeat after the first 1 hour 50
+minutes showed two Fixed-50 target validations and none in the other three
+arms. The purpose is to determine whether the PTMX ordering is dominated by
+the stochastic fuzz, replay-history, and LLM paths before changing the
+algorithm.
+
+All four `v2` arms were stopped with SIGINT between
+`2026-08-26 04:04:19 +12:00` and `04:05:00`. Their state files are marked
+`interrupted`; all DBs, reports, logs, and token records remain intact. Only
+the reconstructible `validate-vm-*.qcow2` files were removed. Final V2 token
+accounting at cutoff was:
+
+```text
+arm          model calls   accepted   API failures   total tokens
+Dynamic               55        108             10        571671
+Random                67        129              9        712878
+Fixed-50              35         68              6        369203
+Fixed-10000           61        120             13        677923
+```
+
+The replacement matrix uses run prefix
+`20260826-local-ptmx-formal24h-v3`. It started at approximately
+`2026-08-26 04:06:15 +12:00` and has an expected cutoff of
+`2026-08-27 04:06:15 +12:00`. V3 uses the same binaries, hashes, initial corpus,
+thresholds, CPU sets, VM counts, LLM model, and validation policy as V2. No
+TimeDiff retry or other algorithm change was introduced.
