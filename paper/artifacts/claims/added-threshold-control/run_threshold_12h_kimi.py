@@ -89,6 +89,22 @@ MODULE_SPECS: dict[str, dict[str, Any]] = {
             "images/f2fs-2G.raw": "875f49787b33c9dec87ff4ef31cf53074ff47392b1141a293be15dc996977598",
         },
     },
+    "floppy": {
+        "corpus": "exp/floppy/workdir/tuned-prepared-corpus.db",
+        "corpus_sha256": "774e1c4b0b35c839d32d90c5410b274146c2ea4d2298b5dab1e0ed6f32a2ed6e",
+        "syscalls": "exp/floppy/syscalls.txt",
+        "syscalls_sha256": "40a17aa031036ab39a25f2a5bc3f3bb4a94382affa0d3fe3bac1e27fcb08af18",
+        "syscall_count": 38,
+        "required_syscalls": ("syz_open_dev$floppy",),
+        "overrides": "exp/floppy/overrides.json",
+        "overrides_sha256": "892a4390b00827af9c460c883f1deeb569b4764a5de7f9f410eeaa9ecaaaa918",
+        "bzimage_sha256": "e46770010a09d23555ac0ac74d03ddf1e8776e92bbeec0f07edb4f8680e7846a",
+        "vmlinux_sha256": "a8b8e4f0bc90032750ba625a8746722240afbe262c4b0c5c090d77ee1cbbe6eb",
+        "qemu_args": "-enable-kvm -drive file={root}/images/floppy.qcow2,format=qcow2,if=floppy",
+        "extra_artifacts": {
+            "images/floppy.qcow2": "f2f6f56a6a3921f7ccf85365672a8fd646631257eff9475928a6419f44d64259",
+        },
+    },
 }
 
 
