@@ -101,6 +101,7 @@ def arm_command(args: argparse.Namespace, arm: Arm, run_id: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("prepare", "launch"), required=True)
+    parser.add_argument("--module", choices=("all", "floppy", "bt-stack"), default="all")
     parser.add_argument("--run-prefix", default="20260825-remote-fbt90-pervm-v1")
     parser.add_argument("--manager-bin", default=str(ROOT / "bin/syz-manager-per-vm-watchdog"))
     parser.add_argument("--openai-base-url", default="https://deepkey.top/v1")
@@ -108,6 +109,8 @@ def main() -> int:
     args = parser.parse_args()
 
     for arm in ARMS:
+        if args.module != "all" and arm.module != args.module:
+            continue
         arm_name = f"{arm.module}-{arm.label}"
         suffix = "-config-audit" if args.mode == "prepare" else ""
         run_id = f"{args.run_prefix}-{arm_name}{suffix}"
