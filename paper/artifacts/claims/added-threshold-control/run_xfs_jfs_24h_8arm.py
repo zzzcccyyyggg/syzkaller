@@ -100,11 +100,11 @@ def arm_command(args: argparse.Namespace, arm: Arm, run_id: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("prepare", "launch"), required=True)
-    parser.add_argument("--run-prefix", default="20260826-remote2-xfs-jfs-formal24h-v1")
+    parser.add_argument("--run-prefix", default="20260826-remote2-xfs-jfs-formal24h-v2")
     parser.add_argument("--duration", type=int, default=86400)
     parser.add_argument(
         "--manager-bin",
-        default=str(ROOT / "bin/syz-manager-local-formal-c30d8ea60"),
+        default=str(ROOT / "bin/syz-manager-dispatch-watchdog-a9b32edf3"),
     )
     parser.add_argument("--http-base-port", type=int, default=61000)
     parser.add_argument("--openai-base-url", default="https://deepkey.top/v1")
