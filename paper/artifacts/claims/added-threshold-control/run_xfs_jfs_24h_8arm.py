@@ -107,6 +107,11 @@ def main() -> int:
         default=str(ROOT / "bin/syz-manager-stall-terminal-1c3300367"),
     )
     parser.add_argument("--http-base-port", type=int, default=61000)
+    parser.add_argument(
+        "--arm",
+        choices=("all", *(f"{arm.module}-{arm.label}" for arm in ARMS)),
+        default="all",
+    )
     parser.add_argument("--openai-base-url", default="https://deepkey.top/v1")
     parser.add_argument("--openai-auth-json", default=str(Path.home() / ".codex-zzzccc/auth.json"))
     args = parser.parse_args()
@@ -115,6 +120,9 @@ def main() -> int:
         parser.error("--duration must be positive")
 
     for arm in ARMS:
+        arm_name = f"{arm.module}-{arm.label}"
+        if args.arm != "all" and args.arm != arm_name:
+            continue
         suffix = "-config-audit" if args.mode == "prepare" else ""
         run_id = f"{args.run_prefix}-{arm.module}-{arm.label}{suffix}"
         cmd = arm_command(args, arm, run_id)
