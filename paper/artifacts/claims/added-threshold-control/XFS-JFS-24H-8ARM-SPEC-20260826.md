@@ -14,9 +14,9 @@ memory/VM          = 1 GiB
 LLM                = GPT-5.4 direct Responses API, medium reasoning
 LLM budget/arm     = 2 entries/round, 2 variants/entry, 1 parallel call
 threshold range    = 50-10000us, initial 1000us
-source commit      = a9b32edf342d23cb0406c57d954cc17b67c15c38
-manager SHA256     = 410ee12115ac04912e87e2ca8944112a2cc1e02042613eca85dccf4dd78df353
-executor SHA256    = f1cdcb5c86775872a435afd9cdbae1f34369ffe339a3f559ea7239a91ab77cda
+source commit      = 1c3300367edb937f37f7fa4a6771b41092468e2a
+manager SHA256     = 8fd6a5c2e9d81e675d0e3aee88b3d0b4e3777128034b0ec6d96f8cca5c60726b
+executor SHA256    = 287ba03a37f0edbc2151507463fe91892360e0280bd101b30f960af10508bc04
 ```
 
 The eight arms use host vCPUs `0-31` in four-vCPU blocks. LLM producers use
@@ -37,7 +37,14 @@ completed that handshake, so it saw no in-flight request and did not promptly
 restart the affected VM.
 
 Commit `a9b32edf3` changes the watchdog to count requests from dispatch until
-their final result. The focused watchdog tests passed 100 repetitions, and the
-runner/barrier test selection passed. V2 starts from fresh workdirs with a
-manager and executor carrying the same revision stamp. No threshold,
-validation, delay, corpus, model, or resource parameter changed.
+their final result. V2 confirmed that the watchdog restarted each stuck XFS VM
+after 120 seconds, but shutdown still classified watchdog-cancelled requests as
+`Restarted`, so the queue retried the same bad barrier input. V2 is therefore
+also excluded.
+
+Commit `1c3300367` marks watchdog-cancelled requests as `Hanged`, which is a
+terminal queue result, while real crashes retain `Crashed` behavior. The
+focused watchdog tests passed 100 repetitions, and the runner/barrier test
+selection passed. V3 starts from fresh workdirs with a manager and executor
+carrying the same revision stamp. No threshold, validation, delay, corpus,
+model, or resource parameter changed.
