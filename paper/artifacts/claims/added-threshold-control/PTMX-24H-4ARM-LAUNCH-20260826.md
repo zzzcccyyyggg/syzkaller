@@ -82,3 +82,18 @@ The replacement matrix uses run prefix
 `2026-08-27 04:06:15 +12:00`. V3 uses the same binaries, hashes, initial corpus,
 thresholds, CPU sets, VM counts, LLM model, and validation policy as V2. No
 TimeDiff retry or other algorithm change was introduced.
+
+## V3 external binary mutation failure
+
+At approximately `2026-08-26 15:16:52 +12:00`, all four V3 fuzz managers
+terminated after detecting that their shared
+`bin/linux_amd64/syz-executor` had been modified while they were running. The
+file was rebuilt locally while preparing a watchdog fix for the isolated
+remote XFS/JFS deployment. This was an experiment-orchestration error, not a
+PTMX, threshold-controller, kernel, or VM failure.
+
+V3 preserved approximately 11 hours of corpus, race, validation, LLM, and
+token data, but it is not a completed 24-hour result. All DBs and logs remain
+available; only reconstructible validation qcow2 images were removed after
+termination. Future local builds must use a separate worktree/output tree and
+must never replace binaries referenced by a running manager.
