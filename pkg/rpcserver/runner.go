@@ -81,6 +81,7 @@ type Runner struct {
 	inflightExecs    atomic.Int64
 	outstandingExecs atomic.Int64
 	lastProgress     atomic.Int64
+	stallTriggered   atomic.Bool
 
 	barrierGroups      map[int64]*barrierGroup
 	nextBarrierGroupID int64
@@ -534,6 +535,7 @@ func (runner *Runner) startStallWatchdog() func() {
 				}
 				log.Logf(0, "runner %d: no execution result for %s with %d outstanding requests; restarting VM",
 					runner.id, runner.stallTimeout, runner.outstandingExecs.Load())
+				runner.stallTriggered.Store(true)
 				runner.mu.Lock()
 				conn := runner.conn
 				runner.mu.Unlock()
@@ -1081,6 +1083,13 @@ func (runner *Runner) Stop() {
 	}
 }
 
+func (runner *Runner) defaultShutdownStatus() queue.Status {
+	if runner.stallTriggered.Load() {
+		return queue.Hanged
+	}
+	return queue.Restarted
+}
+
 func (runner *Runner) Shutdown(crashed bool, extraExecs ...report.ExecutorInfo) []ExecRecord {
 	runner.mu.Lock()
 	runner.stopped = true
@@ -1113,6 +1122,7 @@ func (runner *Runner) Shutdown(crashed bool, extraExecs ...report.ExecutorInfo) 
 	type shutdownState struct {
 		status queue.Status
 	}
+	defaultStatus := runner.defaultShutdownStatus()
 	pending := make(map[*queue.Request]*shutdownState)
 	for id, ctx := range runner.requests {
 		if ctx == nil || ctx.req == nil {
@@ -1120,7 +1130,7 @@ func (runner *Runner) Shutdown(crashed bool, extraExecs ...report.ExecutorInfo) 
 		}
 		state := pending[ctx.req]
 		if state == nil {
-			state = &shutdownState{status: queue.Restarted}
+			state = &shutdownState{status: defaultStatus}
 			pending[ctx.req] = state
 		}
 		if crashed && runner.executing[id] {

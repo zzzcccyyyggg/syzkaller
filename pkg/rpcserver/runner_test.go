@@ -51,6 +51,15 @@ func TestRunnerExecutionStallBeforeExecutingHandshake(t *testing.T) {
 	}
 }
 
+func TestRunnerStallUsesNonRetryableShutdownStatus(t *testing.T) {
+	runner := &Runner{}
+	runner.stallTriggered.Store(true)
+
+	if got := runner.defaultShutdownStatus(); got != queue.Hanged {
+		t.Fatalf("watchdog shutdown status=%v, want %v", got, queue.Hanged)
+	}
+}
+
 func TestRunnerCallStatsCountAttemptsAndResultFlags(t *testing.T) {
 	p := parseRunnerTestProg(t, "syz_test_fuzzer1()\nsyz_test_fuzzer1()\nsyz_test_fuzzer1()")
 	stats := NewStats()
