@@ -122,6 +122,22 @@ MODULE_SPECS: dict[str, dict[str, Any]] = {
             "images/jfs-2G.qcow2": "079aeb847927c76b8c0d5b186ba92192e2103477087d667455bc291c02d054aa",
         },
     },
+    "btrfs": {
+        "corpus": "exp/btrfs/workdir/tuned-prepared-corpus.db",
+        "corpus_sha256": "b5108eba4cbd67335636b65ffcfd9593647be46b9e149c271fcb6b705ad569ec",
+        "syscalls": "exp/btrfs/syscalls.txt",
+        "syscalls_sha256": "802eafbfc362953445ca08529a389480b64540ea00bf6119c2268de8d3348a6c",
+        "syscall_count": 126,
+        "required_syscalls": ("ioctl$BTRFS_IOC_SNAP_CREATE",),
+        "overrides": "exp/btrfs/overrides.json",
+        "overrides_sha256": "0ce94cc38f0a9f5949ff2b80d43470c29212951e2b66fe7003f9ad8ce8853885",
+        "bzimage_sha256": "8e382ff68e6a8a2b43772ff30a78e0f632058cf3b9cbceda01feed011a631616",
+        "vmlinux_sha256": "0714aa0deda06522aafe064dce946c994b29700eb9059c8a15718949dc05ef39",
+        "qemu_args": "-enable-kvm -hdb {root}/images/btrfs-2G.qcow2",
+        "extra_artifacts": {
+            "images/btrfs-2G.qcow2": "d00657587d38a004a1f12ac81b7cfc11ae00dea48bad8c27746d00a512c88f3b",
+        },
+    },
     "floppy": {
         "corpus": "exp/floppy/workdir/tuned-prepared-corpus.db",
         "corpus_sha256": "774e1c4b0b35c839d32d90c5410b274146c2ea4d2298b5dab1e0ed6f32a2ed6e",
