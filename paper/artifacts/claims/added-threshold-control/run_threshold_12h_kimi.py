@@ -30,6 +30,7 @@ QEMU_SHA256 = "7d1e85a29e09c49f6a1c60a18713d80a72ef3b8932c4183cc100bce3a01fa64e"
 KERNEL_ACCESS_DELAY_MULTIPLIER = 10
 COMMON_FROZEN_ARTIFACT_SHA256 = {
     ROOT / "bin/syz-llm-candidate-check": "501f0ac48f2bb49095d577d02e049c9931adab7186d150354f521e334580a3c0",
+    ROOT / "bin/syz-uaf-corpus": "9cf22c4992022ac6ead45d2dff9815ab88f0b522a7e66b1ef50a7fc160c43be3",
     ROOT / "scripts/generate_config.py": "00e595ddd4cd5902cd68c809d191fe168125071542374b803f38c6c827f5be80",
     ROOT / "tools/llm-mutate-pilot/pilot.py": "9a9552460e0701ce48c11b1cfbbd703f52adc7e14958d82c074e26b045a3bf71",
     ROOT / "tools/llm-mutate-pilot/continuous.py": "7e746e9944bdbab18451130b02138eb5c3db34aa58cc61255ebe5424dd627763",
@@ -338,6 +339,7 @@ class VariantRunner:
             KERNEL_BUILD / ".config",
             ROOT / "tools/llm-mutate-pilot/continuous.py",
             ROOT / "bin/syz-llm-candidate-check",
+            ROOT / "bin/syz-uaf-corpus",
         ]
         if not self.args.skip_kimi and self.args.llm_provider == "kimi-cli":
             required.append(Path(self.args.kimi_cli_bin))

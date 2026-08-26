@@ -100,7 +100,7 @@ def arm_command(args: argparse.Namespace, arm: Arm, run_id: str) -> list[str]:
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--mode", choices=("prepare", "launch"), required=True)
-    parser.add_argument("--run-prefix", default="20260826-remote2-xfs-jfs-formal24h-v3")
+    parser.add_argument("--run-prefix", default="20260826-remote2-xfs-jfs-formal24h-v4")
     parser.add_argument("--duration", type=int, default=86400)
     parser.add_argument(
         "--manager-bin",

@@ -48,3 +48,11 @@ focused watchdog tests passed 100 repetitions, and the runner/barrier test
 selection passed. V3 starts from fresh workdirs with a manager and executor
 carrying the same revision stamp. No threshold, validation, delay, corpus,
 model, or resource parameter changed.
+
+V3 validated the terminal watchdog behavior, but the isolated deployment was
+missing the frozen `bin/syz-uaf-corpus` reader used by the LLM producer. Fuzz
+and validation progressed, while LLM rounds reported `uaf_corpus_error` and
+made no model calls. The reader (SHA256
+`9cf22c4992022ac6ead45d2dff9815ab88f0b522a7e66b1ef50a7fc160c43be3`) is
+now part of the mandatory frozen-artifact preflight. V3 is excluded; V4 is the
+first result-bearing formal run.
