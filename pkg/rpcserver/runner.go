@@ -55,31 +55,32 @@ func ukcDelayMicros(pair *ddrd.MayUAFPair) int32 {
 }
 
 type Runner struct {
-	id            int
-	source        *queue.Distributor
-	procs         int
-	cover         bool
-	coverEdges    bool
-	filterSignal  bool
-	debug         bool
-	debugTimeouts bool
-	sysTarget     *targets.Target
-	stats         *runnerStats
-	finished      chan bool
-	injectExec    chan<- bool
-	infoc         chan chan []byte
-	canonicalizer *cover.CanonicalizerInstance
-	nextRequestID int64
-	requests      map[int64]*requestContext
-	executing     map[int64]bool
-	hanged        map[int64]bool
-	lastExec      *LastExecuting
-	updInfo       dispatcher.UpdateInfo
-	resultCh      chan error
-	stalledCh     chan struct{}
-	stallTimeout  time.Duration
-	inflightExecs atomic.Int64
-	lastProgress  atomic.Int64
+	id               int
+	source           *queue.Distributor
+	procs            int
+	cover            bool
+	coverEdges       bool
+	filterSignal     bool
+	debug            bool
+	debugTimeouts    bool
+	sysTarget        *targets.Target
+	stats            *runnerStats
+	finished         chan bool
+	injectExec       chan<- bool
+	infoc            chan chan []byte
+	canonicalizer    *cover.CanonicalizerInstance
+	nextRequestID    int64
+	requests         map[int64]*requestContext
+	executing        map[int64]bool
+	hanged           map[int64]bool
+	lastExec         *LastExecuting
+	updInfo          dispatcher.UpdateInfo
+	resultCh         chan error
+	stalledCh        chan struct{}
+	stallTimeout     time.Duration
+	inflightExecs    atomic.Int64
+	outstandingExecs atomic.Int64
+	lastProgress     atomic.Int64
 
 	barrierGroups      map[int64]*barrierGroup
 	nextBarrierGroupID int64
@@ -424,6 +425,7 @@ func (runner *Runner) handleExecResult(msg *flatrpc.ExecResult) error {
 		return fmt.Errorf("can't find executed request %v", msg.Id)
 	}
 	delete(runner.requests, msg.Id)
+	runner.outstandingExecs.Add(-1)
 	if runner.executing[msg.Id] {
 		runner.inflightExecs.Add(-1)
 	}
@@ -530,8 +532,8 @@ func (runner *Runner) startStallWatchdog() func() {
 				if !runner.executionStalled(now) {
 					continue
 				}
-				log.Logf(0, "runner %d: no execution result for %s with %d in-flight requests; restarting VM",
-					runner.id, runner.stallTimeout, runner.inflightExecs.Load())
+				log.Logf(0, "runner %d: no execution result for %s with %d outstanding requests; restarting VM",
+					runner.id, runner.stallTimeout, runner.outstandingExecs.Load())
 				runner.mu.Lock()
 				conn := runner.conn
 				runner.mu.Unlock()
@@ -553,7 +555,7 @@ func (runner *Runner) startStallWatchdog() func() {
 }
 
 func (runner *Runner) executionStalled(now time.Duration) bool {
-	if runner.stallTimeout <= 0 || runner.inflightExecs.Load() <= 0 {
+	if runner.stallTimeout <= 0 || runner.outstandingExecs.Load() <= 0 {
 		return false
 	}
 	last := time.Duration(runner.lastProgress.Load())
@@ -625,8 +627,11 @@ func (runner *Runner) dispatchSingle(ctx *requestContext) error {
 		return err
 	}
 	runner.requests[id] = ctx
+	runner.outstandingExecs.Add(1)
+	runner.lastProgress.Store(int64(osutil.MonotonicNano()))
 	if err := flatrpc.Send(runner.conn, msg); err != nil {
 		delete(runner.requests, id)
+		runner.outstandingExecs.Add(-1)
 		return err
 	}
 	return nil
@@ -714,8 +719,11 @@ func (runner *Runner) sendBarrierRequest(req *queue.Request) error {
 	}
 	for _, item := range preparedReqs {
 		runner.requests[item.id] = item.ctx
+		runner.outstandingExecs.Add(1)
+		runner.lastProgress.Store(int64(osutil.MonotonicNano()))
 		if err := flatrpc.Send(runner.conn, item.msg); err != nil {
 			delete(runner.requests, item.id)
+			runner.outstandingExecs.Add(-1)
 			delete(runner.barrierGroups, group.id)
 			return err
 		}

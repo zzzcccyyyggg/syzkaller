@@ -19,7 +19,7 @@ import (
 func TestRunnerExecutionStallTracksPerVMProgress(t *testing.T) {
 	runner := &Runner{stallTimeout: 2 * time.Minute}
 	start := 10 * time.Minute
-	runner.inflightExecs.Store(2)
+	runner.outstandingExecs.Store(2)
 	runner.lastProgress.Store(int64(start))
 
 	if runner.executionStalled(start + 2*time.Minute - time.Nanosecond) {
@@ -33,9 +33,21 @@ func TestRunnerExecutionStallTracksPerVMProgress(t *testing.T) {
 	if runner.executionStalled(start + 2*time.Minute) {
 		t.Fatal("recent VM progress did not reset the stall window")
 	}
-	runner.inflightExecs.Store(0)
+	runner.outstandingExecs.Store(0)
 	if runner.executionStalled(start + 10*time.Minute) {
-		t.Fatal("idle VM without in-flight executions was reported stalled")
+		t.Fatal("idle VM without outstanding executions was reported stalled")
+	}
+}
+
+func TestRunnerExecutionStallBeforeExecutingHandshake(t *testing.T) {
+	runner := &Runner{stallTimeout: 2 * time.Minute}
+	start := 10 * time.Minute
+	runner.outstandingExecs.Store(1)
+	runner.inflightExecs.Store(0)
+	runner.lastProgress.Store(int64(start))
+
+	if !runner.executionStalled(start + 2*time.Minute) {
+		t.Fatal("dispatched request without an executing handshake was not reported stalled")
 	}
 }
 
